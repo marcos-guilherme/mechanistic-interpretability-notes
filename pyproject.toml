@@ -1,0 +1,33 @@
+[project]
+name = "ioi-replication"
+version = "0.1.0"
+description = "Incremental replication of the GPT-2 Small IOI circuit analysis."
+readme = "README.md"
+authors = [
+    { name = "Marcos G. D. O. Alves", email = "134388665+marcos-guilherme@users.noreply.github.com" }
+]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "ipykernel>=7.4.0",
+    "jupyterlab>=4.6.6",
+    "plotly>=7.1.0",
+    "torch>=2.15.0",
+    "transformer-lens==4.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
