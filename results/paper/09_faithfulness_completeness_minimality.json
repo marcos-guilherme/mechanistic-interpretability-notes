@@ -6113,18 +6113,19 @@
     }
   ],
   "traceability": {
-    "source_commit": "a2bb0ea2a01390a990e662ac01a5366699f81ce7",
-    "git_dirty": false,
-    "source_sha256": {
-      "validation": "e5adbac9796b0a3b9bd340d178d6152e6f06f36d2d1e0f7e6b1d0edfcbc47827",
-      "ablation": "6fe5a64e8883ea1f850d56eea5bbe094fba5a79001819b2502416d4a5c4c48a2",
-      "circuit": "63cb16e4c1506978377db74cc74d670e0040212f1e96c6c9ebfb385b9406a470",
-      "runtime": "7a2db960fe6a1d39a6eb7ef1a7a4f2ac8695a74834284ac9b6fdd7dee42cc708",
-      "notebook": "ea34abf6e752e2acf59c090292c83b0b5e999bc8369c3c91776e06932f0f8b6b"
+    "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+    "git_dirty": true,
+    "hash_method": "git rev-parse <source_commit>:<path> (normalized Git blob IDs)",
+    "source_blobs": {
+      "validation": "7173739fcdbad20c5fd3efca39565b4d51c438c2",
+      "ablation": "7f8fb87b05935f2823eec2030c61fb9241e9d03e",
+      "circuit": "5130b1c11af01e135f7cbaf7ba7556f53c076e58",
+      "runtime": "6815d71ebca30bd9d324d1e527306bcb653c0d05",
+      "notebook": "f6646f220fd346d586e60a3bb37950b54c59abde"
     },
     "torch_version": "2.15.0+cu132",
     "transformer_lens_version": "4.3.0",
-    "timestamp_utc": "2026-11-10T06:53:21.662821Z",
+    "timestamp_utc": "2026-11-10T07:53:17.057543Z",
     "cached_unique_evaluations": 1562,
     "primary_sources": {
       "paper": "https://arxiv.org/abs/2211.00593",

@@ -1,0 +1,66 @@
+{
+  "device": {
+    "cuda_version": "13.2",
+    "name": "NVIDIA GeForce RTX 3050",
+    "torch_version": "2.15.0+cu132",
+    "type": "cuda"
+  },
+  "finished_at_utc": "2026-11-10T07:53:58.448170Z",
+  "initial_git_dirty": false,
+  "kernel": "ioi-replication",
+  "notebooks": [
+    {
+      "duration_seconds": 25.571,
+      "exit_status": "success",
+      "finished_at_utc": "2026-11-10T07:37:41.143233Z",
+      "notebook": "notebooks/05_paper_dataset_and_baseline.ipynb",
+      "return_code": 0,
+      "started_at_utc": "2026-11-10T07:37:15.573534Z"
+    },
+    {
+      "duration_seconds": 69.102,
+      "exit_status": "success",
+      "finished_at_utc": "2026-11-10T07:38:50.246805Z",
+      "notebook": "notebooks/06_circuit_discovery.ipynb",
+      "return_code": 0,
+      "started_at_utc": "2026-11-10T07:37:41.146233Z"
+    },
+    {
+      "duration_seconds": 43.622,
+      "exit_status": "success",
+      "finished_at_utc": "2026-11-10T07:39:33.872788Z",
+      "notebook": "notebooks/07_path_patching.ipynb",
+      "return_code": 0,
+      "started_at_utc": "2026-11-10T07:38:50.251812Z"
+    },
+    {
+      "duration_seconds": 31.86,
+      "exit_status": "success",
+      "finished_at_utc": "2026-11-10T07:40:05.736136Z",
+      "notebook": "notebooks/08_backup_name_movers.ipynb",
+      "return_code": 0,
+      "started_at_utc": "2026-11-10T07:39:33.876792Z"
+    },
+    {
+      "duration_seconds": 797.241,
+      "exit_status": "success",
+      "finished_at_utc": "2026-11-10T07:53:22.966700Z",
+      "notebook": "notebooks/09_faithfulness_completeness_minimality.ipynb",
+      "return_code": 0,
+      "started_at_utc": "2026-11-10T07:40:05.739138Z"
+    },
+    {
+      "duration_seconds": 35.468,
+      "exit_status": "success",
+      "finished_at_utc": "2026-11-10T07:53:58.437169Z",
+      "notebook": "notebooks/10_adversarial_examples.ipynb",
+      "return_code": 0,
+      "started_at_utc": "2026-11-10T07:53:22.969704Z"
+    }
+  ],
+  "schema_version": 1,
+  "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+  "started_at_utc": "2026-11-10T07:37:15.570534Z",
+  "status": "success",
+  "timeout_seconds": 7200
+}

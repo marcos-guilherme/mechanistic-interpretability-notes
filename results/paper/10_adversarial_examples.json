@@ -1,9 +1,19 @@
 {
   "comparison_to_paper": {
+    "baseline": {
+      "io_probability": -0.004104783535003653,
+      "logit_difference_io_minus_s": -0.279429244995117,
+      "s_wins_error_rate": -0.000999999947845936
+    },
     "paper_io_single": {
       "io_probability": -0.03756593227386473,
       "logit_difference_io_minus_s": -0.2838256764411926,
       "s_wins_error_rate": 0.07600000238418578
+    },
+    "paper_s_control": {
+      "io_probability": -0.02831413984298703,
+      "logit_difference_io_minus_s": -0.22941793441772473,
+      "s_wins_error_rate": -0.0019999999050050975
     }
   },
   "config": {
@@ -19,14 +29,14 @@
     "attack_seeds": {
       "advex_double_io": 512,
       "paper_io_single": 511,
-      "paper_s_control": 511
+      "paper_s_control": 513
     },
     "base_seed": 510,
     "batch_size": 16,
     "dataset_sha256": {
       "advex_double_io": "1392ce6879da96ee905830e6a5ea27216e774c0e2f0b576b73d0435f24270d96",
       "paper_io_single": "e3974d08f3b00ec6c24984d09ff8f8f028e507ad160e0b1801daaad95dcd003e",
-      "paper_s_control": "b27aa0529dcc5ceb8cfc58cd36788bdc201ea28460315efc2d6301f7c15d73da"
+      "paper_s_control": "d25a8dd7540fd039dd713ce14a0a8980e5a343e0f3f0f5d6a72e329299101118"
     },
     "device": "cuda",
     "dtype": "float32",
@@ -59,7 +69,7 @@
   "methodology": {
     "advex_source_inconsistency": "advex.py obtains punct_idx from an IOIDataset without BOS, while show_tokens calls model.to_tokens with historical BOS-prefixed behavior, mixing token coordinate systems.",
     "causal_limit": "Behavior alone does not prove mediation by Duplicate Token and S-Inhibition heads.",
-    "comparison_scope": "Figure 8 targets are compared only with paper_io_single; advex_double_io is reported as a separate historical extension.",
+    "comparison_scope": "Figure 8 targets are compared with baseline, paper_io_single, and paper_s_control; advex_double_io is a separate historical extension.",
     "differences": [
       "Names are filtered to GPT-2 single-token names; the historical generator did not validate this explicitly.",
       "Base and attack-template RNGs use independent recorded seeds.",
@@ -257,78 +267,78 @@
       "delta_from_baseline": {
         "io_probability": {
           "ci95": [
-            0.06539269101483584,
-            0.08393178570406674
+            0.06668983507677914,
+            0.08489143740609287
           ],
           "ci_method": "normal_paired_1.96_se",
-          "mean": 0.0746622383594513,
-          "standard_error": 0.004729447794822995
+          "mean": 0.075790636241436,
+          "standard_error": 0.004643351223003496
         },
         "logit_difference_io_minus_s": {
           "ci95": [
-            0.09206477349371042,
-            0.18395977670579824
+            0.09424644598518624,
+            0.1857757877394079
           ],
           "ci_method": "normal_paired_1.96_se",
-          "mean": 0.13801227509975433,
-          "standard_error": 0.02344303363147075
+          "mean": 0.14001111686229706,
+          "standard_error": 0.023349750933229746
         },
         "s_wins_error_rate": {
           "ci95": [
-            -0.005919928213056626,
-            0.0019199280230668206
+            -0.009538058299801207,
+            0.0015380579198215954
           ],
           "ci_method": "normal_paired_1.96_se",
-          "mean": -0.0020000000949949026,
-          "standard_error": 0.0020000000760124247
+          "mean": -0.004000000189989805,
+          "standard_error": 0.0028255917728564894
         }
       },
       "metrics": {
         "io_probability": {
           "ci95": [
-            0.5426150954223271,
-            0.5784997546219234
+            0.5442663444176044,
+            0.5791053758964215
           ],
           "ci_method": "normal_1.96_se",
-          "mean": 0.5605574250221252,
-          "standard_error": 0.00915441801039456
+          "mean": 0.5616858601570129,
+          "standard_error": 0.008887671343357068
         },
         "logit_difference_io_minus_s": {
           "ci95": [
-            3.2845730369151456,
-            3.532592337840714
+            3.287502383269557,
+            3.533661747894994
           ],
           "ci_method": "normal_1.96_se",
-          "mean": 3.4085826873779297,
-          "standard_error": 0.06327139245463509
+          "mean": 3.4105820655822754,
+          "standard_error": 0.06279691018996028
         },
         "s_wins_error_rate": {
           "ci95": [
-            0.0010976305226827934,
-            0.014465715215177033
+            0.00035313639455927456,
+            0.011240706705146758
           ],
           "ci_method": "wilson",
-          "mean": 0.004000000189989805,
-          "standard_error": 0.0028255917728564894
+          "mean": 0.0020000000949949026,
+          "standard_error": 0.0020000000760124247
         }
       },
       "paper_figure_8_protocol": true
     }
   },
   "traceability": {
-    "git_dirty": false,
+    "git_dirty": true,
     "hash_method": "git rev-parse <source_commit>:<path> (normalized Git blob IDs)",
     "historical_source_commit": "ea15315dd24481e9e2ac5c3ef335d82907a1dc34",
     "historical_source_url": "https://github.com/redwoodresearch/Easy-Transformer/blob/ea15315dd24481e9e2ac5c3ef335d82907a1dc34/easy_transformer/advex.py",
     "source_blobs": {
-      "notebook": "ed785ae238575c30b02ca29e74b5d1158b810225",
-      "paper/adversarial.py": "c95d04155bc3028d6b10c66cf510120889c2dc4e",
+      "notebook": "da3f1b55ec3234870c6419482ba05f1d8dd290d8",
+      "paper/adversarial.py": "4ebe4ffad8da9ad1367c3b19fc0170c38429bbeb",
       "paper/dataset.py": "1c5eff7d0b1a8a6bf80329bc06595ed6e0ff4a6c",
       "paper/metrics.py": "a9520baec5e091d597b00bb13823594c9518861b",
       "runtime.py": "6815d71ebca30bd9d324d1e527306bcb653c0d05"
     },
-    "source_commit": "fb194405ac5f879cb118ae63ca25bfd887687b46",
-    "timestamp_utc": "2026-11-10T07:25:06.552859Z",
+    "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+    "timestamp_utc": "2026-11-10T07:53:56.303997Z",
     "versions": {
       "pandas": "3.1.1",
       "plotly": "7.1.0",

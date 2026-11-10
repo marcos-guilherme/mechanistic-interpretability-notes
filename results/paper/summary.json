@@ -1,0 +1,198 @@
+{
+  "key_results": {
+    "adversarial": {
+      "baseline_logit_difference": 3.270570755004883,
+      "paper_io_single_logit_delta": -2.3243963718414307,
+      "paper_io_single_logit_difference": 0.9461743235588074,
+      "paper_s_control_logit_difference": 3.4105820655822754
+    },
+    "backup_compensation_fraction": 0.48558738827705383,
+    "baseline": {
+      "io_accuracy": 0.98828125,
+      "mean_io_probability": 0.5202313661575317,
+      "mean_logit_difference": 3.6441750526428223
+    },
+    "circuit_discovery": {
+      "baseline_logit_difference": 3.858616590499878,
+      "published_class_mean_patch_effect": {
+        "backup_name_movers": -0.1416790783405304,
+        "duplicate_token": -0.384291410446167,
+        "induction": -0.29905569553375244,
+        "name_movers": 0.13094552357991537,
+        "negative_name_movers": 0.9351198673248291,
+        "previous_token": -0.10830497741699219,
+        "s_inhibition": -0.7718640565872192
+      }
+    },
+    "completeness_greedy_max": 4.121578426361084,
+    "faithfulness": {
+      "absolute_gap": 0.6126800060272217,
+      "circuit": 3.1197853660583497,
+      "model": 3.732465372085571,
+      "retained_fraction": 0.8358511211894037
+    },
+    "minimality": {
+      "ci95_above_1_percent": 24,
+      "point_above_1_percent": 26,
+      "total": 26
+    },
+    "path_patching": {
+      "duplicate_3.0_to_s_inhibition_7.3_v": -0.09731721878051758,
+      "induction_5.5_to_s_inhibition_7.3_v": -0.16524982452392578,
+      "s_inhibition_7.3_to_name_mover_9.9_q": -0.11320972442626953
+    }
+  },
+  "paper": "arXiv:2211.00593",
+  "schema_version": 1,
+  "sources": {
+    "adversarial": {
+      "config": {
+        "allowed_template_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "attack_seeds": {
+          "advex_double_io": 512,
+          "paper_io_single": 511,
+          "paper_s_control": 513
+        },
+        "base_seed": 510,
+        "batch_size": 16,
+        "dataset_sha256": {
+          "advex_double_io": "1392ce6879da96ee905830e6a5ea27216e774c0e2f0b576b73d0435f24270d96",
+          "paper_io_single": "e3974d08f3b00ec6c24984d09ff8f8f028e507ad160e0b1801daaad95dcd003e",
+          "paper_s_control": "d25a8dd7540fd039dd713ce14a0a8980e5a343e0f3f0f5d6a72e329299101118"
+        },
+        "device": "cuda",
+        "dtype": "float32",
+        "gpu": "NVIDIA GeForce RTX 3050",
+        "mixed_population": {
+          "ABBA": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ],
+          "BABA": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ]
+        },
+        "model_name": "gpt2",
+        "n": 500,
+        "padding_side": "right",
+        "prepend_bos": false
+      },
+      "path": "results/paper/10_adversarial_examples.json",
+      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+    },
+    "backup": {
+      "config": {
+        "device": "cuda",
+        "dtype": "float32",
+        "gpu": "NVIDIA GeForce RTX 3050",
+        "mean_ablation": "pABC exact (pattern, template_id), absolute position, hook_result",
+        "model_name": "gpt2",
+        "n_reference": 300,
+        "n_target": 16,
+        "reference_batch_size": 16,
+        "reference_dataset_sha256": "e157407aba5515c941915a94e76663662ff0de7c019889ed39bd3a8dd23562f9",
+        "seed_reference": 309,
+        "seed_target": 308,
+        "target_dataset_sha256": "31cc588949aaa9836a297eb1df54ffc0310d8bc1fee054b2aa3178e3203754b3"
+      },
+      "path": "results/paper/08_backup_name_movers.json",
+      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+    },
+    "baseline": {
+      "config": {
+        "batch_size": 32,
+        "dataset_sha256": "cc24fb0ddfc5f820a335d3a59b6e42cffb298fe34f77a9dabfe3a202af21e5c8",
+        "device": "cuda",
+        "dtype": "float32",
+        "git_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+        "model_name": "gpt2",
+        "n_examples": 256,
+        "n_groups": 30,
+        "paper_n_examples": 100000,
+        "pattern": "mixed",
+        "prepend_bos": false,
+        "torch_version": "2.15.0+cu132",
+        "transformer_lens_version": "4.3.0"
+      },
+      "path": "results/paper/baseline_seed_42_n_256.json",
+      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+    },
+    "circuit": {
+      "config": {
+        "activation": "result",
+        "dataset_sha256": "cb4f451c0de475c5e4180d0f9782ecc2e4d4f6bc08d424cf91a383dafe6e30a8",
+        "model_name": "gpt2",
+        "n_examples": 4,
+        "seed": 106,
+        "semantic_positions": [
+          "IO",
+          "S1",
+          "S2",
+          "S1+1",
+          "END"
+        ]
+      },
+      "path": "results/paper/06_circuit_discovery.json",
+      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+    },
+    "path_patching": {
+      "config": {
+        "allow_internal_interactions": false,
+        "dataset_sha256": "a9c668d845ab9fef7630428c87155240aef93f5033462576923204d5cb6dec8d",
+        "freeze_mlps_modes": [
+          false,
+          true
+        ],
+        "metric": "mean IO-minus-S logit difference at semantic END",
+        "model_name": "gpt2",
+        "n_examples": 2,
+        "seed": 107
+      },
+      "path": "results/paper/07_path_patching.json",
+      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+    },
+    "validation": {
+      "config": {
+        "batch_size_reference": 16,
+        "batch_size_target": 50,
+        "device": "cuda",
+        "dtype": "float32",
+        "gpu": "NVIDIA GeForce RTX 3050",
+        "greedy_candidate_limit": 10,
+        "greedy_runs": 10,
+        "greedy_steps": 10,
+        "model_name": "gpt2",
+        "n_reference": 300,
+        "n_target": 100,
+        "random_subsets": 10,
+        "reference_dataset_sha256": "3f98abae7d056fd626f5567c0dfd0ddee7936fc746e98fa45b87cf490ab3c3d4",
+        "reference_min_group_size": 10,
+        "seed_reference": 410,
+        "seed_target": 409,
+        "seed_validation": 411,
+        "target_dataset_sha256": "716e2c278f567c853436c29309e535803b03728b92a1d092a144d05b4d9a14e2"
+      },
+      "path": "results/paper/09_faithfulness_completeness_minimality.json",
+      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+    }
+  }
+}
