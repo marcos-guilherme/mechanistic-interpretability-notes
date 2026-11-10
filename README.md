@@ -70,19 +70,18 @@ uv run python scripts/build_paper_summary.py --check
 
 ## Recorded configurations and cost
 
-Times below are the previous in-place CUDA execution timings and are planning
-figures; the current authoritative durations are in the execution manifest.
+Times below are from the fresh CUDA execution recorded in the manifest.
 Peak VRAM was not instrumented, so the table states the tested capacity rather
 than inventing a peak measurement.
 
 | Notebook | Seeds | Target / reference N | Batches | Prior time | Tested VRAM |
 |---|---|---:|---:|---:|---:|
-| 05 baseline | 42 | 256 / — | 32 | 0:32 | 6 GiB |
-| 06 circuit discovery | 106 | 4 / matched ABC | full batch | 2:14 | 6 GiB |
-| 07 path patching | 107 | 2 / matched ABC | full batch | 1:17 | 6 GiB |
-| 08 backups | 308 / 309 | 16 / 300 (10×30 groups) | target full / ref 16 | 0:24 | 6 GiB |
-| 09 validation | 409 / 410 / 411 | 100 / 300 (10×30 groups) | target 50 / ref 16 | 13:11 | 6 GiB |
-| 10 adversarial | base 510; IO 511; double IO 512; S 513 | 500 / — | 16 | 0:26 | 6 GiB |
+| 05 baseline | 42 | 256 / — | 32 | 0:26 | 6 GiB |
+| 06 circuit discovery | 106 | 4 / matched ABC | full batch | 1:09 | 6 GiB |
+| 07 path patching | 107 | 2 / matched ABC | full batch | 0:44 | 6 GiB |
+| 08 backups | 308 / 309 | 16 / 300 (10×30 groups) | target full / ref 16 | 0:32 | 6 GiB |
+| 09 validation | 409 / 410 / 411 | 100 / 300 (10×30 groups) | target 50 / ref 16 | 13:17 | 6 GiB |
+| 10 adversarial | base 510; IO 511; double IO 512; S 513 | 500 / — | 16 | 0:35 | 6 GiB |
 
 Notebook 09 keeps all **10 random subsets, 10 greedy runs, 10 greedy steps, and
 10 candidates per step**. The reference in 08–09 is independently sampled,
@@ -104,7 +103,7 @@ semantic alignment, and finite-sample uncertainty can all shift values.
 | Minimality | 26/26 point estimates >1%; 24/26 CI95 lower bounds >1% | 26 circuit nodes assessed against the 1% threshold | Pointwise replication is stronger than interval-supported replication; two nodes remain uncertain. |
 | Adversarial baseline | IO−S 3.271, P(IO) 48.59%, S>IO 0.6% | 3.55, 49%, 0.7% | Probability/error align more closely than absolute IO−S. |
 | Adversarial IO single | IO−S 0.946, P(IO) 32.24%, S>IO 31.0% | 1.23, 36%, 23.4% | Absolute outcomes diverge, while the observed IO−S delta −2.324 matches the paper target delta −2.32 closely. |
-| Adversarial S control | IO−S 3.409, P(IO) 56.06%, S>IO 0.4% | 3.64, 59%, 0.4% | Direction and error rate agree; levels remain lower. |
+| Adversarial S control | IO−S 3.411, P(IO) 56.17%, S>IO 0.2% | 3.64, 59%, 0.4% | Direction agrees; absolute levels and the small error estimate differ. |
 
 Notebook 06 has only four prompts and notebook 07 has two. Their unexpected
 signs or rankings are diagnostics, not evidence that overturns the published
