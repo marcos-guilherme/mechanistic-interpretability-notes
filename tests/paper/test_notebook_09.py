@@ -82,6 +82,12 @@ def test_notebook_09_artifact_is_complete_traceable_and_finite() -> None:
     assert all(len(run["curve"]) == 10 for run in completeness["greedy"])
     assert len(completeness["greedy_top5"]) == 5
     assert all(item["accepted"] for item in completeness["greedy_top5"])
+    assert len(
+        {
+            tuple(item["removed"])
+            for item in completeness["greedy_top5"]
+        }
+    ) == 5
     all_completeness = [
         completeness["empty"],
         *completeness["historical_classes"],
