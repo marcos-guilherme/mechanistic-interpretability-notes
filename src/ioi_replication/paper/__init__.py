@@ -1,5 +1,16 @@
 """Paper-faithful data and metrics for the IOI replication track."""
 
+from ioi_replication.paper.circuit import (
+    PUBLISHED_CIRCUIT,
+    PUBLISHED_CLASS_EDGES,
+    CircuitClass,
+    CircuitClassEdge,
+    HeadPositionNode,
+    ReceiverComponent,
+    SemanticPosition,
+    published_nodes,
+    validate_circuit,
+)
 from ioi_replication.paper.dataset import (
     ABBA_TEMPLATES,
     BABA_TEMPLATES,
@@ -19,21 +30,46 @@ from ioi_replication.paper.metrics import (
     logits_at_end,
     standard_error,
 )
+from ioi_replication.paper.patching import (
+    ActivationPatchMatrix,
+    PathPatchResult,
+    PathReceiver,
+    activation_patch_matrix,
+    activation_patch_node,
+    paper_path_patch,
+    patch_semantic_positions,
+)
 
 __all__ = [
     "ABBA_TEMPLATES",
+    "ActivationPatchMatrix",
     "BABA_TEMPLATES",
+    "CircuitClass",
+    "CircuitClassEdge",
     "HISTORICAL_NAMES",
     "HISTORICAL_OBJECTS",
     "HISTORICAL_PLACES",
     "FilteredVocabulary",
+    "HeadPositionNode",
+    "PUBLISHED_CIRCUIT",
+    "PUBLISHED_CLASS_EDGES",
     "PairedIOIDataset",
+    "PathPatchResult",
+    "PathReceiver",
     "PromptMetadata",
+    "ReceiverComponent",
+    "SemanticPosition",
+    "activation_patch_matrix",
+    "activation_patch_node",
     "build_paired_dataset",
     "filter_single_token_vocabulary",
     "io_accuracy",
     "io_probability",
     "logit_difference",
     "logits_at_end",
+    "paper_path_patch",
+    "patch_semantic_positions",
+    "published_nodes",
     "standard_error",
+    "validate_circuit",
 ]
