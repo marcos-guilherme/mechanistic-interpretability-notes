@@ -146,7 +146,7 @@ def test_bootstrap_marker_is_emitted_only_after_success(
 ) -> None:
     bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_main_marker")
     project = tmp_path / "jspace_llama"
-    migration_calls: list[Path] = []
+    migration_calls: list[tuple[Path, Path]] = []
     monkeypatch.setattr(
         bootstrap,
         "replace_project_tree",
@@ -161,7 +161,9 @@ def test_bootstrap_marker_is_emitted_only_after_success(
     monkeypatch.setattr(
         bootstrap,
         "migrate_same_session",
-        lambda legacy: migration_calls.append(legacy),
+        lambda active_project, legacy: migration_calls.append(
+            (active_project, legacy)
+        ),
         raising=False,
     )
     monkeypatch.setattr(bootstrap, "print_runtime_diagnostics", lambda torch: None)
@@ -170,7 +172,7 @@ def test_bootstrap_marker_is_emitted_only_after_success(
     monkeypatch.setenv(bootstrap.SUCCESS_NONCE_ENV, nonce)
 
     assert bootstrap.main() == 0
-    assert migration_calls == [bootstrap.LEGACY_PROJECT]
+    assert migration_calls == [(project, bootstrap.LEGACY_PROJECT)]
     assert (
         capsys.readouterr().out.strip()
         == f"{bootstrap.SUCCESS_MARKER}:{nonce}"
@@ -512,6 +514,7 @@ def test_bootstrap_migrates_legacy_checkout_and_cached_namespace(
         if name == package_name or name.startswith(f"{package_name}.")
     }
     prior_unrelated = sys.modules.get(unrelated_name)
+    prior_sys_path = list(sys.path)
     invalidations = 0
     real_invalidate_caches = importlib.invalidate_caches
 
@@ -525,16 +528,17 @@ def test_bootstrap_migrates_legacy_checkout_and_cached_namespace(
         "invalidate_caches",
         track_invalidation,
     )
-    sys.path.insert(0, str(source_root))
     try:
         sys.modules[package_name] = cached_package
         sys.modules[f"{package_name}.config"] = cached_config
         sys.modules[unrelated_name] = unrelated
 
-        bootstrap.migrate_same_session(legacy)
+        bootstrap.migrate_same_session(source_root.parent, legacy)
 
         assert not os.path.lexists(legacy)
         assert archive.read_bytes() == b"archive remains"
+        assert sys.path[0] == str(source_root.resolve())
+        assert sys.path.count(str(source_root.resolve())) == 1
         assert package_name not in sys.modules
         assert f"{package_name}.config" not in sys.modules
         assert sys.modules[unrelated_name] is unrelated
@@ -544,7 +548,7 @@ def test_bootstrap_migrates_legacy_checkout_and_cached_namespace(
         assert resolved.SOURCE == "new-project"
         assert Path(resolved.__file__).resolve() == config.resolve()
     finally:
-        sys.path.remove(str(source_root))
+        sys.path[:] = prior_sys_path
         for name in tuple(sys.modules):
             if name == package_name or name.startswith(f"{package_name}."):
                 sys.modules.pop(name, None)
@@ -554,6 +558,84 @@ def test_bootstrap_migrates_legacy_checkout_and_cached_namespace(
         else:
             sys.modules[unrelated_name] = prior_unrelated
         real_invalidate_caches()
+
+
+def test_same_session_migration_replaces_stale_and_duplicate_paths(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "same_session_sys_path")
+    project = tmp_path / "content" / "jspace_llama_project"
+    source = project / "src"
+    source.mkdir(parents=True)
+    legacy = tmp_path / "content" / "jspace_llama"
+    legacy_source = legacy / "src"
+    legacy_source.mkdir(parents=True)
+    duplicate = os.path.join(str(source), "..", "src")
+    prior_sys_path = list(sys.path)
+    sys.path[:] = [
+        str(source),
+        duplicate,
+        str(legacy_source),
+        "unrelated-entry",
+        str(source),
+    ]
+    prior_package_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "jspace_llama" or name.startswith("jspace_llama.")
+    }
+    try:
+        bootstrap.migrate_same_session(project, legacy)
+
+        assert sys.path == [str(source.resolve()), "unrelated-entry"]
+    finally:
+        sys.path[:] = prior_sys_path
+        for name in tuple(sys.modules):
+            if name == "jspace_llama" or name.startswith("jspace_llama."):
+                sys.modules.pop(name, None)
+        sys.modules.update(prior_package_modules)
+        importlib.invalidate_caches()
+
+
+@pytest.mark.parametrize(
+    ("target", "mode", "attributes", "message"),
+    [
+        ("project", stat.S_IFLNK, 0, "symlink"),
+        ("project", stat.S_IFDIR, 0x400, "reparse"),
+        ("source", stat.S_IFLNK, 0, "symlink"),
+        ("source", stat.S_IFDIR, 0x400, "reparse"),
+        ("source", stat.S_IFREG, 0, "directory"),
+    ],
+)
+def test_project_source_validation_rejects_unsafe_paths(
+    tmp_path: Path,
+    target: str,
+    mode: int,
+    attributes: int,
+    message: str,
+) -> None:
+    bootstrap = load_module(
+        BOOTSTRAP_PATH,
+        f"source_safety_{target}_{mode}_{attributes}",
+    )
+    project = tmp_path / "jspace_llama_project"
+    source = project / "src"
+    source.mkdir(parents=True)
+    unsafe = SimpleNamespace(
+        st_mode=mode,
+        st_file_attributes=attributes,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        bootstrap.validate_project_source(
+            project,
+            project_metadata=(
+                unsafe if target == "project" else os.lstat(project)
+            ),
+            source_metadata=(
+                unsafe if target == "source" else os.lstat(source)
+            ),
+        )
 
 
 def test_legacy_reparse_directory_uses_non_recursive_removal(

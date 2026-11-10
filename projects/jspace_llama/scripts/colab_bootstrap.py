@@ -135,15 +135,18 @@ def safe_extract(archive: Path, destination: Path) -> Path:
     return destination / ARCHIVE_ROOT
 
 
+def _is_reparse_point(metadata: object) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+
 def _remove_old_project(project: Path) -> None:
     if not os.path.lexists(project):
         return
     metadata = os.lstat(project)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    is_reparse = bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
     if stat.S_ISLNK(metadata.st_mode):
         project.unlink()
-    elif is_reparse:
+    elif _is_reparse_point(metadata):
         os.rmdir(project)
     elif stat.S_ISDIR(metadata.st_mode):
         shutil.rmtree(project)
@@ -151,11 +154,83 @@ def _remove_old_project(project: Path) -> None:
         project.unlink()
 
 
+def _validate_real_directory(
+    path: Path,
+    metadata: object,
+    *,
+    context: str,
+) -> None:
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"{context} is a symlink: {path}")
+    if _is_reparse_point(metadata):
+        raise ValueError(f"{context} is a reparse point: {path}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"{context} is not a directory: {path}")
+
+
+def validate_project_source(
+    project: Path,
+    *,
+    project_metadata: object | None = None,
+    source_metadata: object | None = None,
+) -> Path:
+    project_info = (
+        project_metadata
+        if project_metadata is not None
+        else os.lstat(project)
+    )
+    _validate_real_directory(
+        project,
+        project_info,
+        context="active project",
+    )
+    source = project / "src"
+    source_info = (
+        source_metadata
+        if source_metadata is not None
+        else os.lstat(source)
+    )
+    _validate_real_directory(
+        source,
+        source_info,
+        context="active project source",
+    )
+    resolved_project = project.resolve(strict=True)
+    resolved_source = source.resolve(strict=True)
+    try:
+        resolved_source.relative_to(resolved_project)
+    except ValueError as error:
+        raise ValueError(
+            f"active project source is outside project: {source}"
+        ) from error
+    return resolved_source
+
+
+def _resolved_sys_path_entry(entry: object) -> Path | None:
+    if not isinstance(entry, str):
+        return None
+    candidate = Path(entry if entry else os.getcwd())
+    try:
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
 def migrate_same_session(
+    project: Path,
     legacy_project: Path,
     package_name: str = IMPORT_PACKAGE,
 ) -> None:
+    source = validate_project_source(project)
+    legacy_source = (legacy_project / "src").resolve(strict=False)
     _remove_old_project(legacy_project)
+    excluded_paths = {source, legacy_source}
+    retained_paths = [
+        entry
+        for entry in sys.path
+        if _resolved_sys_path_entry(entry) not in excluded_paths
+    ]
+    sys.path[:] = [str(source), *retained_paths]
     package_prefix = f"{package_name}."
     for name in tuple(sys.modules):
         if name == package_name or name.startswith(package_prefix):
@@ -245,7 +320,7 @@ def main() -> int:
     import torch
 
     print_runtime_diagnostics(torch)
-    migrate_same_session(LEGACY_PROJECT)
+    migrate_same_session(project, LEGACY_PROJECT)
     print(f"{SUCCESS_MARKER}:{nonce}")
     return 0
 
