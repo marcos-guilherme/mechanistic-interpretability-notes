@@ -4,7 +4,7 @@
     "dataset_sha256": "cc24fb0ddfc5f820a335d3a59b6e42cffb298fe34f77a9dabfe3a202af21e5c8",
     "device": "cuda",
     "dtype": "float32",
-    "git_commit": "a743c84333f78ce06a563a45f358a1760c62cd3d",
+    "git_commit": "1ba95281b7122638079fd4bcba1a7b6ff34e0a33",
     "model_name": "gpt2",
     "n_examples": 256,
     "n_groups": 30,
