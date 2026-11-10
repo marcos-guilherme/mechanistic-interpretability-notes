@@ -292,6 +292,45 @@ def test_knockout_changes_only_requested_heads_and_variable_positions() -> None:
     assert model.cfg.use_attn_result is False
 
 
+def test_knockout_aligns_reference_and_target_semantic_positions_by_group() -> None:
+    model = _AblationModel()
+    hook_name = "blocks.0.attn.hook_result"
+    values_by_position = torch.arange(3, dtype=torch.float64)[:, None, None]
+    means = _constant_means()
+    activations = dict(means.activations)
+    activations[hook_name] = {
+        key: values_by_position.expand(3, 2, 1).clone()
+        for key in GROUPS
+    }
+    means = GroupedActivationMeans(
+        activation="result",
+        activations=activations,
+        sequence_length=3,
+        n_heads=2,
+        semantic_positions={
+            ("ABBA", 0): {SemanticPosition.END: 1},
+            ("BABA", 0): {SemanticPosition.END: 2},
+        },
+    )
+    target_positions = dict(POSITIONS)
+    target_positions[SemanticPosition.END] = torch.tensor([0, 0, 2, 1])
+    node = HeadPositionNode(0, 1, SemanticPosition.END)
+
+    knockout_nodes(
+        model,
+        TOKENS,
+        target_positions,
+        GROUPS,
+        means,
+        (node,),
+    )
+
+    after = model.events[hook_name][1]
+    rows = torch.arange(len(TOKENS))
+    actual = after[rows, target_positions[SemanticPosition.END], node.head, 0]
+    assert torch.equal(actual, torch.tensor([1.0, 2.0, 1.0, 2.0]))
+
+
 def test_run_circuit_ablates_everything_except_kept_head_position_nodes() -> None:
     model = _AblationModel()
     kept = (HeadPositionNode(0, 1, SemanticPosition.END),)

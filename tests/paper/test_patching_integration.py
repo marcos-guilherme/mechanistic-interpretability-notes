@@ -13,9 +13,16 @@ from ioi_replication.paper import (
     activation_patch_node,
     build_paired_dataset,
     cache_grouped_mean_activations,
+    evaluate_completeness,
+    evaluate_faithfulness,
+    evaluate_minimality,
     logit_difference,
     measure_backup_name_movers,
     paper_path_patch,
+)
+from ioi_replication.paper.validation import (
+    HISTORICAL_MINIMALITY_CONTEXTS,
+    MeanAblationEvaluator,
 )
 from ioi_replication.runtime import load_gpt2_small, select_device
 
@@ -246,3 +253,55 @@ def test_real_gpt2_knockout_replaces_only_primary_end_nodes(
             rtol=1e-6,
         )
     assert model.cfg.use_attn_result is False
+
+
+def test_real_gpt2_validation_smoke_has_finite_cached_results(
+    real_model_and_dataset,
+) -> None:
+    model, target = real_model_and_dataset
+    device = torch.device(model.cfg.device)
+    reference = paper_api.build_balanced_paired_dataset(
+        model.tokenizer,
+        examples_per_group=1,
+        seed=74,
+    )
+    means = cache_grouped_mean_activations(
+        model,
+        reference.abc_tokens.to(device),
+        reference.groups,
+        positions=reference.positions,
+        batch_size=8,
+        min_group_size=1,
+    )
+    evaluator = MeanAblationEvaluator(
+        model=model,
+        target_tokens=target.ioi_tokens.to(device),
+        positions=target.positions,
+        groups=target.groups,
+        group_means=means,
+        io_token_ids=target.io_token_ids,
+        s_token_ids=target.s_token_ids,
+        batch_size=2,
+    )
+
+    faithfulness = evaluate_faithfulness(evaluator)
+    removed = PUBLISHED_CIRCUIT[CircuitClass.NAME_MOVERS]
+    completeness = evaluate_completeness(evaluator, removed)
+    node = removed[0]
+    minimality = evaluate_minimality(
+        evaluator,
+        node=node,
+        context=HISTORICAL_MINIMALITY_CONTEXTS[node],
+    )
+    cached_before_repeat = evaluator.cached_evaluations
+    assert evaluate_faithfulness(evaluator) == faithfulness
+
+    values = (
+        faithfulness.model.mean,
+        faithfulness.circuit.mean,
+        completeness.incompleteness,
+        minimality.raw_effect,
+        minimality.normalized_effect,
+    )
+    assert all(torch.isfinite(torch.tensor(value)) for value in values)
+    assert evaluator.cached_evaluations == cached_before_repeat

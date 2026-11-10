@@ -24,6 +24,10 @@ class GroupedActivationMeans:
     activations: Mapping[str, Mapping[GroupKey, torch.Tensor]]
     sequence_length: int
     n_heads: int
+    semantic_positions: Mapping[
+        GroupKey,
+        Mapping[SemanticPosition, int],
+    ] = field(default_factory=dict)
     group_counts: Mapping[GroupKey, int] = field(default_factory=dict)
     min_group_size: int = 1
     reference_config: Mapping[str, Any] | None = None
@@ -76,6 +80,7 @@ def compute_grouped_mean_activations(
     groups: Mapping[GroupKey, torch.Tensor],
     *,
     activation: ActivationName = "result",
+    positions: Mapping[Any, torch.Tensor] | None = None,
     min_group_size: int = 1,
     reference_config: Mapping[str, Any] | None = None,
     reference_sha256: str | None = None,
@@ -123,6 +128,12 @@ def compute_grouped_mean_activations(
         activations=grouped,
         sequence_length=sequence_length,
         n_heads=n_heads,
+        semantic_positions=_reference_semantic_positions(
+            positions,
+            groups,
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+        ),
         group_counts=group_counts,
         min_group_size=min_group_size,
         reference_config=(
@@ -190,6 +201,7 @@ def cache_grouped_mean_activations(
     groups: Mapping[GroupKey, torch.Tensor],
     *,
     activation: ActivationName = "result",
+    positions: Mapping[Any, torch.Tensor] | None = None,
     batch_size: int = 32,
     min_group_size: int = 1,
     reference_config: Mapping[str, Any] | None = None,
@@ -278,6 +290,12 @@ def cache_grouped_mean_activations(
         activations=means,
         sequence_length=sequence_length,
         n_heads=n_heads,
+        semantic_positions=_reference_semantic_positions(
+            positions,
+            groups,
+            batch_size=reference_size,
+            sequence_length=sequence_length,
+        ),
         group_counts=group_counts,
         min_group_size=min_group_size,
         reference_config=(
@@ -316,6 +334,43 @@ def _position_indices(
     if torch.any(values < 0) or torch.any(values >= sequence_length):
         raise ValueError("semantic positions must be within the sequence")
     return values
+
+
+def _reference_semantic_positions(
+    positions: Mapping[Any, torch.Tensor] | None,
+    groups: Mapping[GroupKey, torch.Tensor],
+    *,
+    batch_size: int,
+    sequence_length: int,
+) -> dict[GroupKey, dict[SemanticPosition, int]]:
+    if positions is None:
+        return {}
+    result: dict[GroupKey, dict[SemanticPosition, int]] = {
+        key: {} for key in groups
+    }
+    for semantic_position in SemanticPosition:
+        if (
+            semantic_position not in positions
+            and semantic_position.value not in positions
+        ):
+            continue
+        indices = _position_indices(
+            positions,
+            semantic_position,
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+        )
+        for key, raw_rows in groups.items():
+            rows = torch.as_tensor(raw_rows).long()
+            values = indices.index_select(0, rows)
+            unique = values.unique()
+            if unique.numel() != 1:
+                raise ValueError(
+                    "reference semantic positions must be constant "
+                    f"within exact group {key!r}"
+                )
+            result[key][semantic_position] = int(unique.item())
+    return result
 
 
 def _validate_run(
@@ -360,6 +415,20 @@ def _validate_run(
         raise ValueError(
             f"target examples have no reference means for groups: {sorted(missing)}"
         )
+    if group_means.semantic_positions:
+        for node in nodes:
+            missing_positions = {
+                key
+                for key in group_for_row
+                if node.position
+                not in group_means.semantic_positions.get(key, {})
+            }
+            if missing_positions:
+                raise ValueError(
+                    "reference semantic positions are missing "
+                    f"{node.position.value!r} for groups: "
+                    f"{sorted(missing_positions)}"
+                )
     return group_for_row, nodes
 
 
@@ -440,7 +509,41 @@ def _run_ablation(
                     for key in group_for_row
                 ],
                 dim=0,
-            ).to(
+            )
+            if group_means.semantic_positions:
+                rows = torch.arange(activation_value.shape[0])
+                for semantic_position in SemanticPosition:
+                    if not all(
+                        semantic_position
+                        in group_means.semantic_positions.get(key, {})
+                        for key in group_for_row
+                    ):
+                        continue
+                    target_indices = _position_indices(
+                        positions,
+                        semantic_position,
+                        batch_size=activation_value.shape[0],
+                        sequence_length=activation_value.shape[1],
+                    )
+                    reference_indices = torch.tensor(
+                        [
+                            group_means.semantic_positions[key][
+                                semantic_position
+                            ]
+                            for key in group_for_row
+                        ]
+                    )
+                    reference_values = torch.stack(
+                        [
+                            grouped_means[key][reference_index]
+                            for key, reference_index in zip(
+                                group_for_row,
+                                reference_indices.tolist(),
+                            )
+                        ]
+                    )
+                    replacement[rows, target_indices] = reference_values
+            replacement = replacement.to(
                 device=activation_value.device,
                 dtype=activation_value.dtype,
             )
