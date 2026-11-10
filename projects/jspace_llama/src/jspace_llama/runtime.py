@@ -54,6 +54,29 @@ class RuntimeBundle:
     layers: tuple[int, ...]
 
 
+def find_project_root(start: str | Path | None = None) -> Path:
+    """Locate the checkout root from a notebook, Colab cwd, or package path."""
+    origins = [
+        Path(start).resolve() if start is not None else Path.cwd().resolve(),
+        Path(__file__).resolve(),
+    ]
+    visited: set[Path] = set()
+    for origin in origins:
+        current = origin.parent if origin.is_file() else origin
+        for candidate in (current, *current.parents):
+            if candidate in visited:
+                continue
+            visited.add(candidate)
+            if (
+                (candidate / "pyproject.toml").is_file()
+                and (candidate / "src" / "jspace_llama").is_dir()
+            ):
+                return candidate
+    raise RuntimeError(
+        "could not locate the jspace-llama project root from cwd or package path"
+    )
+
+
 def render_chat_prompt(tokenizer: Any, instruction: str) -> str:
     """Apply the tokenizer's instruction template exactly once."""
     return tokenizer.apply_chat_template(

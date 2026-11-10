@@ -16,6 +16,7 @@ from jspace_llama.runtime import (
     ResourceExhaustionError,
     TokenizationError,
     download_lens_file,
+    find_project_root,
     load_components,
     render_chat_prompt,
     require_cuda,
@@ -241,3 +242,17 @@ def test_component_loading_preserves_oom_as_specific_inconclusive_error() -> Non
             lens_cls=object(),
             dictionary_cls=object(),
         )
+
+
+def test_project_root_is_found_from_nested_local_or_colab_directory(
+    tmp_path,
+) -> None:
+    project = tmp_path / "checkout" / "projects" / "jspace_llama"
+    nested = project / "notebooks" / "work"
+    (project / "src" / "jspace_llama").mkdir(parents=True)
+    nested.mkdir(parents=True)
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "jspace-llama"\n', encoding="utf-8"
+    )
+
+    assert find_project_root(nested) == project.resolve()

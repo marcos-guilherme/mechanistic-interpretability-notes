@@ -118,6 +118,10 @@ def test_notebook_is_thin_ordered_and_contains_no_outputs_or_secrets() -> None:
     assert "HF_TOKEN" not in sources
     assert "hf_" + "token" not in sources.lower()
     assert "api_key" not in sources.lower()
+    assert "find_project_root" in sources
+    assert 'project_root / "results" / "readout_and_causal_swap.json"' in sources
+    assert "output_path.parent.mkdir(parents=True, exist_ok=True)" in sources
+    assert 'Path("../results' not in sources
     for cell in notebook.cells:
         if cell.cell_type == "code":
             assert cell.execution_count is None

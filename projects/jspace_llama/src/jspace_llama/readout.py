@@ -53,6 +53,53 @@ def _concept_summary(
     }
 
 
+def _read_layer_slots(
+    *,
+    layer: int,
+    dictionary: Any,
+    tokenizer: Any,
+    sequence: list[int],
+    activation: torch.Tensor,
+    positions: Sequence[int],
+    k: int,
+    pursuit_fn: Callable[..., Any],
+) -> list[dict[str, Any]]:
+    """Scope all full-dictionary references to one layer call."""
+    layer_slots: list[dict[str, Any]] = []
+    try:
+        vectors = dictionary.unit(layer)
+        for position in positions:
+            hidden = activation[0, position].float().to(vectors.device)
+            result = pursuit_fn(hidden, vectors, k=k)
+            order = torch.argsort(result.coeffs, descending=True).tolist()
+            entries = [
+                {
+                    "token_id": int(result.indices[index]),
+                    "token": tokenizer.decode([int(result.indices[index])]),
+                    "coefficient": float(result.coeffs[index]),
+                }
+                for index in order
+            ]
+            layer_slots.append(
+                {
+                    "layer": int(layer),
+                    "position": int(position),
+                    "position_token": tokenizer.decode([sequence[position]]),
+                    "entries": entries,
+                    "variance_explained": float(result.var_explained),
+                }
+            )
+    except torch.OutOfMemoryError:
+        raise
+    except Exception as exc:
+        raise ReadoutError(
+            f"workspace readout failed at layer {layer}: {exc}"
+        ) from exc
+    finally:
+        dictionary.evict(layer)
+    return layer_slots
+
+
 @torch.no_grad()
 def read_workspace(
     model: Any,
@@ -82,37 +129,18 @@ def read_workspace(
     tokenizer = dictionary.model.tokenizer
     slots: list[dict[str, Any]] = []
     for layer in layers:
-        try:
-            vectors = dictionary.unit(layer)
-            for position in positions:
-                hidden = activations[layer][0, position].float().to(vectors.device)
-                result = pursuit_fn(hidden, vectors, k=k)
-                order = torch.argsort(result.coeffs, descending=True).tolist()
-                entries = [
-                    {
-                        "token_id": int(result.indices[index]),
-                        "token": tokenizer.decode([int(result.indices[index])]),
-                        "coefficient": float(result.coeffs[index]),
-                    }
-                    for index in order
-                ]
-                slots.append(
-                    {
-                        "layer": int(layer),
-                        "position": int(position),
-                        "position_token": tokenizer.decode([sequence[position]]),
-                        "entries": entries,
-                        "variance_explained": float(result.var_explained),
-                    }
-                )
-        except torch.OutOfMemoryError:
-            raise
-        except Exception as exc:
-            raise ReadoutError(
-                f"workspace readout failed at layer {layer}: {exc}"
-            ) from exc
-        finally:
-            dictionary.evict(layer)
+        slots.extend(
+            _read_layer_slots(
+                layer=layer,
+                dictionary=dictionary,
+                tokenizer=tokenizer,
+                sequence=sequence,
+                activation=activations.pop(layer),
+                positions=positions,
+                k=k,
+                pursuit_fn=pursuit_fn,
+            )
+        )
     return {
         "slots": slots,
         "spider": _concept_summary(slots, focus_concept),

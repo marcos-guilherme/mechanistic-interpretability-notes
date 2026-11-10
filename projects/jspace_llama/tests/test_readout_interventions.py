@@ -1,7 +1,12 @@
+import contextlib
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
+from jspace import LensSwap
+
+from jspace_llama.experiment import GenerationRequest, ModelExperimentRunner
 
 from jspace_llama.interventions import (
     MemoryBoundedLensSwap,
@@ -114,6 +119,37 @@ def test_workspace_readout_evicts_failing_layer() -> None:
     assert dictionary.evicted == [1, 2]
 
 
+def test_workspace_releases_layer_tensor_before_materializing_next() -> None:
+    class LifetimeDictionary(ReadoutDictionary):
+        def __init__(self) -> None:
+            super().__init__()
+            self.previous: weakref.ReferenceType[torch.Tensor] | None = None
+
+        def unit(self, layer: int) -> torch.Tensor:
+            if layer == 2:
+                assert self.previous is not None
+                assert self.previous() is None, "previous layer tensor is retained"
+            tensor = torch.eye(3)
+            self.previous = weakref.ref(tensor)
+            return tensor
+
+    dictionary = LifetimeDictionary()
+
+    read_workspace(
+        model=object(),
+        dictionary=dictionary,
+        prompt="<chat>prompt</chat>",
+        layers=[1, 2],
+        positions=[-1],
+        k=3,
+        max_seq_len=32,
+        activation_reader=fake_activations,
+        pursuit_fn=fake_pursuit,
+    )
+
+    assert dictionary.evicted == [1, 2]
+
+
 class SwapDictionary:
     def __init__(self, *, fail_layer: int | None = None) -> None:
         self.evicted: list[int] = []
@@ -207,29 +243,110 @@ def test_random_control_is_deterministic_orthogonal_and_norm_matched() -> None:
     )
 
 
-def test_hooks_patch_prefill_only_and_preserve_noop() -> None:
+def test_patch_hook_context_patches_prefill_but_not_decode() -> None:
     model = SimpleNamespace(layers=[torch.nn.Identity() for _ in range(4)])
     dictionary = SwapDictionary()
 
-    noop = MemoryBoundedLensSwap(
-        model,
-        dictionary,
-        "spider",
-        "spider",
-        layers=[1],
-        alpha=4.0,
-    )
-    random_control = NormMatchedRandomControl(
+    hook = MemoryBoundedLensSwap(
         model,
         dictionary,
         "spider",
         "ant",
         layers=[1],
+        alpha=1.0,
+    )
+    hidden = torch.tensor([[[2.0, 1.0, 5.0, -2.0]]])
+
+    with hook:
+        prefill = model.layers[1](hidden.clone())
+        decode = model.layers[1](hidden.clone())
+
+    assert torch.equal(prefill, torch.tensor([[[0.0, 3.0, 5.0, -2.0]]]))
+    assert torch.equal(decode, hidden)
+
+
+def test_custom_clamp_matches_upstream_lens_swap() -> None:
+    model = SimpleNamespace(layers=[torch.nn.Identity() for _ in range(3)])
+    hidden = torch.tensor([[[2.0, -1.0, 5.0, -2.0], [2.0, 1.0, 0.0, 4.0]]])
+    upstream = LensSwap(
+        model,
+        SwapDictionary(),
+        "spider",
+        "ant",
+        layers=[1],
         alpha=4.0,
-        seed=42,
+        patch_generation=False,
+        mode="clamp",
+    )
+    custom = MemoryBoundedLensSwap(
+        model,
+        SwapDictionary(),
+        "spider",
+        "ant",
+        layers=[1],
+        alpha=4.0,
     )
 
-    hidden = torch.randn(1, 2, 4)
-    assert noop._patch_generation is False
-    assert random_control._patch_generation is False
-    assert torch.equal(noop.patch(hidden, 1, is_prefill=True), hidden)
+    with upstream:
+        upstream_prefill = model.layers[1](hidden.clone())
+    with custom:
+        custom_prefill = model.layers[1](hidden.clone())
+
+    assert torch.equal(custom_prefill, upstream_prefill)
+
+
+class TinyGeneratingModel:
+    def __init__(self) -> None:
+        self.layers = [torch.nn.Identity() for _ in range(3)]
+        self.hidden = torch.tensor([[[2.0, 1.0, 5.0, -2.0]]])
+        self.calls: list[dict[str, object]] = []
+
+    def generate(self, prompt, *, max_new_tokens, hook, first_line):
+        with hook or contextlib.nullcontext():
+            prefill = self.layers[1](self.hidden.clone())
+            decode = self.layers[1](self.hidden.clone())
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "max_new_tokens": max_new_tokens,
+                "first_line": first_line,
+                "hook": type(hook).__name__ if hook is not None else None,
+                "prefill": prefill,
+                "decode": decode,
+            }
+        )
+        return "continuation"
+
+
+def _request(condition: str) -> GenerationRequest:
+    return GenerationRequest(
+        prompt_name="main",
+        instruction="instruction",
+        rendered_prompt="<chat>instruction</chat>",
+        condition=condition,
+        layers=(1,),
+        alpha=1.0,
+        seed=42,
+        source="spider",
+        target="ant",
+        max_new_tokens=7,
+    )
+
+
+def test_model_runner_exercises_real_hook_contexts() -> None:
+    model = TinyGeneratingModel()
+    runner = ModelExperimentRunner(model, SwapDictionary())
+
+    for condition in ("baseline", "noop", "random", "target"):
+        assert runner(_request(condition)) == "continuation"
+
+    baseline, noop, random, target = model.calls
+    assert baseline["hook"] is None
+    assert noop["hook"] == "MemoryBoundedLensSwap"
+    assert random["hook"] == "NormMatchedRandomControl"
+    assert target["hook"] == "MemoryBoundedLensSwap"
+    assert torch.equal(noop["prefill"], model.hidden)
+    assert not torch.equal(random["prefill"], model.hidden)
+    assert not torch.equal(target["prefill"], model.hidden)
+    for call in model.calls:
+        assert torch.equal(call["decode"], model.hidden)
