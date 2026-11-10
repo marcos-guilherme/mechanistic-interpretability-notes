@@ -10,13 +10,21 @@ import uuid
 
 import torch
 
-from jspace_llama.artifacts import build_artifacts, build_execution_manifest
+from jspace_llama.artifacts import (
+    build_artifacts,
+    build_execution_manifest,
+    compact_reason,
+)
 from jspace_llama.config import ExperimentConfig
 from jspace_llama.evaluation import EvaluationDataError
 from jspace_llama.experiment import (
     ModelExperimentRunner,
     prepare_prompts,
     run_experiment,
+)
+from jspace_llama.interventions import (
+    InterventionPreparationError,
+    RandomControlError,
 )
 from jspace_llama.jsonio import atomic_write_json
 from jspace_llama.provenance import (
@@ -25,10 +33,17 @@ from jspace_llama.provenance import (
     file_sha256,
     read_source_provenance,
     resolve_huggingface_revisions,
+    verify_lens_integrity,
 )
-from jspace_llama.readout import read_workspace
+from jspace_llama.readout import ReadoutError, read_workspace
 from jspace_llama.runtime import (
-    JSpaceExperimentError,
+    AssetLoadError,
+    CudaRequiredError,
+    DimensionMismatchError,
+    LayerBandError,
+    LensIntegrityError,
+    ResourceExhaustionError,
+    TokenizationError,
     load_components,
     require_cuda,
     validate_intervention_tokens,
@@ -52,6 +67,7 @@ def _partial_provenance(
         "model": {
             "id": config.assets.model_id,
             "resolved_revision": None,
+            "layer_count": None,
         },
         "lens": {
             "repo_id": config.assets.lens_repo_id,
@@ -59,6 +75,7 @@ def _partial_provenance(
             "resolved_revision": None,
             "sha256": None,
             "size_bytes": None,
+            "integrity_verified": None,
         },
         "software": collect_software_provenance(),
         "hardware": {
@@ -72,6 +89,8 @@ def _partial_provenance(
             "generation": {
                 "max_new_tokens": config.generation.max_new_tokens,
                 "do_sample": config.generation.do_sample,
+                "decoding": "greedy",
+                "first_line": False,
             },
             "layers": [],
             "alphas": list(config.sweep.alphas),
@@ -79,6 +98,8 @@ def _partial_provenance(
                 "source_concept": config.source,
                 "target_concept": config.target,
                 "prefill_only": True,
+                "mode": "source_to_target_clamp",
+                "random_control": "norm_matched_orthogonal",
             },
         },
     }
@@ -104,15 +125,20 @@ def execute_real_experiment(
     )
     provenance["model"]["resolved_revision"] = model_revision
     provenance["lens"]["resolved_revision"] = lens_revision
-    model_path = snapshot_download(
-        repo_id=config.assets.model_id,
-        revision=model_revision,
-    )
-    lens_path = hf_hub_download(
-        repo_id=config.assets.lens_repo_id,
-        filename=config.assets.lens_filename,
-        revision=lens_revision,
-    )
+    try:
+        model_path = snapshot_download(
+            repo_id=config.assets.model_id,
+            revision=model_revision,
+        )
+        lens_path = hf_hub_download(
+            repo_id=config.assets.lens_repo_id,
+            filename=config.assets.lens_filename,
+            revision=lens_revision,
+        )
+    except torch.OutOfMemoryError as error:
+        raise ResourceExhaustionError("asset download exhausted memory") from error
+    except OSError as error:
+        raise AssetLoadError("failed to download pinned assets") from error
     lens_hash, lens_size = file_sha256(lens_path)
     provenance["lens"]["sha256"] = lens_hash
     provenance["lens"]["size_bytes"] = lens_size
@@ -121,6 +147,12 @@ def execute_real_experiment(
         lens_path,
         layers=config.sweep.layers,
         model_source=model_path,
+    )
+    provenance["model"]["layer_count"] = int(bundle.model.n_layers)
+    provenance["lens"]["integrity_verified"] = verify_lens_integrity(
+        lens_path,
+        lens_hash,
+        lens_size,
     )
     validate_intervention_tokens(
         bundle.model.tokenizer,
@@ -151,6 +183,7 @@ def execute_real_experiment(
         "model": {
             "id": config.assets.model_id,
             "resolved_revision": model_revision,
+            "layer_count": int(bundle.model.n_layers),
         },
         "lens": {
             "repo_id": config.assets.lens_repo_id,
@@ -158,6 +191,7 @@ def execute_real_experiment(
             "resolved_revision": lens_revision,
             "sha256": lens_hash,
             "size_bytes": lens_size,
+            "integrity_verified": True,
         },
         "software": collect_software_provenance(),
         "hardware": provenance["hardware"],
@@ -170,24 +204,91 @@ def execute_real_experiment(
     }
 
 
-def _error_code(error: BaseException) -> str:
-    if isinstance(error, torch.OutOfMemoryError):
-        return "cuda_oom"
-    if type(error) is JSpaceExperimentError:
-        return "jspace_experiment_error"
-    name = re.sub(r"(?<!^)(?=[A-Z])", "_", type(error).__name__).lower()
-    return name.removesuffix("_error") + "_error"
+EXPECTED_ERRORS = (
+    CudaRequiredError,
+    AssetLoadError,
+    ResourceExhaustionError,
+    TokenizationError,
+    DimensionMismatchError,
+    LayerBandError,
+    LensIntegrityError,
+    ReadoutError,
+    InterventionPreparationError,
+    RandomControlError,
+    EvaluationDataError,
+    torch.OutOfMemoryError,
+)
+ERROR_REASON_CODES = {
+    CudaRequiredError: "cuda_required",
+    AssetLoadError: "asset_load_failed",
+    ResourceExhaustionError: "resource_exhausted",
+    TokenizationError: "tokenization_failed",
+    DimensionMismatchError: "dimension_mismatch",
+    LayerBandError: "layer_band_invalid",
+    LensIntegrityError: "lens_integrity_failed",
+    ReadoutError: "readout_failed",
+    InterventionPreparationError: "intervention_preparation_failed",
+    RandomControlError: "random_control_failed",
+    EvaluationDataError: "evaluation_data_invalid",
+    torch.OutOfMemoryError: "resource_exhausted",
+}
 
 
-def _safe_error_message(error: BaseException) -> str:
-    message = str(error)
-    message = re.sub(
-        r"(?<!\w)(?:[A-Za-z]:[\\/]|/)[^\s'\";,]+",
-        "<local-path>",
-        message,
+def _reason_code(error: BaseException) -> str:
+    for error_type, code in ERROR_REASON_CODES.items():
+        if isinstance(error, error_type):
+            return code
+    raise TypeError(f"unsupported expected error type: {type(error).__name__}")
+
+
+def _write_expected_diagnostics(
+    path: Path,
+    *,
+    run_id: str,
+    error: BaseException,
+) -> None:
+    def redact(value: str) -> str:
+        value = re.sub(
+            r"\bhf_[A-Za-z0-9]{8,}\b",
+            "<credential>",
+            value,
+        )
+        value = re.sub(
+            r"(?i)\bBearer\s+\S+",
+            "Bearer <credential>",
+            value,
+        )
+        return re.sub(
+            r"(?i)\b(api[_-]?key|password|secret|token)"
+            r"\s*[:=]\s*\S+",
+            r"\1=<credential>",
+            value,
+        )
+
+    detail = redact(str(error))
+    cause_detail = (
+        None
+        if error.__cause__ is None
+        else redact(str(error.__cause__))
     )
-    message = re.sub(r"\bhf_[A-Za-z0-9]{8,}\b", "<credential>", message)
-    return message[:500] or type(error).__name__
+    try:
+        atomic_write_json(
+            path,
+            {
+                "run_id": run_id,
+                "terminal_status": "expected_failure",
+                "error_type": type(error).__name__,
+                "detail": detail,
+                "cause_type": (
+                    None
+                    if error.__cause__ is None
+                    else type(error.__cause__).__name__
+                ),
+                "cause_detail": cause_detail,
+            },
+        )
+    except Exception:
+        pass
 
 
 def run_pipeline(
@@ -243,11 +344,8 @@ def run_pipeline(
         atomic_write_json(manifest_path, manifest)
         atomic_write_json(evaluation_path, final)
         return final
-    except (JSpaceExperimentError, torch.OutOfMemoryError) as error:
-        reason = {
-            "code": _error_code(error),
-            "message": _safe_error_message(error),
-        }
+    except EXPECTED_ERRORS as error:
+        _write_expected_diagnostics(raw_path, run_id=run_id, error=error)
         manifest, final = build_artifacts(
             run_id=run_id,
             started_at=started_at,
@@ -255,12 +353,12 @@ def run_pipeline(
             terminal_status="expected_failure",
             provenance=provenance,
             raw_diagnostics=None,
-            reason=reason,
+            reason_code=_reason_code(error),
         )
         atomic_write_json(manifest_path, manifest)
         atomic_write_json(evaluation_path, final)
         return final
-    except BaseException as error:
+    except Exception:
         manifest = build_execution_manifest(
             run_id=run_id,
             started_at=started_at,
@@ -268,13 +366,10 @@ def run_pipeline(
             terminal_status="unexpected_error",
             status="error",
             provenance=provenance,
-            reason={
-                "code": "unexpected_error",
-                "message": (
-                    f"unexpected {type(error).__name__}; "
-                    "see notebook traceback"
-                ),
-            },
+            reason=compact_reason("unexpected_error"),
         )
-        atomic_write_json(manifest_path, manifest)
+        try:
+            atomic_write_json(manifest_path, manifest)
+        except Exception:
+            pass
         raise

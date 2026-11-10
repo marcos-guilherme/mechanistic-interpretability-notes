@@ -10,9 +10,43 @@ import tempfile
 from typing import Any
 
 
+class StrictJSONError(ValueError):
+    pass
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StrictJSONError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_constant(value: str) -> None:
+    raise StrictJSONError(f"non-finite JSON value: {value}")
+
+
+def strict_json_loads(payload: str | bytes | bytearray) -> Any:
+    try:
+        text = (
+            bytes(payload).decode("utf-8")
+            if isinstance(payload, (bytes, bytearray))
+            else payload
+        )
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StrictJSONError(str(error)) from error
+
+
 def canonical_json_bytes(document: Any) -> bytes:
     return json.dumps(
         document,
+        allow_nan=False,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -37,6 +71,7 @@ def atomic_write_json(path: str | Path, document: Any) -> Path:
             json.dump(
                 document,
                 handle,
+                allow_nan=False,
                 ensure_ascii=False,
                 sort_keys=True,
                 indent=2,

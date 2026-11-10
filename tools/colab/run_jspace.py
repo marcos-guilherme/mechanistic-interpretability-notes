@@ -466,6 +466,7 @@ def _add_source_provenance(
     payload = (
         json.dumps(
             provenance,
+            allow_nan=False,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -554,9 +555,24 @@ def validate_result_archive(
 
 
 def _validate_json_bytes(name: str, payload: bytes) -> None:
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str):
+        raise ValueError(f"non-finite JSON value: {value}")
+
     try:
-        json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise ValueError(f"result artifact is not valid JSON: {name}") from error
 
 

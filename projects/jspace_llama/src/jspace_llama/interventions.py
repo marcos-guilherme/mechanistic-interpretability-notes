@@ -9,13 +9,14 @@ from typing import Any
 import torch
 
 from jspace.hooks import PatchHook
+from jspace_llama.runtime import JSpaceExperimentError
 
 
-class RandomControlError(RuntimeError):
+class RandomControlError(JSpaceExperimentError):
     pass
 
 
-class InterventionPreparationError(RuntimeError):
+class InterventionPreparationError(JSpaceExperimentError):
     pass
 
 
@@ -55,9 +56,9 @@ def prepare_swap_layers(
             )
         except torch.OutOfMemoryError:
             raise
-        except Exception as exc:
+        except (KeyError, torch.linalg.LinAlgError) as exc:
             raise InterventionPreparationError(
-                f"swap-vector preparation failed at layer {layer}: {exc}"
+                f"swap-vector preparation failed at layer {layer}"
             ) from exc
         finally:
             dictionary.evict(layer)

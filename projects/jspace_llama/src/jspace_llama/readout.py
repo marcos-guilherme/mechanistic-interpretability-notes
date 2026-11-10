@@ -93,9 +93,9 @@ def _read_layer_slots(
             )
     except torch.OutOfMemoryError:
         raise
-    except Exception as exc:
+    except torch.linalg.LinAlgError as exc:
         raise ReadoutError(
-            f"workspace readout failed at layer {layer}: {exc}"
+            f"workspace readout numerical failure at layer {layer}"
         ) from exc
     finally:
         dictionary.evict(layer)

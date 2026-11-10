@@ -104,7 +104,7 @@ def test_workspace_readout_is_json_ready_and_evicts_each_layer() -> None:
 def test_workspace_readout_evicts_failing_layer() -> None:
     dictionary = ReadoutDictionary(fail_layer=2)
 
-    with pytest.raises(ReadoutError, match="materialization failed"):
+    with pytest.raises(RuntimeError, match="materialization failed"):
         read_workspace(
             model=object(),
             dictionary=dictionary,
@@ -151,13 +151,21 @@ def test_workspace_releases_layer_tensor_before_materializing_next() -> None:
 
 
 class SwapDictionary:
-    def __init__(self, *, fail_layer: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_layer: int | None = None,
+        missing_layer: int | None = None,
+    ) -> None:
         self.evicted: list[int] = []
         self.fail_layer = fail_layer
+        self.missing_layer = missing_layer
 
     def token_vector(self, layer: int, token: str):
         if layer == self.fail_layer and token == "ant":
             raise RuntimeError("target vector failed")
+        if layer == self.missing_layer and token == "ant":
+            raise KeyError(token)
         vectors = {
             "spider": torch.tensor([1.0, 0.0, 0.0, 0.0]),
             "ant": torch.tensor([0.0, 1.0, 0.0, 0.0]),
@@ -180,11 +188,17 @@ def test_swap_preparation_evicts_successful_and_failing_layers() -> None:
     assert prepared[1].vectors.device.type == "cpu"
 
     failing = SwapDictionary(fail_layer=2)
-    with pytest.raises(InterventionPreparationError, match="target vector failed"):
+    with pytest.raises(RuntimeError, match="target vector failed"):
         prepare_swap_layers(
             failing, layers=[1, 2], source="spider", target="ant"
         )
     assert failing.evicted == [1, 2]
+
+    missing = SwapDictionary(missing_layer=2)
+    with pytest.raises(InterventionPreparationError):
+        prepare_swap_layers(
+            missing, layers=[1, 2], source="spider", target="ant"
+        )
 
 
 def test_causal_clamp_matches_upstream_math_and_noop_is_exact() -> None:

@@ -14,7 +14,7 @@ import jsonschema
 import pytest
 
 from jspace_llama.config import ExperimentConfig
-from jspace_llama.runtime import JSpaceExperimentError
+from jspace_llama.runtime import AssetLoadError
 
 
 ROOT = Path(__file__).parents[3]
@@ -34,13 +34,16 @@ def load_script(path: Path, name: str):
 
 
 def complete_provenance() -> dict:
-    main_text = "The animal that spins webs has this many legs:"
-    paraphrase_text = "An animal that spins webs has how many legs?"
+    prompt_cases = ExperimentConfig().prompts.cases
     return {
-        "source": {"commit": "a" * 40, "dirty": False},
+        "source": {
+            "commit": hashlib.sha1(b"source commit").hexdigest(),
+            "dirty": False,
+        },
         "model": {
             "id": "meta-llama/Llama-3.1-8B-Instruct",
-            "resolved_revision": "b" * 40,
+            "resolved_revision": hashlib.sha1(b"model revision").hexdigest(),
+            "layer_count": 32,
         },
         "lens": {
             "repo_id": "neuronpedia/jacobian-lens",
@@ -48,9 +51,10 @@ def complete_provenance() -> dict:
                 "llama3.1-8b-it/jlens/Salesforce-wikitext/"
                 "Llama-3.1-8B-Instruct_jacobian_lens.pt"
             ),
-            "resolved_revision": "c" * 40,
-            "sha256": "d" * 64,
+            "resolved_revision": hashlib.sha1(b"lens revision").hexdigest(),
+            "sha256": hashlib.sha256(b"lens bytes").hexdigest(),
             "size_bytes": 1234,
+            "integrity_verified": True,
         },
         "software": {
             "python": "3.11.9",
@@ -69,29 +73,31 @@ def complete_provenance() -> dict:
             "seed": 42,
             "prompts": [
                 {
-                    "name": "main",
-                    "text": main_text,
+                    "name": case.name,
+                    "text": case.text,
                     "instruction_sha256": hashlib.sha256(
-                        main_text.encode()
+                        case.text.encode()
                     ).hexdigest(),
-                    "rendered_prompt_sha256": "f" * 64,
-                },
-                {
-                    "name": "paraphrase",
-                    "text": paraphrase_text,
-                    "instruction_sha256": hashlib.sha256(
-                        paraphrase_text.encode()
+                    "rendered_prompt_sha256": hashlib.sha256(
+                        f"<chat>{case.text}</chat>".encode()
                     ).hexdigest(),
-                    "rendered_prompt_sha256": "2" * 64,
-                },
+                }
+                for case in prompt_cases
             ],
-            "generation": {"max_new_tokens": 12, "do_sample": False},
+            "generation": {
+                "max_new_tokens": 12,
+                "do_sample": False,
+                "decoding": "greedy",
+                "first_line": False,
+            },
             "layers": [12, 13],
             "alphas": [4.0],
             "intervention": {
                 "source_concept": "spider",
                 "target_concept": "ant",
                 "prefill_only": True,
+                "mode": "source_to_target_clamp",
+                "random_control": "norm_matched_orthogonal",
             },
         },
     }
@@ -120,7 +126,11 @@ def successful_raw() -> dict:
         "random": classification(eight=True),
         "target": classification(six=True),
     }
-    for prompt in ("main", "paraphrase"):
+    for prompt in (
+        "main",
+        "paraphrase_animal",
+        "paraphrase_creature",
+    ):
         for condition, classified in classes.items():
             observations.append(
                 {
@@ -182,8 +192,8 @@ def test_success_requires_all_primary_gates_and_complete_provenance() -> None:
     assert final["primary"]["alphas"][0]["passed"] is True
     assert final["primary"]["readout"]["spider_present"] is True
     assert final["paraphrases"] == {
-        "prompt_count": 1,
-        "passing_prompt_alpha_count": 1,
+        "prompt_count": 2,
+        "passing_prompt_alpha_count": 2,
     }
 
 
@@ -210,15 +220,19 @@ def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(
 
     class FakeApi:
         def model_info(self, repo_id):
-            return SimpleNamespace(
-                sha=("a" if repo_id == config.assets.model_id else "b") * 40
-            )
+            return SimpleNamespace(sha=hashlib.sha1(repo_id.encode()).hexdigest())
 
-    assert resolve_huggingface_revisions(
+    model_revision, lens_revision = resolve_huggingface_revisions(
         config.assets.model_id,
         config.assets.lens_repo_id,
         api=FakeApi(),
-    ) == ("a" * 40, "b" * 40)
+    )
+    assert model_revision == hashlib.sha1(
+        config.assets.model_id.encode()
+    ).hexdigest()
+    assert lens_revision == hashlib.sha1(
+        config.assets.lens_repo_id.encode()
+    ).hexdigest()
     lens = tmp_path / "lens.pt"
     lens.write_bytes(b"pinned lens")
     digest, size = file_sha256(lens)
@@ -384,7 +398,7 @@ def test_pipeline_writes_expected_failure_artifacts_but_reraises_bugs(
     from jspace_llama.pipeline import run_pipeline
 
     def expected_failure():
-        raise JSpaceExperimentError("baseline mismatch")
+        raise AssetLoadError("secret path C:\\cache\\model")
 
     outcome = run_pipeline(
         project_root=tmp_path,
@@ -397,8 +411,10 @@ def test_pipeline_writes_expected_failure_artifacts_but_reraises_bugs(
             encoding="utf-8"
         )
     )
-    assert final["reason"]["code"] == "jspace_experiment_error"
-    assert "baseline mismatch" in final["reason"]["message"]
+    assert final["reason"] == {
+        "code": "asset_load_failed",
+        "message": "model or lens asset loading failed",
+    }
     validator = load_script(VALIDATOR_PATH, "validate_expected_failure")
     manifest = json.loads(
         (tmp_path / "results" / "execution_manifest.json").read_text(
@@ -466,7 +482,7 @@ def test_missing_readout_becomes_expected_inconclusive_artifacts(
     )
 
     assert outcome["status"] == "inconclusive"
-    assert outcome["reason"]["code"] == "evaluation_data_error"
+    assert outcome["reason"]["code"] == "evaluation_data_invalid"
 
 
 def test_schemas_accept_valid_artifacts() -> None:
@@ -591,7 +607,9 @@ def test_validator_recomputes_prompt_hash_and_completed_status() -> None:
 
     validator = load_script(VALIDATOR_PATH, "validate_results_recompute")
     manifest, final = build_success_artifacts()
-    manifest["provenance"]["experiment"]["prompts"][0]["text"] = "tampered"
+    manifest["provenance"]["experiment"]["prompts"][0][
+        "instruction_sha256"
+    ] = hashlib.sha256(b"tampered").hexdigest()
     final["manifest_sha256"] = document_sha256(manifest)
     with pytest.raises(validator.ResultsValidationError, match="prompt hash"):
         validator.validate_documents(manifest, final, schema_dir=SCHEMAS)

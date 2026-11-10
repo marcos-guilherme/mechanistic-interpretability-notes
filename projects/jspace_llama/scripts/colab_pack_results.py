@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 from pathlib import Path
 import re
 import stat
 import tarfile
+
+from jspace_llama.jsonio import StrictJSONError, strict_json_loads
 
 
 ROOT = Path("/content/jspace_llama")
@@ -111,8 +112,8 @@ def _read_json_artifact(path: Path) -> tuple[object, bytes]:
     if len(payload) > MAX_RESULT_BYTES:
         raise ValueError(f"result artifact is too large: {path}")
     try:
-        json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        strict_json_loads(payload)
+    except StrictJSONError as error:
         raise ValueError(f"result artifact is not valid JSON: {path}") from error
     return metadata, payload
 

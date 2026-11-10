@@ -4,17 +4,41 @@ from __future__ import annotations
 
 import hashlib
 from importlib import metadata
-import json
+import math
 from pathlib import Path
 import platform
 import re
 from typing import Any, Iterable
+
+from jspace_llama.config import AssetsConfig, ExperimentConfig
+from jspace_llama.jsonio import strict_json_loads
+from jspace_llama.runtime import AssetLoadError, LensIntegrityError
 
 
 JSPACE_COMMIT = "04c822a255fe0a10d84e08ec499e5e09f4b7d37a"
 SOURCE_PROVENANCE_FILENAME = "source_provenance.json"
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+PLACEHOLDERS = {"", "unknown", "none", "null", "n/a", "placeholder", "test"}
+APPROVED_ASSETS = AssetsConfig()
+APPROVED_CONFIG = ExperimentConfig()
+APPROVED_PROMPTS = tuple(
+    (case.name, case.text) for case in APPROVED_CONFIG.prompts.cases
+)
+APPROVED_GENERATION = {
+    "max_new_tokens": APPROVED_CONFIG.generation.max_new_tokens,
+    "do_sample": APPROVED_CONFIG.generation.do_sample,
+    "decoding": "greedy",
+    "first_line": False,
+}
+APPROVED_INTERVENTION = {
+    "source_concept": APPROVED_CONFIG.source,
+    "target_concept": APPROVED_CONFIG.target,
+    "prefill_only": True,
+    "mode": "source_to_target_clamp",
+    "random_control": "norm_matched_orthogonal",
+}
+APPROVED_MODEL_LAYER_COUNT = 32
 
 
 def text_sha256(value: str) -> str:
@@ -33,7 +57,15 @@ def file_sha256(path: str | Path) -> tuple[str, int]:
 
 def read_source_provenance(project_root: str | Path) -> dict[str, Any]:
     path = Path(project_root) / SOURCE_PROVENANCE_FILENAME
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = strict_json_loads(path.read_bytes())
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "commit",
+        "dirty",
+    }:
+        raise ValueError("source provenance has unexpected fields")
+    if payload["schema_version"] != 1:
+        raise ValueError("source provenance schema_version must be 1")
     commit = payload.get("commit")
     dirty = payload.get("dirty")
     if not isinstance(commit, str) or HEX_40.fullmatch(commit) is None:
@@ -71,14 +103,21 @@ def resolve_huggingface_revisions(
         from huggingface_hub import HfApi
 
         api = HfApi()
-    model_revision = str(api.model_info(model_id).sha)
-    lens_revision = str(api.model_info(lens_repo_id).sha)
+    try:
+        model_revision = str(api.model_info(model_id).sha)
+        lens_revision = str(api.model_info(lens_repo_id).sha)
+    except OSError as error:
+        raise AssetLoadError(
+            "failed to resolve pinned Hugging Face revisions"
+        ) from error
     for label, revision in (
         ("model", model_revision),
         ("lens", lens_revision),
     ):
-        if HEX_40.fullmatch(revision) is None:
-            raise ValueError(f"resolved {label} revision is not a commit hash")
+        if not _is_concrete_hex(revision, HEX_40):
+            raise AssetLoadError(
+                f"resolved {label} revision is not a commit hash"
+            )
     return model_revision, lens_revision
 
 
@@ -101,6 +140,8 @@ def build_experiment_provenance(
         "generation": {
             "max_new_tokens": int(config.generation.max_new_tokens),
             "do_sample": bool(config.generation.do_sample),
+            "decoding": "greedy",
+            "first_line": False,
         },
         "layers": [int(layer) for layer in layers],
         "alphas": [float(alpha) for alpha in config.sweep.alphas],
@@ -108,8 +149,93 @@ def build_experiment_provenance(
             "source_concept": str(config.source),
             "target_concept": str(config.target),
             "prefill_only": True,
+            "mode": "source_to_target_clamp",
+            "random_control": "norm_matched_orthogonal",
         },
     }
+
+
+def verify_lens_integrity(
+    path: str | Path,
+    expected_sha256: str,
+    expected_size: int,
+) -> bool:
+    actual_sha256, actual_size = file_sha256(path)
+    if actual_sha256 != expected_sha256 or actual_size != expected_size:
+        raise LensIntegrityError("lens changed after loading")
+    return True
+
+
+def _is_concrete_hex(value: Any, pattern: re.Pattern[str]) -> bool:
+    return (
+        isinstance(value, str)
+        and pattern.fullmatch(value) is not None
+        and len(set(value)) > 1
+    )
+
+
+def _is_concrete_text(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and value.strip().casefold() not in PLACEHOLDERS
+    )
+
+
+def _valid_prompts(prompts: Any) -> bool:
+    if not isinstance(prompts, list) or len(prompts) != len(APPROVED_PROMPTS):
+        return False
+    names = [prompt.get("name") for prompt in prompts if isinstance(prompt, dict)]
+    if len(names) != len(prompts) or len(set(names)) != len(names):
+        return False
+    for prompt, (expected_name, expected_text) in zip(
+        prompts,
+        APPROVED_PROMPTS,
+        strict=True,
+    ):
+        if (
+            prompt.get("name") != expected_name
+            or prompt.get("text") != expected_text
+            or prompt.get("instruction_sha256") != text_sha256(expected_text)
+            or not _is_concrete_hex(
+                prompt.get("rendered_prompt_sha256"),
+                HEX_64,
+            )
+            or prompt.get("rendered_prompt_sha256")
+            == prompt.get("instruction_sha256")
+        ):
+            return False
+    return True
+
+
+def _valid_layers(layers: Any, layer_count: Any) -> bool:
+    return (
+        isinstance(layer_count, int)
+        and not isinstance(layer_count, bool)
+        and layer_count == APPROVED_MODEL_LAYER_COUNT
+        and isinstance(layers, list)
+        and bool(layers)
+        and all(
+            isinstance(layer, int)
+            and not isinstance(layer, bool)
+            and 0 <= layer < layer_count
+            for layer in layers
+        )
+        and layers == sorted(set(layers))
+    )
+
+
+def _valid_alphas(alphas: Any) -> bool:
+    return (
+        isinstance(alphas, list)
+        and bool(alphas)
+        and all(
+            isinstance(alpha, (int, float))
+            and not isinstance(alpha, bool)
+            and math.isfinite(float(alpha))
+            for alpha in alphas
+        )
+        and len({float(alpha) for alpha in alphas}) == len(alphas)
+    )
 
 
 def provenance_is_complete(provenance: dict[str, Any]) -> bool:
@@ -122,19 +248,22 @@ def provenance_is_complete(provenance: dict[str, Any]) -> bool:
         experiment = provenance["experiment"]
         return all(
             (
-                HEX_40.fullmatch(source["commit"]) is not None,
+                _is_concrete_hex(source["commit"], HEX_40),
                 isinstance(source["dirty"], bool),
-                bool(model["id"]),
-                HEX_40.fullmatch(model["resolved_revision"]) is not None,
-                bool(lens["repo_id"]),
-                bool(lens["filename"]),
-                HEX_40.fullmatch(lens["resolved_revision"]) is not None,
-                HEX_64.fullmatch(lens["sha256"]) is not None,
-                int(lens["size_bytes"]) > 0,
+                model["id"] == APPROVED_ASSETS.model_id,
+                _is_concrete_hex(model["resolved_revision"], HEX_40),
+                model["layer_count"] == APPROVED_MODEL_LAYER_COUNT,
+                lens["repo_id"] == APPROVED_ASSETS.lens_repo_id,
+                lens["filename"] == APPROVED_ASSETS.lens_filename,
+                _is_concrete_hex(lens["resolved_revision"], HEX_40),
+                _is_concrete_hex(lens["sha256"], HEX_64),
+                isinstance(lens["size_bytes"], int),
+                not isinstance(lens["size_bytes"], bool),
+                lens["size_bytes"] > 0,
+                lens["integrity_verified"] is True,
                 software["jspace_commit"] == JSPACE_COMMIT,
                 all(
-                    bool(software[name])
-                    and software[name] != "unknown"
+                    _is_concrete_text(software[name])
                     for name in (
                         "python",
                         "pytorch",
@@ -143,26 +272,16 @@ def provenance_is_complete(provenance: dict[str, Any]) -> bool:
                         "jspace",
                     )
                 ),
-                bool(hardware["gpu_name"]),
-                bool(hardware["cuda_version"]),
-                bool(hardware["dtype"]),
+                _is_concrete_text(hardware["gpu_name"]),
+                _is_concrete_text(hardware["cuda_version"]),
+                hardware["dtype"] == APPROVED_ASSETS.dtype,
                 isinstance(experiment["seed"], int),
-                bool(experiment["prompts"]),
-                all(
-                    bool(prompt["text"])
-                    and (
-                        HEX_64.fullmatch(prompt["instruction_sha256"])
-                        is not None
-                    )
-                    and HEX_64.fullmatch(
-                        prompt["rendered_prompt_sha256"]
-                    )
-                    is not None
-                    for prompt in experiment["prompts"]
-                ),
-                bool(experiment["layers"]),
-                bool(experiment["alphas"]),
-                experiment["intervention"]["prefill_only"] is True,
+                not isinstance(experiment["seed"], bool),
+                _valid_prompts(experiment["prompts"]),
+                experiment["generation"] == APPROVED_GENERATION,
+                _valid_layers(experiment["layers"], model["layer_count"]),
+                _valid_alphas(experiment["alphas"]),
+                experiment["intervention"] == APPROVED_INTERVENTION,
             )
         )
     except (KeyError, TypeError, ValueError):

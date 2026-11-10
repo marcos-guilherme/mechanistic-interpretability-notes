@@ -52,10 +52,21 @@
         "model": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["id", "resolved_revision"],
+          "required": ["id", "resolved_revision", "layer_count"],
           "properties": {
-            "id": {"type": ["string", "null"]},
-            "resolved_revision": {"$ref": "#/$defs/sha40OrNull"}
+            "id": {
+              "oneOf": [
+                {"type": "null"},
+                {"const": "meta-llama/Llama-3.1-8B-Instruct"}
+              ]
+            },
+            "resolved_revision": {"$ref": "#/$defs/sha40OrNull"},
+            "layer_count": {
+              "oneOf": [
+                {"type": "null"},
+                {"const": 32}
+              ]
+            }
           }
         },
         "lens": {
@@ -66,17 +77,31 @@
             "filename",
             "resolved_revision",
             "sha256",
-            "size_bytes"
+            "size_bytes",
+            "integrity_verified"
           ],
           "properties": {
-            "repo_id": {"type": ["string", "null"]},
-            "filename": {"type": ["string", "null"]},
+            "repo_id": {
+              "oneOf": [
+                {"type": "null"},
+                {"const": "neuronpedia/jacobian-lens"}
+              ]
+            },
+            "filename": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "const": "llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt"
+                }
+              ]
+            },
             "resolved_revision": {"$ref": "#/$defs/sha40OrNull"},
             "sha256": {"$ref": "#/$defs/sha256OrNull"},
             "size_bytes": {
               "type": ["integer", "null"],
               "minimum": 1
-            }
+            },
+            "integrity_verified": {"type": ["boolean", "null"]}
           }
         },
         "software": {
@@ -91,11 +116,11 @@
             "jspace_commit"
           ],
           "properties": {
-            "python": {"type": "string"},
-            "pytorch": {"type": "string"},
-            "transformers": {"type": "string"},
-            "huggingface_hub": {"type": "string"},
-            "jspace": {"type": "string"},
+            "python": {"type": "string", "minLength": 1},
+            "pytorch": {"type": "string", "minLength": 1},
+            "transformers": {"type": "string", "minLength": 1},
+            "huggingface_hub": {"type": "string", "minLength": 1},
+            "jspace": {"type": "string", "minLength": 1},
             "jspace_commit": {"const": "04c822a255fe0a10d84e08ec499e5e09f4b7d37a"}
           }
         },
@@ -106,7 +131,12 @@
           "properties": {
             "gpu_name": {"type": ["string", "null"]},
             "cuda_version": {"type": ["string", "null"]},
-            "dtype": {"type": ["string", "null"]}
+            "dtype": {
+              "oneOf": [
+                {"type": "null"},
+                {"const": "bfloat16"}
+              ]
+            }
           }
         },
         "experiment": {
@@ -124,21 +154,50 @@
             "seed": {"type": ["integer", "null"]},
             "prompts": {
               "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "name",
-                  "text",
-                  "instruction_sha256",
-                  "rendered_prompt_sha256"
-                ],
-                "properties": {
-                  "name": {"type": "string"},
-                  "text": {"type": "string", "minLength": 1},
-                  "instruction_sha256": {"$ref": "#/$defs/sha256"},
-                  "rendered_prompt_sha256": {"$ref": "#/$defs/sha256"}
+              "maxItems": 3,
+              "prefixItems": [
+                {
+                  "allOf": [
+                    {"$ref": "#/$defs/prompt"},
+                    {
+                      "properties": {
+                        "name": {"const": "main"},
+                        "text": {
+                          "const": "The animal that spins webs has this many legs:"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "allOf": [
+                    {"$ref": "#/$defs/prompt"},
+                    {
+                      "properties": {
+                        "name": {"const": "paraphrase_animal"},
+                        "text": {
+                          "const": "An animal that spins webs has how many legs?"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "allOf": [
+                    {"$ref": "#/$defs/prompt"},
+                    {
+                      "properties": {
+                        "name": {"const": "paraphrase_creature"},
+                        "text": {
+                          "const": "How many legs does the creature that spins webs have?"
+                        }
+                      }
+                    }
+                  ]
                 }
+              ],
+              "items": {
+                "$ref": "#/$defs/prompt"
               }
             },
             "generation": {
@@ -147,17 +206,24 @@
                 {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["max_new_tokens", "do_sample"],
+                  "required": [
+                    "max_new_tokens",
+                    "do_sample",
+                    "decoding",
+                    "first_line"
+                  ],
                   "properties": {
-                    "max_new_tokens": {"type": "integer", "minimum": 1},
-                    "do_sample": {"type": "boolean"}
+                    "max_new_tokens": {"const": 12},
+                    "do_sample": {"const": false},
+                    "decoding": {"const": "greedy"},
+                    "first_line": {"const": false}
                   }
                 }
               ]
             },
             "layers": {
               "type": "array",
-              "items": {"type": "integer", "minimum": 0},
+              "items": {"type": "integer", "minimum": 0, "maximum": 31},
               "uniqueItems": true
             },
             "alphas": {
@@ -174,12 +240,16 @@
                   "required": [
                     "source_concept",
                     "target_concept",
-                    "prefill_only"
+                    "prefill_only",
+                    "mode",
+                    "random_control"
                   ],
                   "properties": {
-                    "source_concept": {"type": "string"},
-                    "target_concept": {"type": "string"},
-                    "prefill_only": {"const": true}
+                    "source_concept": {"const": "spider"},
+                    "target_concept": {"const": "ant"},
+                    "prefill_only": {"const": true},
+                    "mode": {"const": "source_to_target_clamp"},
+                    "random_control": {"const": "norm_matched_orthogonal"}
                   }
                 }
               ]
@@ -189,9 +259,86 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "success"}}
+      },
+      "then": {
+        "properties": {
+          "provenance_complete": {"const": true},
+          "provenance": {
+            "properties": {
+              "source": {
+                "properties": {
+                  "commit": {"$ref": "#/$defs/sha40"},
+                  "dirty": {"type": "boolean"}
+                }
+              },
+              "model": {
+                "properties": {
+                  "id": {"const": "meta-llama/Llama-3.1-8B-Instruct"},
+                  "resolved_revision": {"$ref": "#/$defs/sha40"},
+                  "layer_count": {"const": 32}
+                }
+              },
+              "lens": {
+                "properties": {
+                  "repo_id": {"const": "neuronpedia/jacobian-lens"},
+                  "filename": {
+                    "const": "llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt"
+                  },
+                  "resolved_revision": {"$ref": "#/$defs/sha40"},
+                  "sha256": {"$ref": "#/$defs/sha256"},
+                  "size_bytes": {"type": "integer", "minimum": 1},
+                  "integrity_verified": {"const": true}
+                }
+              },
+              "hardware": {
+                "properties": {
+                  "gpu_name": {"type": "string", "minLength": 1},
+                  "cuda_version": {"type": "string", "minLength": 1},
+                  "dtype": {"const": "bfloat16"}
+                }
+              },
+              "experiment": {
+                "properties": {
+                  "prompts": {"minItems": 3, "maxItems": 3},
+                  "generation": {"type": "object"},
+                  "layers": {"minItems": 1},
+                  "alphas": {"minItems": 1},
+                  "intervention": {"type": "object"}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "text",
+        "instruction_sha256",
+        "rendered_prompt_sha256"
+      ],
+      "properties": {
+        "name": {"type": "string"},
+        "text": {"type": "string", "minLength": 1},
+        "instruction_sha256": {"$ref": "#/$defs/sha256"},
+        "rendered_prompt_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "sha40OrNull": {
       "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha40": {
+      "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
     "sha256": {
@@ -210,8 +357,42 @@
           "additionalProperties": false,
           "required": ["code", "message"],
           "properties": {
-            "code": {"type": "string", "minLength": 1},
-            "message": {"type": "string", "minLength": 1}
+            "code": {
+              "enum": [
+                "incomplete_provenance",
+                "primary_gates_failed",
+                "cuda_required",
+                "asset_load_failed",
+                "resource_exhausted",
+                "tokenization_failed",
+                "dimension_mismatch",
+                "layer_band_invalid",
+                "lens_integrity_failed",
+                "readout_failed",
+                "intervention_preparation_failed",
+                "random_control_failed",
+                "evaluation_data_invalid",
+                "unexpected_error"
+              ]
+            },
+            "message": {
+              "enum": [
+                "reproducible provenance is incomplete",
+                "no alpha passed every primary-prompt gate",
+                "a CUDA runtime is required",
+                "model or lens asset loading failed",
+                "GPU resources were exhausted",
+                "intervention concepts are not valid single tokens",
+                "model and lens dimensions do not match",
+                "the selected layer band is invalid",
+                "lens integrity verification failed",
+                "workspace readout preparation failed",
+                "intervention preparation failed",
+                "random control preparation failed",
+                "required aggregate evaluation data is missing",
+                "unexpected programming error; see notebook traceback"
+              ]
+            }
           }
         }
       ]

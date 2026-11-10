@@ -11,6 +11,7 @@
     "status",
     "reason",
     "manifest_sha256",
+    "integrity",
     "primary",
     "paraphrases"
   ],
@@ -27,13 +28,59 @@
           "additionalProperties": false,
           "required": ["code", "message"],
           "properties": {
-            "code": {"type": "string", "minLength": 1},
-            "message": {"type": "string", "minLength": 1}
+            "code": {
+              "enum": [
+                "incomplete_provenance",
+                "primary_gates_failed",
+                "cuda_required",
+                "asset_load_failed",
+                "resource_exhausted",
+                "tokenization_failed",
+                "dimension_mismatch",
+                "layer_band_invalid",
+                "lens_integrity_failed",
+                "readout_failed",
+                "intervention_preparation_failed",
+                "random_control_failed",
+                "evaluation_data_invalid"
+              ]
+            },
+            "message": {
+              "enum": [
+                "reproducible provenance is incomplete",
+                "no alpha passed every primary-prompt gate",
+                "a CUDA runtime is required",
+                "model or lens asset loading failed",
+                "GPU resources were exhausted",
+                "intervention concepts are not valid single tokens",
+                "model and lens dimensions do not match",
+                "the selected layer band is invalid",
+                "lens integrity verification failed",
+                "workspace readout preparation failed",
+                "intervention preparation failed",
+                "random control preparation failed",
+                "required aggregate evaluation data is missing"
+              ]
+            }
           }
         }
       ]
     },
     "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lens_sha256", "lens_integrity_verified"],
+      "properties": {
+        "lens_sha256": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/sha256"}
+          ]
+        },
+        "lens_integrity_verified": {"type": "boolean"}
+      }
+    },
     "primary": {
       "type": "object",
       "additionalProperties": false,
@@ -76,6 +123,24 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "success"}}
+      },
+      "then": {
+        "properties": {
+          "reason": {"type": "null"},
+          "integrity": {
+            "properties": {
+              "lens_sha256": {"$ref": "#/$defs/sha256"},
+              "lens_integrity_verified": {"const": true}
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "sha256": {
       "type": "string",

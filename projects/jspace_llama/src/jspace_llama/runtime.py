@@ -39,6 +39,10 @@ class LayerBandError(JSpaceExperimentError):
     pass
 
 
+class LensIntegrityError(JSpaceExperimentError):
+    pass
+
+
 @dataclass(frozen=True)
 class RuntimeInfo:
     device: str
@@ -112,7 +116,7 @@ def download_lens_file(
             filename=assets.lens_filename,
             revision=resolved_revision,
         )
-    except Exception as exc:
+    except OSError as exc:
         raise AssetLoadError(
             f"failed to download lens {assets.lens_repo_id}/{assets.lens_filename}"
         ) from exc
@@ -204,18 +208,28 @@ def load_components(
             dtype=torch.bfloat16,
             device="cuda",
         )
+    except torch.OutOfMemoryError as exc:
+        raise ResourceExhaustionError(
+            f"CUDA out of memory while loading {assets.model_id}"
+        ) from exc
+    except OSError as exc:
+        raise AssetLoadError(
+            f"failed to load model asset {assets.model_id}"
+        ) from exc
+    try:
         lens = lens_cls.load(str(lens_path))
-        resolved_layers = resolve_layer_band(model, lens, layers)
+    except torch.OutOfMemoryError as exc:
+        raise ResourceExhaustionError(
+            "CUDA out of memory while loading lens"
+        ) from exc
+    except (OSError, EOFError, ValueError) as exc:
+        raise AssetLoadError("failed to load lens asset") from exc
+    resolved_layers = resolve_layer_band(model, lens, layers)
+    try:
         dictionary = dictionary_cls(model, lens, device="cuda")
     except torch.OutOfMemoryError as exc:
         raise ResourceExhaustionError(
-            f"CUDA out of memory while loading {assets.model_id}: {exc}"
-        ) from exc
-    except (DimensionMismatchError, LayerBandError):
-        raise
-    except Exception as exc:
-        raise AssetLoadError(
-            f"failed to load model/lens assets for {assets.model_id}"
+            "CUDA out of memory while preparing dictionary"
         ) from exc
     return RuntimeBundle(
         model=model,
