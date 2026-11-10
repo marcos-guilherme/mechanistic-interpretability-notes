@@ -171,11 +171,20 @@ def test_download_and_component_loading_use_exact_pinned_assets() -> None:
         download_calls.append(kwargs)
         return "C:/cache/lens.pt"
 
-    assert download_lens_file(assets, downloader=downloader) == "C:/cache/lens.pt"
+    revision = "a" * 40
+    assert (
+        download_lens_file(
+            assets,
+            resolved_revision=revision,
+            downloader=downloader,
+        )
+        == "C:/cache/lens.pt"
+    )
     assert download_calls == [
         {
             "repo_id": assets.lens_repo_id,
             "filename": assets.lens_filename,
+            "revision": revision,
         }
     ]
 

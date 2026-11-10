@@ -7,8 +7,10 @@ from typing import Any
 
 import torch
 
+from jspace_llama.runtime import JSpaceExperimentError
 
-class ReadoutError(RuntimeError):
+
+class ReadoutError(JSpaceExperimentError):
     pass
 
 

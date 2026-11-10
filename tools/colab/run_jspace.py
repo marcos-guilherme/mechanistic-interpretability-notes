@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 import shutil
 import stat
@@ -34,6 +36,7 @@ RESULT_ALLOWLIST = frozenset(
 ARCHIVE_ROOT_FILES = frozenset({"README.md", "pyproject.toml", "uv.lock"})
 ARCHIVE_SUFFIXES = {
     "notebooks": frozenset({".ipynb"}),
+    "schemas": frozenset({".json"}),
     "scripts": frozenset({".py"}),
     "src": frozenset({".py"}),
     "tests": frozenset({".py"}),
@@ -432,10 +435,55 @@ def _add_regular_file(
         handle.addfile(info, source)
 
 
+def capture_source_provenance(repository_root: Path = ROOT) -> dict[str, object]:
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository_root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError("git returned an invalid source commit")
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=normal"],
+        cwd=repository_root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    return {
+        "schema_version": 1,
+        "commit": revision,
+        "dirty": bool(status.strip()),
+    }
+
+
+def _add_source_provenance(
+    handle: tarfile.TarFile,
+    provenance: dict[str, object],
+) -> None:
+    payload = (
+        json.dumps(
+            provenance,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    info = tarfile.TarInfo("jspace_llama/source_provenance.json")
+    info.size = len(payload)
+    info.mode = 0o644
+    info.mtime = 0
+    handle.addfile(info, io.BytesIO(payload))
+
+
 def build_archive(
     *,
     project: Path = PROJECT,
     staging: Path = STAGING,
+    repository_root: Path = ROOT,
 ) -> Path:
     staging.mkdir(parents=True, exist_ok=True)
     archive = staging / "jspace_llama.tar.gz"
@@ -449,6 +497,10 @@ def build_archive(
     with tarfile.open(archive, "x:gz") as handle:
         for path in _archive_candidates(project):
             _add_regular_file(handle, path, project)
+        _add_source_provenance(
+            handle,
+            capture_source_provenance(repository_root),
+        )
     return archive
 
 

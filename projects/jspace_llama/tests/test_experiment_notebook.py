@@ -110,17 +110,22 @@ def test_notebook_is_thin_ordered_and_contains_no_outputs_or_secrets() -> None:
     )
 
     assert len(notebook.cells) >= 6
-    assert sources.index("ExperimentConfig") < sources.index("require_cuda")
-    assert sources.index("require_cuda") < sources.index("read_workspace")
-    assert sources.index("read_workspace") < sources.index("run_experiment")
-    assert sources.index("run_experiment") < sources.index("write_text")
+    assert sources.index("config = ExperimentConfig()") < sources.index(
+        "project_root = find_project_root()"
+    )
+    assert sources.index("project_root = find_project_root()") < sources.index(
+        "outcome = run_pipeline("
+    )
+    assert "run_experiment" not in sources
+    assert "read_workspace" not in sources
+    assert "download_lens_file" not in sources
+    assert "write_text" not in sources
     assert "def " not in code_sources
     assert "HF_TOKEN" not in sources
     assert "hf_" + "token" not in sources.lower()
     assert "api_key" not in sources.lower()
     assert "find_project_root" in sources
-    assert 'project_root / "results" / "readout_and_causal_swap.json"' in sources
-    assert "output_path.parent.mkdir(parents=True, exist_ok=True)" in sources
+    assert "run_pipeline(project_root=project_root, config=config)" in sources
     assert 'Path("../results' not in sources
     for cell in notebook.cells:
         if cell.cell_type == "code":

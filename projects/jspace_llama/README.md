@@ -11,10 +11,10 @@ intermediate concept `spider` for `ant` and compares the resulting answer with
 baseline and control interventions.
 
 The reusable core now provides pinned configuration, CUDA/runtime validation,
-memory-bounded readout and interventions, controls, and structured observation
-orchestration. `notebooks/01_readout_and_causal_swap.ipynb` is the thin entry
-point for the real run. Results are not yet available; the 8B model is
-intentionally not executed in the repository test suite.
+memory-bounded readout and interventions, controls, provenance capture, and a
+notebook-callable artifact pipeline. `notebooks/01_readout_and_causal_swap.ipynb`
+is the thin entry point for the real run. Results are not yet available; the 8B
+model is intentionally not executed in the repository test suite.
 
 ## Colab L4 workflow
 
@@ -54,3 +54,29 @@ both must exist. Notebook execution validates the fresh ignored
 failures leave the Colab session available for diagnosis, so stop it
 explicitly. If L4 allocation is unavailable, stop the partial session and
 explicitly retry with `--gpu T4` or `--gpu A100`.
+
+## Result artifacts and validation
+
+The real pipeline writes raw continuations, rendered prompts, workspace slots,
+and other diagnostics only to the ignored
+`artifacts/readout_and_causal_swap.json`. The two fetched files,
+`results/execution_manifest.json` and `results/final_evaluation.json`, contain
+compact aggregate evidence and reproducibility metadata only.
+
+Validate fetched or fixture artifacts locally without loading the 8B model:
+
+```powershell
+cd projects/jspace_llama
+uv run python scripts/validate_results.py
+uv run pytest -q
+```
+
+`success` means that provenance is complete and at least one tested alpha
+passes every primary `main`-prompt gate: baseline and no-op preserve eight,
+the random control neither degrades nor comparably reroutes to six, the target
+cleanly reroutes to six without eight or `ant`, and the selected-layer readout
+contains `spider`. Any expected runtime failure, incomplete provenance, or
+failed gate is `inconclusive` with a machine-readable reason; it is not negative
+evidence. Paraphrase counts are secondary transparency data and are not a
+general claim. Unexpected programming errors are recorded best-effort in the
+manifest and then re-raised.

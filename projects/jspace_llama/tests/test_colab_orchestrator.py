@@ -159,6 +159,7 @@ def test_archive_contains_only_remote_project_inputs(tmp_path: Path) -> None:
     archive = runner.build_archive(
         project=project,
         staging=tmp_path / ".colab-staging",
+        repository_root=ROOT,
     )
 
     with tarfile.open(archive, "r:gz") as handle:
@@ -173,6 +174,7 @@ def test_archive_contains_only_remote_project_inputs(tmp_path: Path) -> None:
         "jspace_llama/tests/test_core.py",
         "jspace_llama/scripts/colab_bootstrap.py",
         "jspace_llama/notebooks/01_readout_and_causal_swap.ipynb",
+        "jspace_llama/source_provenance.json",
     }
 
 

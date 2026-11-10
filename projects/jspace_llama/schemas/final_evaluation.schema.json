@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "final_evaluation.schema.json",
+  "title": "J-space final evaluation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact",
+    "run_id",
+    "status",
+    "reason",
+    "manifest_sha256",
+    "primary",
+    "paraphrases"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact": {"const": "final_evaluation"},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["success", "inconclusive"]},
+    "reason": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "primary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt_name",
+        "readout",
+        "alphas",
+        "passing_alphas",
+        "passing_alpha_count"
+      ],
+      "properties": {
+        "prompt_name": {"const": "main"},
+        "readout": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["spider_present"],
+          "properties": {
+            "spider_present": {"type": "boolean"}
+          }
+        },
+        "alphas": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/alphaEvaluation"}
+        },
+        "passing_alphas": {
+          "type": "array",
+          "items": {"type": "number"},
+          "uniqueItems": true
+        },
+        "passing_alpha_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "paraphrases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_count", "passing_prompt_alpha_count"],
+      "properties": {
+        "prompt_count": {"type": "integer", "minimum": 0},
+        "passing_prompt_alpha_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "answer_evidence",
+        "target_entity_leakage",
+        "degradation"
+      ],
+      "properties": {
+        "answer_evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["eight", "six"],
+          "properties": {
+            "eight": {"type": "boolean"},
+            "six": {"type": "boolean"}
+          }
+        },
+        "target_entity_leakage": {"type": "boolean"},
+        "degradation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["empty", "repetition"],
+          "properties": {
+            "empty": {"type": "boolean"},
+            "repetition": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "readout_spider_present",
+        "baseline_eight",
+        "baseline_not_degraded",
+        "noop_eight",
+        "noop_not_six",
+        "random_not_comparable_six_reroute",
+        "random_not_degraded",
+        "target_six",
+        "target_not_eight",
+        "target_no_ant",
+        "target_nonempty",
+        "target_nonrepetitive"
+      ],
+      "properties": {
+        "readout_spider_present": {"type": "boolean"},
+        "baseline_eight": {"type": "boolean"},
+        "baseline_not_degraded": {"type": "boolean"},
+        "noop_eight": {"type": "boolean"},
+        "noop_not_six": {"type": "boolean"},
+        "random_not_comparable_six_reroute": {"type": "boolean"},
+        "random_not_degraded": {"type": "boolean"},
+        "target_six": {"type": "boolean"},
+        "target_not_eight": {"type": "boolean"},
+        "target_no_ant": {"type": "boolean"},
+        "target_nonempty": {"type": "boolean"},
+        "target_nonrepetitive": {"type": "boolean"}
+      }
+    },
+    "alphaEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alpha",
+        "conditions",
+        "gates",
+        "passed",
+        "reasons"
+      ],
+      "properties": {
+        "alpha": {"type": "number"},
+        "conditions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baseline", "noop", "random", "target"],
+          "properties": {
+            "baseline": {"$ref": "#/$defs/classification"},
+            "noop": {"$ref": "#/$defs/classification"},
+            "random": {"$ref": "#/$defs/classification"},
+            "target": {"$ref": "#/$defs/classification"}
+          }
+        },
+        "gates": {"$ref": "#/$defs/gates"},
+        "passed": {"type": "boolean"},
+        "reasons": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

@@ -99,6 +99,7 @@ def require_cuda(torch_module: Any = torch) -> RuntimeInfo:
 def download_lens_file(
     assets: AssetsConfig,
     *,
+    resolved_revision: str,
     downloader: Callable[..., str] | None = None,
 ) -> str:
     if downloader is None:
@@ -109,6 +110,7 @@ def download_lens_file(
         return downloader(
             repo_id=assets.lens_repo_id,
             filename=assets.lens_filename,
+            revision=resolved_revision,
         )
     except Exception as exc:
         raise AssetLoadError(
@@ -184,6 +186,7 @@ def load_components(
     lens_path: str | Path,
     *,
     layers: Iterable[int] | None = None,
+    model_source: str | Path | None = None,
     hf_model_cls: Any = None,
     lens_cls: Any = None,
     dictionary_cls: Any = None,
@@ -197,7 +200,7 @@ def load_components(
         dictionary_cls = dictionary_cls or JLensDictionary
     try:
         model = hf_model_cls.load(
-            assets.model_id,
+            str(model_source or assets.model_id),
             dtype=torch.bfloat16,
             device="cuda",
         )

@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution_manifest.schema.json",
+  "title": "J-space execution manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact",
+    "run_id",
+    "started_at",
+    "ended_at",
+    "terminal_status",
+    "status",
+    "provenance_complete",
+    "provenance",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact": {"const": "execution_manifest"},
+    "run_id": {"type": "string", "minLength": 1},
+    "started_at": {"type": "string", "format": "date-time"},
+    "ended_at": {"type": "string", "format": "date-time"},
+    "terminal_status": {
+      "enum": ["completed", "expected_failure", "unexpected_error"]
+    },
+    "status": {"enum": ["success", "inconclusive", "error"]},
+    "provenance_complete": {"type": "boolean"},
+    "reason": {"$ref": "#/$defs/reasonOrNull"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "model",
+        "lens",
+        "software",
+        "hardware",
+        "experiment"
+      ],
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["commit", "dirty"],
+          "properties": {
+            "commit": {"$ref": "#/$defs/sha40OrNull"},
+            "dirty": {"type": ["boolean", "null"]}
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "resolved_revision"],
+          "properties": {
+            "id": {"type": ["string", "null"]},
+            "resolved_revision": {"$ref": "#/$defs/sha40OrNull"}
+          }
+        },
+        "lens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repo_id",
+            "filename",
+            "resolved_revision",
+            "sha256",
+            "size_bytes"
+          ],
+          "properties": {
+            "repo_id": {"type": ["string", "null"]},
+            "filename": {"type": ["string", "null"]},
+            "resolved_revision": {"$ref": "#/$defs/sha40OrNull"},
+            "sha256": {"$ref": "#/$defs/sha256OrNull"},
+            "size_bytes": {
+              "type": ["integer", "null"],
+              "minimum": 1
+            }
+          }
+        },
+        "software": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "python",
+            "pytorch",
+            "transformers",
+            "huggingface_hub",
+            "jspace",
+            "jspace_commit"
+          ],
+          "properties": {
+            "python": {"type": "string"},
+            "pytorch": {"type": "string"},
+            "transformers": {"type": "string"},
+            "huggingface_hub": {"type": "string"},
+            "jspace": {"type": "string"},
+            "jspace_commit": {"const": "04c822a255fe0a10d84e08ec499e5e09f4b7d37a"}
+          }
+        },
+        "hardware": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gpu_name", "cuda_version", "dtype"],
+          "properties": {
+            "gpu_name": {"type": ["string", "null"]},
+            "cuda_version": {"type": ["string", "null"]},
+            "dtype": {"type": ["string", "null"]}
+          }
+        },
+        "experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "seed",
+            "prompts",
+            "generation",
+            "layers",
+            "alphas",
+            "intervention"
+          ],
+          "properties": {
+            "seed": {"type": ["integer", "null"]},
+            "prompts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "text",
+                  "instruction_sha256",
+                  "rendered_prompt_sha256"
+                ],
+                "properties": {
+                  "name": {"type": "string"},
+                  "text": {"type": "string", "minLength": 1},
+                  "instruction_sha256": {"$ref": "#/$defs/sha256"},
+                  "rendered_prompt_sha256": {"$ref": "#/$defs/sha256"}
+                }
+              }
+            },
+            "generation": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["max_new_tokens", "do_sample"],
+                  "properties": {
+                    "max_new_tokens": {"type": "integer", "minimum": 1},
+                    "do_sample": {"type": "boolean"}
+                  }
+                }
+              ]
+            },
+            "layers": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 0},
+              "uniqueItems": true
+            },
+            "alphas": {
+              "type": "array",
+              "items": {"type": "number"},
+              "uniqueItems": true
+            },
+            "intervention": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "source_concept",
+                    "target_concept",
+                    "prefill_only"
+                  ],
+                  "properties": {
+                    "source_concept": {"type": "string"},
+                    "target_concept": {"type": "string"},
+                    "prefill_only": {"const": true}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha40OrNull": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256OrNull": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reasonOrNull": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    }
+  }
+}
