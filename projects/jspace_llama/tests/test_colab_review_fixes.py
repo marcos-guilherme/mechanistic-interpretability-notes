@@ -985,3 +985,266 @@ def test_runner_help_works_without_site_packages() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "attributes", "message"),
+    [
+        (stat.S_IFLNK, 0, "symlink"),
+        (stat.S_IFDIR, 0x400, "reparse"),
+        (stat.S_IFREG, 0, "directory"),
+        (stat.S_IFIFO, 0, "directory"),
+    ],
+)
+def test_staging_rejects_unsafe_metadata_without_overwrite(
+    tmp_path: Path,
+    mode: int,
+    attributes: int,
+    message: str,
+) -> None:
+    runner = load_module(
+        RUNNER_PATH,
+        f"fetch_staging_metadata_{mode}_{attributes}",
+    )
+    root = tmp_path / "repository"
+    root.mkdir()
+    staging = root / ".colab-staging"
+    staging.mkdir()
+    sentinel = staging / "sentinel.txt"
+    sentinel.write_text("untouched", encoding="utf-8")
+    metadata = SimpleNamespace(
+        st_mode=mode,
+        st_file_attributes=attributes,
+        st_dev=staging.stat().st_dev,
+        st_ino=staging.stat().st_ino,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        runner.validate_staging_directory(
+            staging,
+            root,
+            metadata=metadata,
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "untouched"
+
+
+def test_staging_must_resolve_inside_repository(tmp_path: Path) -> None:
+    runner = load_module(RUNNER_PATH, "fetch_staging_outside")
+    root = tmp_path / "repository"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises(ValueError, match="outside repository"):
+        runner.validate_staging_directory(outside, root)
+
+
+def run_fake_fetch(
+    runner,
+    staging: Path,
+    project: Path,
+    observed_paths: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str]) -> None:
+        local = Path(command[-1])
+        assert not os.path.lexists(local)
+        assert local.parent != staging
+        observed_paths.append(local)
+        local.write_bytes(b"downloaded")
+
+    def fake_extract(archive: Path, destination: Path) -> None:
+        assert archive == observed_paths[-1]
+        assert archive.read_bytes() == b"downloaded"
+        assert destination == project
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(runner, "extract_results_archive", fake_extract)
+    runner.fetch_results(
+        "jspace-llama",
+        staging=staging,
+        project=project,
+        root=staging.parent,
+    )
+
+
+def test_fetch_uses_fresh_randomized_private_paths_and_cleans_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "fetch_random_paths")
+    root = tmp_path / "repository"
+    root.mkdir()
+    staging = root / ".colab-staging"
+    project = root / "projects" / "jspace_llama"
+    project.mkdir(parents=True)
+    predictable = staging / "jspace_results.tar.gz"
+    staging.mkdir()
+    predictable.write_text("pre-existing", encoding="utf-8")
+    observed_paths: list[Path] = []
+
+    run_fake_fetch(runner, staging, project, observed_paths, monkeypatch)
+    run_fake_fetch(runner, staging, project, observed_paths, monkeypatch)
+
+    assert len(set(observed_paths)) == 2
+    assert all(not path.parent.exists() for path in observed_paths)
+    assert predictable.read_text(encoding="utf-8") == "pre-existing"
+
+
+def test_fetch_does_not_overwrite_predictable_hard_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "fetch_hard_link")
+    root = tmp_path / "repository"
+    root.mkdir()
+    staging = root / ".colab-staging"
+    staging.mkdir()
+    project = root / "projects" / "jspace_llama"
+    project.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched", encoding="utf-8")
+    create_hard_link_or_skip(
+        victim,
+        staging / "jspace_results.tar.gz",
+    )
+
+    run_fake_fetch(runner, staging, project, [], monkeypatch)
+
+    assert victim.read_text(encoding="utf-8") == "untouched"
+
+
+def test_fetch_does_not_overwrite_predictable_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "fetch_symlink")
+    root = tmp_path / "repository"
+    root.mkdir()
+    staging = root / ".colab-staging"
+    staging.mkdir()
+    project = root / "projects" / "jspace_llama"
+    project.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched", encoding="utf-8")
+    link = staging / "jspace_results.tar.gz"
+    try:
+        link.symlink_to(victim)
+    except OSError:
+        metadata = SimpleNamespace(
+            st_mode=stat.S_IFLNK,
+            st_file_attributes=0,
+            st_dev=staging.stat().st_dev,
+            st_ino=staging.stat().st_ino,
+        )
+        with pytest.raises(ValueError, match="symlink"):
+            runner.validate_staging_directory(
+                staging,
+                root,
+                metadata=metadata,
+            )
+        assert victim.read_text(encoding="utf-8") == "untouched"
+        return
+
+    run_fake_fetch(runner, staging, project, [], monkeypatch)
+
+    assert link.is_symlink()
+    assert victim.read_text(encoding="utf-8") == "untouched"
+
+
+def test_fetch_does_not_overwrite_predictable_special_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "fetch_special_entry")
+    root = tmp_path / "repository"
+    root.mkdir()
+    staging = root / ".colab-staging"
+    staging.mkdir()
+    project = root / "projects" / "jspace_llama"
+    project.mkdir(parents=True)
+    special = staging / "jspace_results.tar.gz"
+    special.mkdir()
+    sentinel = special / "sentinel.txt"
+    sentinel.write_text("untouched", encoding="utf-8")
+
+    run_fake_fetch(runner, staging, project, [], monkeypatch)
+
+    assert sentinel.read_text(encoding="utf-8") == "untouched"
+
+
+def test_fetch_cleans_private_download_after_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "fetch_cleanup_failure")
+    root = tmp_path / "repository"
+    root.mkdir()
+    staging = root / ".colab-staging"
+    project = root / "projects" / "jspace_llama"
+    project.mkdir(parents=True)
+    downloaded: list[Path] = []
+
+    def fake_run(command: list[str]) -> None:
+        local = Path(command[-1])
+        downloaded.append(local)
+        local.write_bytes(b"invalid")
+
+    def fail_extract(archive: Path, destination: Path) -> None:
+        raise ValueError("invalid downloaded archive")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    monkeypatch.setattr(runner, "extract_results_archive", fail_extract)
+
+    with pytest.raises(ValueError, match="invalid downloaded archive"):
+        runner.fetch_results(
+            "jspace-llama",
+            staging=staging,
+            project=project,
+            root=root,
+        )
+
+    assert downloaded
+    assert not downloaded[0].parent.exists()
+
+
+def test_fetch_rejects_staging_replacement_before_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "fetch_staging_replaced")
+    root = tmp_path / "repository"
+    root.mkdir()
+    staging = root / ".colab-staging"
+    staging.mkdir()
+    (staging / "sentinel.txt").write_text("untouched", encoding="utf-8")
+    project = root / "projects" / "jspace_llama"
+    project.mkdir(parents=True)
+    original = root / "original-staging"
+    download_called = False
+
+    def replace_staging(*, prefix: str, dir: Path) -> str:
+        staging.rename(original)
+        staging.mkdir()
+        private = staging / f"{prefix}attacker"
+        private.mkdir()
+        return str(private)
+
+    def fake_run(command: list[str]) -> None:
+        nonlocal download_called
+        download_called = True
+
+    monkeypatch.setattr(runner.tempfile, "mkdtemp", replace_staging)
+    monkeypatch.setattr(runner, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="staging directory changed"):
+        runner.fetch_results(
+            "jspace-llama",
+            staging=staging,
+            project=project,
+            root=root,
+        )
+
+    assert not download_called
+    assert (original / "sentinel.txt").read_text(encoding="utf-8") == "untouched"

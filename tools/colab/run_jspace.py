@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 from typing import Sequence
 
 
@@ -249,6 +251,125 @@ def validate_archive_directory(
     if not stat.S_ISDIR(mode):
         raise ValueError(f"archive source is not a directory: {path}")
     return directory_metadata
+
+
+def validate_staging_directory(
+    staging: Path,
+    root: Path,
+    *,
+    metadata: object | None = None,
+) -> object:
+    directory_metadata = metadata if metadata is not None else os.lstat(staging)
+    mode = directory_metadata.st_mode
+    if stat.S_ISLNK(mode):
+        raise ValueError(f"staging directory is a symlink: {staging}")
+    if _is_reparse_point(directory_metadata):
+        raise ValueError(f"staging directory is a reparse point: {staging}")
+    if not stat.S_ISDIR(mode):
+        raise ValueError(f"staging path is not a directory: {staging}")
+    resolved_root = root.resolve(strict=True)
+    resolved_staging = staging.resolve(strict=True)
+    try:
+        resolved_staging.relative_to(resolved_root)
+    except ValueError as error:
+        raise ValueError(
+            f"staging directory is outside repository: {staging}"
+        ) from error
+    return directory_metadata
+
+
+def _ensure_staging_directory(staging: Path, root: Path) -> object:
+    if not os.path.lexists(staging):
+        staging.mkdir(mode=0o700, parents=False)
+    return validate_staging_directory(staging, root)
+
+
+def _same_directory_identity(expected: object, actual: object) -> bool:
+    return (
+        expected.st_dev == actual.st_dev
+        and expected.st_ino == actual.st_ino
+        and stat.S_IFMT(expected.st_mode) == stat.S_IFMT(actual.st_mode)
+    )
+
+
+def _validate_private_download_directory(
+    directory: Path,
+    staging: Path,
+    expected_metadata: object,
+) -> None:
+    actual = validate_staging_directory(directory, staging)
+    if not _same_directory_identity(expected_metadata, actual):
+        raise ValueError(f"private download directory changed: {directory}")
+
+
+def _cleanup_private_download_directory(
+    directory: Path,
+    staging: Path,
+    root: Path,
+    staging_metadata: object,
+    private_metadata: object,
+) -> None:
+    if not os.path.lexists(directory):
+        return
+    current_staging = validate_staging_directory(staging, root)
+    if not _same_directory_identity(staging_metadata, current_staging):
+        raise RuntimeError("staging directory changed during fetch")
+
+    current = os.lstat(directory)
+    if stat.S_ISLNK(current.st_mode):
+        directory.unlink()
+        return
+    if _is_reparse_point(current):
+        os.rmdir(directory)
+        return
+    if not stat.S_ISDIR(current.st_mode):
+        directory.unlink()
+        return
+    if not _same_directory_identity(private_metadata, current):
+        raise RuntimeError("private download directory changed during fetch")
+    shutil.rmtree(directory)
+
+
+def fetch_results(
+    session: str,
+    *,
+    staging: Path = STAGING,
+    project: Path = PROJECT,
+    root: Path = ROOT,
+) -> None:
+    staging_metadata = _ensure_staging_directory(staging, root)
+    private_directory = Path(
+        tempfile.mkdtemp(prefix="jspace-fetch-", dir=staging)
+    )
+    current_staging = validate_staging_directory(staging, root)
+    if not _same_directory_identity(staging_metadata, current_staging):
+        raise RuntimeError("staging directory changed during fetch")
+    private_metadata = os.lstat(private_directory)
+    _validate_private_download_directory(
+        private_directory,
+        staging,
+        private_metadata,
+    )
+    private_directory.chmod(0o700)
+    local = private_directory / "jspace_results.tar.gz"
+    if os.path.lexists(local):
+        raise RuntimeError(f"download target unexpectedly exists: {local}")
+    try:
+        run(download_command(session, REMOTE_RESULTS_ARCHIVE, local))
+        _validate_private_download_directory(
+            private_directory,
+            staging,
+            private_metadata,
+        )
+        extract_results_archive(local, project)
+    finally:
+        _cleanup_private_download_directory(
+            private_directory,
+            staging,
+            root,
+            staging_metadata,
+            private_metadata,
+        )
 
 
 def _archive_candidates(project: Path) -> list[Path]:
@@ -627,10 +748,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=300,
             operation_marker=PACK_SUCCESS_MARKER,
         )
-        STAGING.mkdir(parents=True, exist_ok=True)
-        local = STAGING / "jspace_results.tar.gz"
-        run(download_command(args.session, REMOTE_RESULTS_ARCHIVE, local))
-        extract_results_archive(local)
+        fetch_results(args.session)
     elif args.action == "stop":
         run(stop_command(args.session))
     return 0
