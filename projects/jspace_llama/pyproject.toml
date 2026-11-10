@@ -1,0 +1,30 @@
+[project]
+name = "jspace-llama"
+version = "0.1.0"
+description = "Causal J-space milestone on Llama 3.1 8B Instruct."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "accelerate>=1.0",
+    "huggingface-hub>=0.34",
+    "jsonschema>=4.23",
+    "jspace @ git+https://github.com/haohww/jspace@04c822a255fe0a10d84e08ec499e5e09f4b7d37a",
+    "safetensors>=0.4",
+    "torch>=2.2",
+    "transformers>=4.56",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29",
+    "jupyter>=1.1",
+    "nbformat>=5.10",
+    "pytest>=9.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

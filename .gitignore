@@ -8,3 +8,22 @@ projects/refusal_direction/artifacts/
 projects/refusal_direction/notebooks/*_output.ipynb
 projects/refusal_direction/.venv/
 .colab-staging/
+
+# J-space Llama: retain only source and compact aggregate JSON results.
+projects/jspace_llama/.cache/
+projects/jspace_llama/.huggingface/
+projects/jspace_llama/.venv/
+projects/jspace_llama/.env
+projects/jspace_llama/models/
+projects/jspace_llama/lenses/
+projects/jspace_llama/**/*.pt
+projects/jspace_llama/**/*.bin
+projects/jspace_llama/**/*.safetensors
+projects/jspace_llama/notebooks/*_output.ipynb
+projects/jspace_llama/notebooks/.ipynb_checkpoints/
+!projects/jspace_llama/artifacts/
+projects/jspace_llama/artifacts/*
+!projects/jspace_llama/artifacts/.gitkeep
+projects/jspace_llama/results/*
+!projects/jspace_llama/results/.gitkeep
+!projects/jspace_llama/results/*.json
