@@ -1,0 +1,133 @@
+{
+  "config": {
+    "batch_size": 16,
+    "dataset_sha256": "c52bf8d46bf8c9774fe8c0eecc968a4cc4d3dc7707b9ff2601272fdd196a1122",
+    "device": "cuda",
+    "dtype": "float32",
+    "gpu": "NVIDIA GeForce RTX 3050",
+    "model_name": "gpt2",
+    "n": 500,
+    "padding_side": "right",
+    "prepend_bos": false,
+    "seed": 510
+  },
+  "methodology": {
+    "causal_limit": "Behavioral degradation supports the circuit prediction but does not by itself establish mediation by Duplicate Token and S-Inhibition heads.",
+    "comparison_scope": "Same five clauses, ordered-pair sampling, middle insertion, and behavioral metrics as the historical experiment.",
+    "differences": [
+      "Attack-template sampling is seeded locally; advex.py used the global random module without recording a seed.",
+      "Base prompts use this project's deterministic paper dataset generator rather than the historical global RNG state.",
+      "TransformerLens 4.3 compatibility mode replaces the historical EasyTransformer runtime.",
+      "Confidence intervals use normal 1.96\u00d7SE intervals over paired per-example values."
+    ]
+  },
+  "metrics": {
+    "io_probability": {
+      "adversarial": {
+        "ci95": [
+          0.28644098388687705,
+          0.3196120108412113
+        ],
+        "mean": 0.3030264973640442,
+        "standard_error": 0.008462152166055885
+      },
+      "baseline": {
+        "ci95": [
+          0.4677255921552348,
+          0.5051647252847982
+        ],
+        "mean": 0.4864451587200165,
+        "standard_error": 0.009550974769148434
+      },
+      "delta": {
+        "ci95": [
+          -0.20025127505467435,
+          -0.1665860774595926
+        ],
+        "mean": -0.18341867625713348,
+        "standard_error": 0.008588218421519104
+      }
+    },
+    "logit_difference_io_minus_s": {
+      "adversarial": {
+        "ci95": [
+          0.34845091313677723,
+          0.6214525559489161
+        ],
+        "mean": 0.4849517345428467,
+        "standard_error": 0.06964455596264552
+      },
+      "baseline": {
+        "ci95": [
+          3.2957685494963553,
+          3.5607110952790353
+        ],
+        "mean": 3.4282398223876953,
+        "standard_error": 0.06758862608509969
+      },
+      "delta": {
+        "ci95": [
+          -3.083839857241736,
+          -2.8027363184479612
+        ],
+        "mean": -2.9432880878448486,
+        "standard_error": 0.07171140414086272
+      }
+    },
+    "s_wins_error_rate": {
+      "adversarial": {
+        "ci95": [
+          0.3589808981879756,
+          0.4450191218391851
+        ],
+        "mean": 0.4020000100135803,
+        "standard_error": 0.021948929758370064
+      },
+      "baseline": {
+        "ci95": [
+          -0.0019199280230668206,
+          0.005919928213056626
+        ],
+        "mean": 0.0020000000949949026,
+        "standard_error": 0.0020000000760124247
+      },
+      "delta": {
+        "ci95": [
+          0.35665962509601756,
+          0.4433403868249114
+        ],
+        "mean": 0.4000000059604645,
+        "standard_error": 0.02211284554528059
+      }
+    }
+  },
+  "observed_minus_paper": {
+    "adversarial_logit_difference": -0.7450482654571533,
+    "adversarial_s_wins_error_rate": 0.1680000100135803
+  },
+  "paper": "https://arxiv.org/abs/2211.00593",
+  "paper_targets": {
+    "adversarial_logit_difference": 1.23,
+    "adversarial_s_wins_error_rate": 0.234
+  },
+  "traceability": {
+    "git_dirty": false,
+    "historical_source_commit": "ea15315dd24481e9e2ac5c3ef335d82907a1dc34",
+    "historical_source_url": "https://github.com/redwoodresearch/Easy-Transformer/blob/ea15315dd24481e9e2ac5c3ef335d82907a1dc34/easy_transformer/advex.py",
+    "source_commit": "06442b21ca28b93b6abc2b759a1a131773fe8711",
+    "source_sha256": {
+      "notebook": "7e3c941ccdb821bbb1874be97843144c524ff0aaf3aec24da0749cb9d15b8762",
+      "paper/adversarial.py": "0339448bca6381af0f2dd50590edf64f4322236c8ba2c3f6bd8c42903add500f",
+      "paper/dataset.py": "1982ba31b61440fc0db95b21c41463081a467fcd5ad705d9f3d7be77f6898f22",
+      "paper/metrics.py": "dbc2d6f328190006df64056469b48d641b5a94aad88934588bf444aefa0f36b4",
+      "runtime.py": "7a2db960fe6a1d39a6eb7ef1a7a4f2ac8695a74834284ac9b6fdd7dee42cc708"
+    },
+    "timestamp_utc": "2026-11-10T07:06:25.847996Z",
+    "versions": {
+      "pandas": "3.1.1",
+      "plotly": "7.1.0",
+      "torch": "2.15.0+cu132",
+      "transformer_lens": "4.3.0"
+    }
+  }
+}
