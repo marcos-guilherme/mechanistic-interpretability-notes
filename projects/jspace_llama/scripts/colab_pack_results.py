@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tarfile
 
@@ -11,6 +12,7 @@ import tarfile
 ROOT = Path("/content/jspace_llama")
 ARCHIVE = Path("/content/jspace_results.tar.gz")
 SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
+SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
 MAX_RESULT_BYTES = 1_048_576
 RESULT_ALLOWLIST = (
     "execution_manifest.json",
@@ -22,6 +24,13 @@ def _is_reparse_point(metadata: object) -> bool:
     attributes = getattr(metadata, "st_file_attributes", 0)
     flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return bool(attributes & flag)
+
+
+def consume_success_nonce() -> str:
+    nonce = os.environ.pop(SUCCESS_NONCE_ENV, None)
+    if nonce is None or re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
+        raise RuntimeError("missing or invalid success nonce")
+    return nonce
 
 
 def validate_result_file(
@@ -37,6 +46,8 @@ def validate_result_file(
         raise ValueError(f"result artifact is a reparse point: {path}")
     if not stat.S_ISREG(mode):
         raise ValueError(f"result artifact is not a regular file: {path}")
+    if getattr(file_metadata, "st_nlink", 1) != 1:
+        raise ValueError(f"result artifact is hard-linked: {path}")
     if file_metadata.st_size > MAX_RESULT_BYTES:
         raise ValueError(f"result artifact is too large: {path}")
     return file_metadata
@@ -58,9 +69,44 @@ def validate_result_directory(
     return directory_metadata
 
 
+def validate_archive_path(path: Path, metadata: object) -> None:
+    mode = metadata.st_mode
+    if stat.S_ISLNK(mode):
+        raise ValueError(f"result archive is a symlink: {path}")
+    if _is_reparse_point(metadata):
+        raise ValueError(f"result archive is a reparse point: {path}")
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"result archive is not a regular file: {path}")
+    if getattr(metadata, "st_nlink", 1) != 1:
+        raise ValueError(f"result archive is hard-linked: {path}")
+
+
+def open_validated_file(path: Path, metadata: object):
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        actual = os.fstat(descriptor)
+        if (
+            metadata.st_dev != actual.st_dev
+            or metadata.st_ino != actual.st_ino
+            or stat.S_IFMT(metadata.st_mode) != stat.S_IFMT(actual.st_mode)
+            or getattr(metadata, "st_nlink", 1)
+            != getattr(actual, "st_nlink", 1)
+            or metadata.st_size != actual.st_size
+        ):
+            raise ValueError(f"file changed after validation: {path}")
+        validate_result_file(path, metadata=actual)
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _read_json_artifact(path: Path) -> tuple[object, bytes]:
     metadata = validate_result_file(path)
-    with path.open("rb") as source:
+    with open_validated_file(path, metadata) as source:
         payload = source.read(MAX_RESULT_BYTES + 1)
     if len(payload) > MAX_RESULT_BYTES:
         raise ValueError(f"result artifact is too large: {path}")
@@ -72,7 +118,9 @@ def _read_json_artifact(path: Path) -> tuple[object, bytes]:
 
 
 def pack_results(root: Path, archive: Path) -> Path:
-    archive.unlink(missing_ok=True)
+    if os.path.lexists(archive):
+        validate_archive_path(archive, os.lstat(archive))
+        archive.unlink()
     results = root / "results"
     validate_result_directory(root)
     missing = [
@@ -99,7 +147,7 @@ def pack_results(root: Path, archive: Path) -> Path:
         metadata, payload = _read_json_artifact(path)
         artifacts.append((name, metadata, payload))
 
-    with tarfile.open(archive, "w:gz") as handle:
+    with tarfile.open(archive, "x:gz") as handle:
         for name, metadata, payload in artifacts:
             info = tarfile.TarInfo(f"results/{name}")
             info.size = len(payload)
@@ -110,8 +158,9 @@ def pack_results(root: Path, archive: Path) -> Path:
 
 
 def main() -> int:
+    nonce = consume_success_nonce()
     pack_results(ROOT, ARCHIVE)
-    print(SUCCESS_MARKER)
+    print(f"{SUCCESS_MARKER}:{nonce}")
     return 0
 
 

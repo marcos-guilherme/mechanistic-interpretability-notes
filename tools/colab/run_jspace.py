@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path, PurePosixPath
+import secrets
 import stat
 import subprocess
 import sys
@@ -20,6 +21,7 @@ REMOTE_RESULTS_ARCHIVE = "/content/jspace_results.tar.gz"
 BOOTSTRAP_SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 AUTH_SUCCESS_MARKER = "JSPACE_HF_AUTH_SUCCESS"
 PACK_SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
+SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
 MAX_RESULT_BYTES = 1_048_576
 RESULT_ALLOWLIST = frozenset(
     {
@@ -78,8 +80,14 @@ def upload_command(session: str, local: Path, remote: str) -> list[str]:
     return [*AUTH, "upload", "-s", session, str(local), remote]
 
 
-def exec_command(session: str, file: Path, *, timeout: int) -> list[str]:
-    return [
+def exec_command(
+    session: str,
+    file: Path,
+    *,
+    timeout: int,
+    environment: dict[str, str] | None = None,
+) -> list[str]:
+    command = [
         *AUTH,
         "exec",
         "-s",
@@ -89,6 +97,9 @@ def exec_command(session: str, file: Path, *, timeout: int) -> list[str]:
         "--timeout",
         str(timeout),
     ]
+    for name, value in sorted((environment or {}).items()):
+        command.extend(["--env", f"{name}={value}"])
+    return command
 
 
 def download_command(session: str, remote: str, local: Path) -> list[str]:
@@ -126,6 +137,24 @@ def run_remote_script(command: list[str], success_marker: str) -> None:
         )
 
 
+def run_remote_operation(
+    session: str,
+    file: Path,
+    *,
+    timeout: int,
+    operation_marker: str,
+) -> None:
+    nonce = secrets.token_hex(32)
+    expected_marker = f"{operation_marker}:{nonce}"
+    command = exec_command(
+        session,
+        file,
+        timeout=timeout,
+        environment={SUCCESS_NONCE_ENV: nonce},
+    )
+    run_remote_script(command, expected_marker)
+
+
 def _is_sensitive_filename(name: str) -> bool:
     lower_name = name.lower()
     stem = PurePosixPath(lower_name).stem
@@ -145,6 +174,42 @@ def _is_reparse_point(metadata: object) -> bool:
     return bool(attributes & flag)
 
 
+def _validate_link_count(path: Path, metadata: object, *, context: str) -> None:
+    if getattr(metadata, "st_nlink", 1) != 1:
+        raise ValueError(f"{context} is hard-linked: {path}")
+
+
+def _same_file_identity(expected: object, actual: object) -> bool:
+    return (
+        expected.st_dev == actual.st_dev
+        and expected.st_ino == actual.st_ino
+    )
+
+
+def open_validated_file(path: Path, metadata: object):
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        actual = os.fstat(descriptor)
+        if (
+            not _same_file_identity(metadata, actual)
+            or stat.S_IFMT(metadata.st_mode) != stat.S_IFMT(actual.st_mode)
+            or getattr(metadata, "st_nlink", 1)
+            != getattr(actual, "st_nlink", 1)
+            or metadata.st_size != actual.st_size
+        ):
+            raise ValueError(f"file changed after validation: {path}")
+        if not stat.S_ISREG(actual.st_mode):
+            raise ValueError(f"opened path is not a regular file: {path}")
+        _validate_link_count(path, actual, context="opened file")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def validate_archive_file(
     path: Path,
     project: Path,
@@ -159,6 +224,7 @@ def validate_archive_file(
         raise ValueError(f"archive source is a reparse point: {path}")
     if not stat.S_ISREG(mode):
         raise ValueError(f"archive source is not a regular file: {path}")
+    _validate_link_count(path, file_metadata, context="archive source")
 
     resolved_project = project.resolve(strict=True)
     resolved_path = path.resolve(strict=True)
@@ -241,7 +307,7 @@ def _add_regular_file(
     info.size = metadata.st_size
     info.mode = stat.S_IMODE(metadata.st_mode)
     info.mtime = int(getattr(metadata, "st_mtime", 0))
-    with path.open("rb") as source:
+    with open_validated_file(path, metadata) as source:
         handle.addfile(info, source)
 
 
@@ -252,7 +318,14 @@ def build_archive(
 ) -> Path:
     staging.mkdir(parents=True, exist_ok=True)
     archive = staging / "jspace_llama.tar.gz"
-    with tarfile.open(archive, "w:gz") as handle:
+    if os.path.lexists(archive):
+        _validate_regular_metadata(
+            archive,
+            os.lstat(archive),
+            context="project archive",
+        )
+        archive.unlink()
+    with tarfile.open(archive, "x:gz") as handle:
         for path in _archive_candidates(project):
             _add_regular_file(handle, path, project)
     return archive
@@ -271,6 +344,7 @@ def _validate_regular_metadata(
         raise ValueError(f"{context} is a reparse point: {path}")
     if not stat.S_ISREG(mode):
         raise ValueError(f"{context} is not a regular file: {path}")
+    _validate_link_count(path, metadata, context=context)
 
 
 def validate_result_destination(
@@ -314,36 +388,48 @@ def _validate_json_bytes(name: str, payload: bytes) -> None:
 
 
 def extract_results_archive(archive: Path, project: Path = PROJECT) -> None:
-    validate_result_archive(archive)
-    with tarfile.open(archive, "r:gz") as handle:
-        members = handle.getmembers()
-        member_names = [member.name for member in members]
-        if len(member_names) != len(set(member_names)):
-            raise ValueError("duplicate result archive member")
-        names = set(member_names)
-        unexpected = names - RESULT_ALLOWLIST
-        if unexpected:
-            joined = ", ".join(sorted(unexpected))
-            raise ValueError(f"unexpected result archive member: {joined}")
-        missing = RESULT_ALLOWLIST - names
-        if missing:
-            joined = ", ".join(sorted(missing))
-            raise FileNotFoundError(f"missing result archive member: {joined}")
+    archive_metadata = os.lstat(archive)
+    validate_result_archive(archive, metadata=archive_metadata)
+    with open_validated_file(archive, archive_metadata) as archive_source:
+        with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
+            members = handle.getmembers()
+            member_names = [member.name for member in members]
+            if len(member_names) != len(set(member_names)):
+                raise ValueError("duplicate result archive member")
+            names = set(member_names)
+            unexpected = names - RESULT_ALLOWLIST
+            if unexpected:
+                joined = ", ".join(sorted(unexpected))
+                raise ValueError(f"unexpected result archive member: {joined}")
+            missing = RESULT_ALLOWLIST - names
+            if missing:
+                joined = ", ".join(sorted(missing))
+                raise FileNotFoundError(
+                    f"missing result archive member: {joined}"
+                )
 
-        payloads: dict[str, bytes] = {}
-        for member in members:
-            if not member.isfile() or member.issym() or member.islnk():
-                raise ValueError("result archive must contain regular files only")
-            if member.size < 0 or member.size > MAX_RESULT_BYTES:
-                raise ValueError(f"result artifact is too large: {member.name}")
-            source = handle.extractfile(member)
-            if source is None:
-                raise ValueError(f"cannot read result artifact: {member.name}")
-            payload = source.read(MAX_RESULT_BYTES + 1)
-            if len(payload) > MAX_RESULT_BYTES:
-                raise ValueError(f"result artifact is too large: {member.name}")
-            _validate_json_bytes(member.name, payload)
-            payloads[member.name] = payload
+            payloads: dict[str, bytes] = {}
+            for member in members:
+                if not member.isfile() or member.issym() or member.islnk():
+                    raise ValueError(
+                        "result archive must contain regular files only"
+                    )
+                if member.size < 0 or member.size > MAX_RESULT_BYTES:
+                    raise ValueError(
+                        f"result artifact is too large: {member.name}"
+                    )
+                source = handle.extractfile(member)
+                if source is None:
+                    raise ValueError(
+                        f"cannot read result artifact: {member.name}"
+                    )
+                payload = source.read(MAX_RESULT_BYTES + 1)
+                if len(payload) > MAX_RESULT_BYTES:
+                    raise ValueError(
+                        f"result artifact is too large: {member.name}"
+                    )
+                _validate_json_bytes(member.name, payload)
+                payloads[member.name] = payload
 
     results = project / "results"
     for directory in (project, results):
@@ -376,7 +462,74 @@ def notebook_output_path(notebook: Path) -> Path:
     return notebook.with_name(f"{notebook.stem}_output{notebook.suffix}")
 
 
+def _validate_notebook_structure(document: object, notebook: Path) -> None:
+    if not isinstance(document, dict):
+        raise ValueError(f"notebook root must be an object: {notebook}")
+    if document.get("nbformat") != 4:
+        raise ValueError(f"notebook must use nbformat 4: {notebook}")
+    if not isinstance(document.get("nbformat_minor"), int):
+        raise ValueError(f"notebook nbformat_minor must be an integer: {notebook}")
+    if not isinstance(document.get("metadata"), dict):
+        raise ValueError(f"notebook metadata must be an object: {notebook}")
+    cells = document.get("cells")
+    if not isinstance(cells, list):
+        raise ValueError(f"notebook cells must be an array: {notebook}")
+    for index, cell in enumerate(cells):
+        if not isinstance(cell, dict):
+            raise ValueError(f"notebook cell {index} must be an object: {notebook}")
+        if cell.get("cell_type") not in {"code", "markdown", "raw"}:
+            raise ValueError(
+                f"notebook cell {index} has invalid cell_type: {notebook}"
+            )
+        if not isinstance(cell.get("metadata"), dict):
+            raise ValueError(
+                f"notebook cell {index} metadata must be an object: {notebook}"
+            )
+        source = cell.get("source")
+        if not (
+            isinstance(source, str)
+            or (
+                isinstance(source, list)
+                and all(isinstance(line, str) for line in source)
+            )
+        ):
+            raise ValueError(
+                f"notebook cell {index} source must be text: {notebook}"
+            )
+        if cell["cell_type"] == "code":
+            if not isinstance(cell.get("outputs"), list):
+                raise ValueError(
+                    f"notebook cell {index} outputs must be an array: {notebook}"
+                )
+            execution_count = cell.get("execution_count")
+            if execution_count is not None and not isinstance(
+                execution_count,
+                int,
+            ):
+                raise ValueError(
+                    f"notebook cell {index} execution_count is invalid: "
+                    f"{notebook}"
+                )
+
+
+def validate_notebook(notebook: Path) -> None:
+    if notebook.suffix.lower() != ".ipynb":
+        raise ValueError(f"notebook must use the .ipynb extension: {notebook}")
+    if not os.path.lexists(notebook):
+        raise FileNotFoundError(f"notebook does not exist: {notebook}")
+    metadata = os.lstat(notebook)
+    _validate_regular_metadata(notebook, metadata, context="notebook")
+    try:
+        with open_validated_file(notebook, metadata) as source:
+            payload = source.read().decode("utf-8")
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"notebook is malformed: {notebook}") from error
+    _validate_notebook_structure(document, notebook)
+
+
 def execute_notebook(session: str, notebook: Path, *, timeout: int) -> Path:
+    validate_notebook(notebook)
     output_notebook = notebook_output_path(notebook)
     output_notebook.unlink(missing_ok=True)
     run(exec_command(session, notebook, timeout=timeout))
@@ -443,13 +596,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         archive = build_archive()
         run(upload_command(args.session, archive, REMOTE_ARCHIVE))
     elif args.action == "bootstrap":
-        run_remote_script(
-            exec_command(
-                args.session,
-                PROJECT / "scripts" / "colab_bootstrap.py",
-                timeout=900,
-            ),
-            BOOTSTRAP_SUCCESS_MARKER,
+        run_remote_operation(
+            args.session,
+            PROJECT / "scripts" / "colab_bootstrap.py",
+            timeout=900,
+            operation_marker=BOOTSTRAP_SUCCESS_MARKER,
         )
     elif args.action == "auth-hf":
         token = huggingface_token_path()
@@ -458,13 +609,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Hugging Face token not found; run `uv run hf auth login`"
             )
         run(upload_command(args.session, token, "/content/hf_token"))
-        run_remote_script(
-            exec_command(
-                args.session,
-                PROJECT / "scripts" / "colab_prepare_hf_auth.py",
-                timeout=60,
-            ),
-            AUTH_SUCCESS_MARKER,
+        run_remote_operation(
+            args.session,
+            PROJECT / "scripts" / "colab_prepare_hf_auth.py",
+            timeout=60,
+            operation_marker=AUTH_SUCCESS_MARKER,
         )
     elif args.action == "execute":
         notebook = args.notebook.resolve()
@@ -472,13 +621,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_parser().error(f"notebook does not exist: {notebook}")
         execute_notebook(args.session, notebook, timeout=args.timeout)
     elif args.action == "fetch":
-        run_remote_script(
-            exec_command(
-                args.session,
-                PROJECT / "scripts" / "colab_pack_results.py",
-                timeout=300,
-            ),
-            PACK_SUCCESS_MARKER,
+        run_remote_operation(
+            args.session,
+            PROJECT / "scripts" / "colab_pack_results.py",
+            timeout=300,
+            operation_marker=PACK_SUCCESS_MARKER,
         )
         STAGING.mkdir(parents=True, exist_ok=True)
         local = STAGING / "jspace_results.tar.gz"

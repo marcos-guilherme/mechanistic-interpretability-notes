@@ -52,6 +52,29 @@ def write_result_files(root: Path) -> None:
     (results / "final_evaluation.json").write_text("[]", encoding="utf-8")
 
 
+def write_valid_notebook(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "cells": [],
+                "metadata": {},
+                "nbformat": 4,
+                "nbformat_minor": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def create_hard_link_or_skip(source: Path, link: Path) -> None:
+    try:
+        os.link(source, link)
+    except OSError as error:
+        pytest.skip(f"filesystem cannot create hard links: {error}")
+    if os.stat(source).st_nlink == 1:
+        pytest.skip("filesystem did not report the created hard link")
+
+
 @pytest.mark.parametrize(
     ("path", "module_name"),
     [
@@ -91,9 +114,11 @@ def test_auth_marker_is_emitted_only_after_success(
     source.write_text("secret", encoding="utf-8")
     monkeypatch.setattr(auth, "SOURCE", source)
     monkeypatch.setattr(auth, "DESTINATION", destination)
+    nonce = "a" * 64
+    monkeypatch.setenv(auth.SUCCESS_NONCE_ENV, nonce)
 
     assert auth.main() == 0
-    assert capsys.readouterr().out.strip() == auth.SUCCESS_MARKER
+    assert capsys.readouterr().out.strip() == f"{auth.SUCCESS_MARKER}:{nonce}"
 
 
 def test_pack_marker_is_emitted_only_after_success(
@@ -106,9 +131,11 @@ def test_pack_marker_is_emitted_only_after_success(
     write_result_files(root)
     monkeypatch.setattr(pack, "ROOT", root)
     monkeypatch.setattr(pack, "ARCHIVE", tmp_path / "results.tar.gz")
+    nonce = "b" * 64
+    monkeypatch.setenv(pack.SUCCESS_NONCE_ENV, nonce)
 
     assert pack.main() == 0
-    assert capsys.readouterr().out.strip() == pack.SUCCESS_MARKER
+    assert capsys.readouterr().out.strip() == f"{pack.SUCCESS_MARKER}:{nonce}"
 
 
 def test_bootstrap_marker_is_emitted_only_after_success(
@@ -131,9 +158,14 @@ def test_bootstrap_marker_is_emitted_only_after_success(
     )
     monkeypatch.setattr(bootstrap, "print_runtime_diagnostics", lambda torch: None)
     monkeypatch.setitem(sys.modules, "torch", object())
+    nonce = "c" * 64
+    monkeypatch.setenv(bootstrap.SUCCESS_NONCE_ENV, nonce)
 
     assert bootstrap.main() == 0
-    assert capsys.readouterr().out.strip() == bootstrap.SUCCESS_MARKER
+    assert (
+        capsys.readouterr().out.strip()
+        == f"{bootstrap.SUCCESS_MARKER}:{nonce}"
+    )
 
 
 def test_local_runner_rejects_missing_remote_success_marker(
@@ -189,7 +221,7 @@ def test_notebook_execution_removes_stale_output_and_rejects_cell_errors(
 ) -> None:
     runner = load_module(RUNNER_PATH, "review_notebook_errors")
     notebook = tmp_path / "experiment.ipynb"
-    notebook.write_text("{}", encoding="utf-8")
+    write_valid_notebook(notebook)
     output = tmp_path / "experiment_output.ipynb"
     output.write_text('{"stale": true}', encoding="utf-8")
 
@@ -228,7 +260,7 @@ def test_notebook_execution_requires_fresh_output(
 ) -> None:
     runner = load_module(RUNNER_PATH, "review_notebook_output")
     notebook = tmp_path / "experiment.ipynb"
-    notebook.write_text("{}", encoding="utf-8")
+    write_valid_notebook(notebook)
     monkeypatch.setattr(runner, "run", lambda command: None)
 
     with pytest.raises(FileNotFoundError, match="_output.ipynb"):
@@ -643,3 +675,313 @@ def test_action_subparsers_reject_unrelated_options(argv: list[str]) -> None:
 
     with pytest.raises(SystemExit):
         runner.parse_args(argv)
+
+
+def test_archive_rejects_hard_linked_source_file(tmp_path: Path) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_source_hardlink")
+    project = tmp_path / "jspace_llama"
+    source = project / "src" / "pkg" / "core.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("source", encoding="utf-8")
+    create_hard_link_or_skip(source, tmp_path / "source-link.py")
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        runner.validate_archive_file(source, project)
+
+
+def test_build_rejects_hard_linked_staging_archive(tmp_path: Path) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_staging_hardlink")
+    project = tmp_path / "jspace_llama"
+    for name in ("README.md", "pyproject.toml", "uv.lock"):
+        (project / name).parent.mkdir(parents=True, exist_ok=True)
+        (project / name).write_text(name, encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not overwrite", encoding="utf-8")
+    archive = staging / "jspace_llama.tar.gz"
+    create_hard_link_or_skip(victim, archive)
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        runner.build_archive(project=project, staging=staging)
+
+    assert victim.read_text(encoding="utf-8") == "do not overwrite"
+
+
+def test_bootstrap_rejects_hard_linked_project_archive(tmp_path: Path) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "remaining_bootstrap_hardlink")
+    archive = tmp_path / "project.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        add_tar_bytes(handle, "jspace_llama/src/core.py", b"source")
+    linked_archive = tmp_path / "linked-project.tar.gz"
+    create_hard_link_or_skip(archive, linked_archive)
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        bootstrap.safe_extract(linked_archive, tmp_path / "destination")
+
+
+def test_pack_rejects_hard_linked_result_file(tmp_path: Path) -> None:
+    pack = load_module(PACK_PATH, "remaining_result_hardlink")
+    root = tmp_path / "jspace_llama"
+    write_result_files(root)
+    source = root / "results" / "execution_manifest.json"
+    create_hard_link_or_skip(source, tmp_path / "manifest-link.json")
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        pack.pack_results(root, tmp_path / "results.tar.gz")
+
+
+def test_pack_rejects_hard_linked_stale_archive(tmp_path: Path) -> None:
+    pack = load_module(PACK_PATH, "remaining_pack_archive_hardlink")
+    root = tmp_path / "jspace_llama"
+    write_result_files(root)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not overwrite", encoding="utf-8")
+    archive = tmp_path / "results.tar.gz"
+    create_hard_link_or_skip(victim, archive)
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        pack.pack_results(root, archive)
+
+    assert victim.read_text(encoding="utf-8") == "do not overwrite"
+
+
+def test_extract_rejects_hard_linked_results_archive(tmp_path: Path) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_archive_hardlink")
+    archive = tmp_path / "results.tar.gz"
+    make_results_archive(archive)
+    linked_archive = tmp_path / "linked-results.tar.gz"
+    create_hard_link_or_skip(archive, linked_archive)
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        runner.extract_results_archive(linked_archive, tmp_path / "project")
+
+
+def test_source_safe_open_rejects_changed_file_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_source_identity")
+    path = tmp_path / "source.py"
+    path.write_text("source", encoding="utf-8")
+    metadata = os.lstat(path)
+    real_fstat = runner.os.fstat
+
+    def changed_fstat(descriptor: int):
+        actual = real_fstat(descriptor)
+        values = list(actual)
+        values[1] = actual.st_ino + 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(runner.os, "fstat", changed_fstat)
+
+    with pytest.raises(ValueError, match="changed after validation"):
+        with runner.open_validated_file(path, metadata):
+            pass
+
+
+def test_result_safe_open_rejects_changed_file_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pack = load_module(PACK_PATH, "remaining_result_identity")
+    path = tmp_path / "result.json"
+    path.write_text("{}", encoding="utf-8")
+    metadata = os.lstat(path)
+    real_fstat = pack.os.fstat
+
+    def changed_fstat(descriptor: int):
+        actual = real_fstat(descriptor)
+        values = list(actual)
+        values[1] = actual.st_ino + 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(pack.os, "fstat", changed_fstat)
+
+    with pytest.raises(ValueError, match="changed after validation"):
+        with pack.open_validated_file(path, metadata):
+            pass
+
+
+def test_exec_command_passes_nonce_environment() -> None:
+    runner = load_module(RUNNER_PATH, "remaining_nonce_command")
+
+    command = runner.exec_command(
+        "jspace-llama",
+        Path("stage.py"),
+        timeout=300,
+        environment={"JSPACE_SUCCESS_NONCE": "abc123"},
+    )
+
+    assert command[-2:] == ["--env", "JSPACE_SUCCESS_NONCE=abc123"]
+
+
+def test_remote_operation_uses_fresh_nonce_per_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_fresh_nonce")
+    nonces = iter(["a" * 64, "b" * 64])
+    calls: list[tuple[list[str], str]] = []
+    monkeypatch.setattr(runner.secrets, "token_hex", lambda size: next(nonces))
+    monkeypatch.setattr(
+        runner,
+        "run_remote_script",
+        lambda command, expected: calls.append((command, expected)),
+    )
+
+    for _ in range(2):
+        runner.run_remote_operation(
+            "jspace-llama",
+            Path("stage.py"),
+            timeout=300,
+            operation_marker="JSPACE_TEST_SUCCESS",
+        )
+
+    assert calls[0][1] == f"JSPACE_TEST_SUCCESS:{'a' * 64}"
+    assert calls[1][1] == f"JSPACE_TEST_SUCCESS:{'b' * 64}"
+    assert calls[0][1] != calls[1][1]
+    assert calls[0][0][-1] == f"JSPACE_SUCCESS_NONCE={'a' * 64}"
+    assert calls[1][0][-1] == f"JSPACE_SUCCESS_NONCE={'b' * 64}"
+
+
+def test_static_or_wrong_nonce_marker_cannot_spoof_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_nonce_spoof")
+    completed = subprocess.CompletedProcess(
+        args=["colab"],
+        returncode=0,
+        stdout=(
+            "JSPACE_TEST_SUCCESS\n"
+            f"JSPACE_TEST_SUCCESS:{'b' * 64}\n"
+        ),
+        stderr="",
+    )
+    monkeypatch.setattr(runner, "run_captured", lambda command: completed)
+
+    with pytest.raises(RuntimeError, match="success marker"):
+        runner.run_remote_script(
+            ["colab", "exec"],
+            f"JSPACE_TEST_SUCCESS:{'a' * 64}",
+        )
+
+
+def test_bootstrap_prefixes_child_output_to_prevent_marker_spoof(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "remaining_child_spoof")
+    spoof = f"JSPACE_BOOTSTRAP_SUCCESS:{'a' * 64}"
+    completed = subprocess.CompletedProcess(
+        args=["child"],
+        returncode=0,
+        stdout=f"{spoof}\n",
+        stderr=f"{spoof}\n",
+    )
+    monkeypatch.setattr(bootstrap.subprocess, "run", lambda *args, **kwargs: completed)
+
+    bootstrap.run_checked(["child"])
+
+    captured = capsys.readouterr()
+    assert spoof not in captured.out.splitlines()
+    assert spoof not in captured.err.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("path", "module_name"),
+    [
+        (BOOTSTRAP_PATH, "remaining_bootstrap_nonce"),
+        (AUTH_PATH, "remaining_auth_nonce"),
+        (PACK_PATH, "remaining_pack_nonce"),
+    ],
+)
+def test_remote_scripts_require_and_consume_nonce(
+    path: Path,
+    module_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_module(path, module_name)
+    monkeypatch.delenv("JSPACE_SUCCESS_NONCE", raising=False)
+    with pytest.raises(RuntimeError, match="nonce"):
+        module.consume_success_nonce()
+
+    nonce = "a" * 64
+    monkeypatch.setenv("JSPACE_SUCCESS_NONCE", nonce)
+    assert module.consume_success_nonce() == nonce
+    assert "JSPACE_SUCCESS_NONCE" not in os.environ
+
+
+def test_execute_rejects_non_notebook_before_remote_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_notebook_extension")
+    path = tmp_path / "experiment.py"
+    path.write_text("{}", encoding="utf-8")
+    remote_called = False
+
+    def fail_if_called(command: list[str]) -> None:
+        nonlocal remote_called
+        remote_called = True
+
+    monkeypatch.setattr(runner, "run", fail_if_called)
+
+    with pytest.raises(ValueError, match=r"\.ipynb"):
+        runner.execute_notebook("jspace-llama", path, timeout=600)
+
+    assert not remote_called
+
+
+def test_execute_rejects_malformed_notebook_before_remote_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_notebook_malformed")
+    path = tmp_path / "experiment.ipynb"
+    path.write_text("{}", encoding="utf-8")
+    remote_called = False
+
+    def fail_if_called(command: list[str]) -> None:
+        nonlocal remote_called
+        remote_called = True
+
+    monkeypatch.setattr(runner, "run", fail_if_called)
+
+    with pytest.raises(ValueError, match="notebook"):
+        runner.execute_notebook("jspace-llama", path, timeout=600)
+
+    assert not remote_called
+
+
+def test_execute_rejects_hard_linked_notebook_before_remote_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "remaining_notebook_hardlink")
+    path = tmp_path / "experiment.ipynb"
+    write_valid_notebook(path)
+    create_hard_link_or_skip(path, tmp_path / "notebook-link.ipynb")
+    remote_called = False
+
+    def fail_if_called(command: list[str]) -> None:
+        nonlocal remote_called
+        remote_called = True
+
+    monkeypatch.setattr(runner, "run", fail_if_called)
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        runner.execute_notebook("jspace-llama", path, timeout=600)
+
+    assert not remote_called
+
+
+def test_runner_help_works_without_site_packages() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-S", str(RUNNER_PATH), "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr

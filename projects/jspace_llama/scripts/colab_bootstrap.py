@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
+import re
 import shutil
 import stat
 import subprocess
@@ -17,6 +18,14 @@ DESTINATION = Path("/content")
 PROJECT = DESTINATION / "jspace_llama"
 LOCKED_REQUIREMENTS = Path("/tmp/jspace-locked-requirements.txt")
 SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
+SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
+
+
+def consume_success_nonce() -> str:
+    nonce = os.environ.pop(SUCCESS_NONCE_ENV, None)
+    if nonce is None or re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
+        raise RuntimeError("missing or invalid success nonce")
+    return nonce
 
 
 def run_checked(command: list[str], *, cwd: Path | None = None) -> None:
@@ -28,10 +37,42 @@ def run_checked(command: list[str], *, cwd: Path | None = None) -> None:
         check=False,
     )
     if completed.stdout:
-        print(completed.stdout)
+        for line in completed.stdout.splitlines():
+            print(f"[child stdout] {line}")
     if completed.stderr:
-        print(completed.stderr, file=sys.stderr)
+        for line in completed.stderr.splitlines():
+            print(f"[child stderr] {line}", file=sys.stderr)
     completed.check_returncode()
+
+
+def _validate_archive_metadata(path: Path, metadata: object) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"project archive is not a regular file: {path}")
+    if getattr(metadata, "st_nlink", 1) != 1:
+        raise ValueError(f"project archive is hard-linked: {path}")
+
+
+def _open_validated_archive(path: Path, metadata: object):
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        actual = os.fstat(descriptor)
+        if (
+            metadata.st_dev != actual.st_dev
+            or metadata.st_ino != actual.st_ino
+            or stat.S_IFMT(metadata.st_mode) != stat.S_IFMT(actual.st_mode)
+            or getattr(metadata, "st_nlink", 1)
+            != getattr(actual, "st_nlink", 1)
+            or metadata.st_size != actual.st_size
+        ):
+            raise ValueError(f"project archive changed after validation: {path}")
+        _validate_archive_metadata(path, actual)
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _validated_member_path(
@@ -62,26 +103,31 @@ def _validated_member_path(
 
 def safe_extract(archive: Path, destination: Path) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive, "r:gz") as handle:
-        members = handle.getmembers()
-        names = [member.name for member in members]
-        if len(names) != len(set(names)):
-            raise ValueError("duplicate archive member")
-        targets = [
-            (member, _validated_member_path(member, destination))
-            for member in members
-        ]
-        target_paths = [target for _, target in targets]
-        if len(target_paths) != len(set(target_paths)):
-            raise ValueError("duplicate archive member destination")
-        for member, target in targets:
-            source = handle.extractfile(member)
-            if source is None:
-                raise ValueError(f"cannot read archive member: {member.name}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("wb") as output:
-                shutil.copyfileobj(source, output)
-            target.chmod(stat.S_IMODE(member.mode))
+    archive_metadata = os.lstat(archive)
+    _validate_archive_metadata(archive, archive_metadata)
+    with _open_validated_archive(archive, archive_metadata) as archive_source:
+        with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
+            members = handle.getmembers()
+            names = [member.name for member in members]
+            if len(names) != len(set(names)):
+                raise ValueError("duplicate archive member")
+            targets = [
+                (member, _validated_member_path(member, destination))
+                for member in members
+            ]
+            target_paths = [target for _, target in targets]
+            if len(target_paths) != len(set(target_paths)):
+                raise ValueError("duplicate archive member destination")
+            for member, target in targets:
+                source = handle.extractfile(member)
+                if source is None:
+                    raise ValueError(
+                        f"cannot read archive member: {member.name}"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                target.chmod(stat.S_IMODE(member.mode))
     return destination / "jspace_llama"
 
 
@@ -173,6 +219,7 @@ def print_runtime_diagnostics(torch_module: Any) -> None:
 
 
 def main() -> int:
+    nonce = consume_success_nonce()
     project = replace_project_tree(ARCHIVE, DESTINATION, PROJECT)
     for command in dependency_commands(project, LOCKED_REQUIREMENTS):
         run_checked(command)
@@ -180,7 +227,7 @@ def main() -> int:
     import torch
 
     print_runtime_diagnostics(torch)
-    print(SUCCESS_MARKER)
+    print(f"{SUCCESS_MARKER}:{nonce}")
     return 0
 
 
