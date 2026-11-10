@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterator, Literal, Mapping, Sequence
 
 import torch
@@ -24,6 +24,10 @@ class GroupedActivationMeans:
     activations: Mapping[str, Mapping[GroupKey, torch.Tensor]]
     sequence_length: int
     n_heads: int
+    group_counts: Mapping[GroupKey, int] = field(default_factory=dict)
+    min_group_size: int = 1
+    reference_config: Mapping[str, Any] | None = None
+    reference_sha256: str | None = None
 
 
 def _validate_activation(activation: str) -> ActivationName:
@@ -72,6 +76,9 @@ def compute_grouped_mean_activations(
     groups: Mapping[GroupKey, torch.Tensor],
     *,
     activation: ActivationName = "result",
+    min_group_size: int = 1,
+    reference_config: Mapping[str, Any] | None = None,
+    reference_sha256: str | None = None,
 ) -> GroupedActivationMeans:
     """Average pABC head activations within exact pattern/template groups.
 
@@ -87,6 +94,10 @@ def compute_grouped_mean_activations(
         raise ValueError("head activations must have [batch, position, head, width]")
     batch_size, sequence_length, n_heads, trailing = first.shape
     _group_for_each_example(groups, batch_size=batch_size)
+    group_counts = _validate_group_counts(
+        groups,
+        min_group_size=min_group_size,
+    )
 
     grouped: dict[str, dict[GroupKey, torch.Tensor]] = {}
     for hook_name, values in activation_cache.items():
@@ -112,7 +123,40 @@ def compute_grouped_mean_activations(
         activations=grouped,
         sequence_length=sequence_length,
         n_heads=n_heads,
+        group_counts=group_counts,
+        min_group_size=min_group_size,
+        reference_config=(
+            dict(reference_config) if reference_config is not None else None
+        ),
+        reference_sha256=reference_sha256,
     )
+
+
+def _validate_group_counts(
+    groups: Mapping[GroupKey, torch.Tensor],
+    *,
+    min_group_size: int,
+) -> dict[GroupKey, int]:
+    if min_group_size <= 0:
+        raise ValueError("min_group_size must be positive")
+    counts = {
+        key: int(torch.as_tensor(indices).numel())
+        for key, indices in groups.items()
+    }
+    insufficient = {
+        key: count
+        for key, count in counts.items()
+        if count < min_group_size
+    }
+    if insufficient:
+        details = ", ".join(
+            f"{pattern}/{template_id}: {count}"
+            for (pattern, template_id), count in sorted(insufficient.items())
+        )
+        raise ValueError(
+            f"reference groups below minimum {min_group_size}: {details}"
+        )
+    return counts
 
 
 @contextmanager
@@ -146,28 +190,100 @@ def cache_grouped_mean_activations(
     groups: Mapping[GroupKey, torch.Tensor],
     *,
     activation: ActivationName = "result",
+    batch_size: int = 32,
+    min_group_size: int = 1,
+    reference_config: Mapping[str, Any] | None = None,
+    reference_sha256: str | None = None,
 ) -> GroupedActivationMeans:
-    """Run pABC once and cache exact-group, absolute-position head means."""
+    """Stream pABC minibatches into exact-group, absolute-position means."""
     activation = _validate_activation(activation)
     if reference_tokens.ndim != 2:
         raise ValueError("reference_tokens must have shape [batch, position]")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    reference_size, sequence_length = reference_tokens.shape
+    _group_for_each_example(groups, batch_size=reference_size)
+    group_counts = _validate_group_counts(
+        groups,
+        min_group_size=min_group_size,
+    )
     hook_names = [
         f"blocks.{layer}.attn.hook_{activation}"
         for layer in range(int(model.cfg.n_layers))
     ]
+    sums: dict[str, dict[GroupKey, torch.Tensor]] = {
+        name: {} for name in hook_names
+    }
+    n_heads: int | None = None
     with _temporary_attn_result(model, enabled=activation == "result"):
         with torch.inference_mode():
-            _, cache = model.run_with_cache(
-                reference_tokens,
-                names_filter=hook_names,
-            )
-    missing = set(hook_names) - set(cache)
-    if missing:
-        raise KeyError(f"model cache did not contain hooks: {sorted(missing)}")
-    return compute_grouped_mean_activations(
-        {name: cache[name] for name in hook_names},
-        groups,
+            for start in range(0, reference_size, batch_size):
+                stop = min(start + batch_size, reference_size)
+                _, cache = model.run_with_cache(
+                    reference_tokens[start:stop],
+                    names_filter=hook_names,
+                )
+                missing = set(hook_names) - set(cache)
+                if missing:
+                    raise KeyError(
+                        f"model cache did not contain hooks: {sorted(missing)}"
+                    )
+                for hook_name in hook_names:
+                    values = cache[hook_name]
+                    if values.ndim != 4:
+                        raise ValueError(
+                            "head activations must have "
+                            "[batch, position, head, width]"
+                        )
+                    if values.shape[:2] != (stop - start, sequence_length):
+                        raise ValueError(
+                            "cached activations must align with reference tokens"
+                        )
+                    if n_heads is None:
+                        n_heads = values.shape[2]
+                    elif values.shape[2] != n_heads:
+                        raise ValueError(
+                            "all cached activations must share a head count"
+                        )
+                    for key, raw_indices in groups.items():
+                        global_indices = torch.as_tensor(raw_indices).long()
+                        selected = global_indices[
+                            (global_indices >= start) & (global_indices < stop)
+                        ]
+                        if selected.numel() == 0:
+                            continue
+                        local_indices = (selected - start).to(values.device)
+                        chunk_sum = (
+                            values.index_select(0, local_indices)
+                            .sum(dim=0)
+                            .detach()
+                            .cpu()
+                        )
+                        if key in sums[hook_name]:
+                            sums[hook_name][key] += chunk_sum
+                        else:
+                            sums[hook_name][key] = chunk_sum
+                del cache
+    if n_heads is None:
+        raise RuntimeError("no reference activations were cached")
+    means = {
+        hook_name: {
+            key: grouped_sums[key] / group_counts[key]
+            for key in groups
+        }
+        for hook_name, grouped_sums in sums.items()
+    }
+    return GroupedActivationMeans(
         activation=activation,
+        activations=means,
+        sequence_length=sequence_length,
+        n_heads=n_heads,
+        group_counts=group_counts,
+        min_group_size=min_group_size,
+        reference_config=(
+            dict(reference_config) if reference_config is not None else None
+        ),
+        reference_sha256=reference_sha256,
     )
 
 
@@ -213,8 +329,10 @@ def _validate_run(
     if target_tokens.ndim != 2:
         raise ValueError("target_tokens must have shape [batch, position]")
     batch_size, sequence_length = target_tokens.shape
-    if sequence_length != group_means.sequence_length:
-        raise ValueError("target and reference sequence lengths must match")
+    if sequence_length > group_means.sequence_length:
+        raise ValueError(
+            "reference activations must cover the target sequence length"
+        )
     if int(model.cfg.n_heads) != group_means.n_heads:
         raise ValueError("group means head count must match the model")
     group_for_row = _group_for_each_example(groups, batch_size=batch_size)
@@ -245,6 +363,25 @@ def _validate_run(
     return group_for_row, nodes
 
 
+def _capture_hooks(
+    names: Sequence[str],
+    destination: dict[str, torch.Tensor],
+) -> list[tuple[str, Any]]:
+    hooks: list[tuple[str, Any]] = []
+    for hook_name in names:
+        def capture(
+            value: torch.Tensor,
+            hook: Any,
+            *,
+            name: str = hook_name,
+        ) -> torch.Tensor:
+            destination[name] = value.detach().clone()
+            return value
+
+        hooks.append((hook_name, capture))
+    return hooks
+
+
 def _run_ablation(
     model: Any,
     target_tokens: torch.Tensor,
@@ -254,6 +391,7 @@ def _run_ablation(
     nodes: Sequence[HeadPositionNode],
     *,
     keep_mode: bool,
+    before_hooks: Sequence[tuple[str, Any]] = (),
     additional_hooks: Sequence[tuple[str, Any]] = (),
 ) -> torch.Tensor:
     group_for_row, nodes = _validate_run(
@@ -297,7 +435,10 @@ def _run_ablation(
                     "head activations must have [batch, position, head, width]"
                 )
             replacement = torch.stack(
-                [grouped_means[key] for key in group_for_row],
+                [
+                    grouped_means[key][: activation_value.shape[1]]
+                    for key in group_for_row
+                ],
                 dim=0,
             ).to(
                 device=activation_value.device,
@@ -340,7 +481,7 @@ def _run_ablation(
         with torch.inference_mode():
             return model.run_with_hooks(
                 target_tokens,
-                fwd_hooks=[*hooks, *additional_hooks],
+                fwd_hooks=[*before_hooks, *hooks, *additional_hooks],
             )
 
 
@@ -362,6 +503,44 @@ def knockout_nodes(
         nodes,
         keep_mode=False,
     )
+
+
+def knockout_nodes_with_cache(
+    model: Any,
+    target_tokens: torch.Tensor,
+    positions: Mapping[Any, torch.Tensor],
+    groups: Mapping[GroupKey, torch.Tensor],
+    group_means: GroupedActivationMeans,
+    nodes: Sequence[HeadPositionNode],
+    *,
+    names_filter: Sequence[str],
+    before_cache: dict[str, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, Mapping[str, torch.Tensor]]:
+    """Mean-ablate nodes while capturing selected post-hook activations."""
+    names = tuple(names_filter)
+    if not names:
+        raise ValueError("names_filter must not be empty")
+    cache: dict[str, torch.Tensor] = {}
+    before_hooks = (
+        _capture_hooks(names, before_cache)
+        if before_cache is not None
+        else ()
+    )
+    logits = _run_ablation(
+        model,
+        target_tokens,
+        positions,
+        groups,
+        group_means,
+        nodes,
+        keep_mode=False,
+        before_hooks=before_hooks,
+        additional_hooks=_capture_hooks(names, cache),
+    )
+    missing = set(names) - set(cache)
+    if missing:
+        raise RuntimeError(f"cache hooks did not fire: {sorted(missing)}")
+    return logits, cache
 
 
 def run_circuit(

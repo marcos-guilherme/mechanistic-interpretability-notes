@@ -9,6 +9,7 @@ import torch
 
 from ioi_replication.paper.ablation import (
     GroupedActivationMeans,
+    cache_grouped_mean_activations,
     compute_grouped_mean_activations,
     knockout_nodes,
     run_circuit,
@@ -68,6 +69,107 @@ def test_group_means_validate_complete_nonoverlapping_membership(
 
     with pytest.raises(ValueError, match=message):
         compute_grouped_mean_activations(cache, groups, activation="result")
+
+
+def test_group_means_record_reference_metadata_and_enforce_minimum_size() -> None:
+    cache = {
+        "blocks.0.attn.hook_result": torch.arange(
+            4 * 3 * 2,
+            dtype=torch.float64,
+        ).reshape(4, 3, 2, 1)
+    }
+
+    means = compute_grouped_mean_activations(
+        cache,
+        GROUPS,
+        activation="result",
+        min_group_size=2,
+        reference_config={"seed": 17, "kind": "balanced_pABC"},
+        reference_sha256="a" * 64,
+    )
+
+    assert means.group_counts == {("ABBA", 0): 2, ("BABA", 0): 2}
+    assert means.min_group_size == 2
+    assert means.reference_config == {"seed": 17, "kind": "balanced_pABC"}
+    assert means.reference_sha256 == "a" * 64
+
+    with pytest.raises(ValueError, match=r"BABA.*2.*3|minimum.*3"):
+        compute_grouped_mean_activations(
+            cache,
+            GROUPS,
+            activation="result",
+            min_group_size=3,
+        )
+
+
+class _StreamingCacheModel:
+    def __init__(self) -> None:
+        self.cfg = _Cfg()
+        self.max_batch_seen = 0
+
+    def set_use_attn_result(self, enabled: bool) -> None:
+        self.cfg.use_attn_result = enabled
+
+    def run_with_cache(self, tokens, names_filter):
+        self.max_batch_seen = max(self.max_batch_seen, len(tokens))
+        heads = torch.arange(self.cfg.n_heads, dtype=torch.float64).view(
+            1, 1, -1, 1
+        )
+        cache = {}
+        for layer in range(self.cfg.n_layers):
+            name = f"blocks.{layer}.attn.hook_result"
+            if name in names_filter:
+                cache[name] = (
+                    tokens.to(torch.float64)[:, :, None, None]
+                    + 100 * layer
+                    + heads
+                )
+        return torch.zeros(len(tokens), tokens.shape[1], 1), cache
+
+
+def test_streaming_group_means_equal_small_in_memory_computation() -> None:
+    tokens = torch.arange(18).reshape(6, 3)
+    groups = {
+        ("ABBA", 0): torch.tensor([0, 2, 4]),
+        ("BABA", 0): torch.tensor([1, 3, 5]),
+    }
+    full_model = _StreamingCacheModel()
+    _, full_cache = full_model.run_with_cache(
+        tokens,
+        [
+            "blocks.0.attn.hook_result",
+            "blocks.1.attn.hook_result",
+        ],
+    )
+    expected = compute_grouped_mean_activations(
+        full_cache,
+        groups,
+        activation="result",
+        min_group_size=3,
+    )
+    streaming_model = _StreamingCacheModel()
+
+    actual = cache_grouped_mean_activations(
+        streaming_model,
+        tokens,
+        groups,
+        activation="result",
+        batch_size=2,
+        min_group_size=3,
+        reference_config={"n": 6},
+        reference_sha256="b" * 64,
+    )
+
+    assert streaming_model.max_batch_seen == 2
+    assert actual.group_counts == expected.group_counts
+    assert actual.reference_config == {"n": 6}
+    assert actual.reference_sha256 == "b" * 64
+    for hook_name in expected.activations:
+        for key in groups:
+            assert torch.equal(
+                actual.activations[hook_name][key],
+                expected.activations[hook_name][key],
+            )
 
 
 @dataclass

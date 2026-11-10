@@ -7,6 +7,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+import ioi_replication.paper.dataset as paper_dataset
 from ioi_replication.paper.dataset import (
     ABBA_TEMPLATES,
     BABA_TEMPLATES,
@@ -201,6 +202,37 @@ def test_groups_distinguish_pattern_and_template() -> None:
             dataset.metadata[index].pattern == pattern
             and dataset.metadata[index].template_id == template_id
             for index in indices.tolist()
+        )
+
+
+def test_balanced_dataset_covers_every_pattern_template_group_equally() -> None:
+    dataset = paper_dataset.build_balanced_paired_dataset(
+        WhitespaceTokenizer(),
+        examples_per_group=3,
+        seed=23,
+    )
+
+    assert len(dataset) == 90
+    assert len(dataset.groups) == 30
+    assert set(dataset.groups) == {
+        (pattern, template_id)
+        for pattern in ("ABBA", "BABA")
+        for template_id in range(15)
+    }
+    assert {len(indices) for indices in dataset.groups.values()} == {3}
+    repeated = paper_dataset.build_balanced_paired_dataset(
+        WhitespaceTokenizer(),
+        examples_per_group=3,
+        seed=23,
+    )
+    assert dataset.dataset_sha256 == repeated.dataset_sha256
+
+
+def test_balanced_dataset_rejects_nonpositive_group_size() -> None:
+    with pytest.raises(ValueError, match="examples_per_group"):
+        paper_dataset.build_balanced_paired_dataset(
+            WhitespaceTokenizer(),
+            examples_per_group=0,
         )
 
 

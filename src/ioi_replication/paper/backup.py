@@ -7,8 +7,8 @@ import torch
 
 from ioi_replication.paper.ablation import (
     GroupedActivationMeans,
-    _run_ablation,
     _temporary_attn_result,
+    knockout_nodes_with_cache,
 )
 from ioi_replication.paper.circuit import (
     PUBLISHED_CIRCUIT,
@@ -28,16 +28,54 @@ class Estimate:
 
 
 @dataclass(frozen=True)
+class DLADecomposition:
+    baseline: torch.Tensor
+    knockout: torch.Tensor
+    delta_total: torch.Tensor
+    delta_result_fixed_scale: torch.Tensor
+    delta_scale: torch.Tensor
+
+
+@dataclass(frozen=True)
+class CompensationFraction:
+    value: float
+    standard_error: float
+    ci_lower: float
+    ci_upper: float
+    definition: str
+    final_logit_delta_warning: str
+
+
+@dataclass(frozen=True)
 class BackupHeadMetrics:
     baseline_dla: Estimate
     knockout_dla: Estimate
     delta_dla: Estimate
+    delta_result_fixed_scale: Estimate
+    delta_scale: Estimate
     baseline_attention_io: Estimate
     knockout_attention_io: Estimate
     delta_attention_io: Estimate
-    baseline_attention_s: Estimate
-    knockout_attention_s: Estimate
-    delta_attention_s: Estimate
+    baseline_attention_s1: Estimate
+    knockout_attention_s1: Estimate
+    delta_attention_s1: Estimate
+    baseline_attention_s2: Estimate
+    knockout_attention_s2: Estimate
+    delta_attention_s2: Estimate
+    is_causally_downstream: bool
+
+    @property
+    def baseline_attention_s(self) -> Estimate:
+        """Backward-compatible alias for the explicitly reported S1 position."""
+        return self.baseline_attention_s1
+
+    @property
+    def knockout_attention_s(self) -> Estimate:
+        return self.knockout_attention_s1
+
+    @property
+    def delta_attention_s(self) -> Estimate:
+        return self.delta_attention_s1
 
 
 @dataclass(frozen=True)
@@ -46,6 +84,8 @@ class BackupExperimentResult:
     knockout_logit_difference: Estimate
     delta_logit_difference: Estimate
     heads: Mapping[tuple[int, int], BackupHeadMetrics]
+    removed_primary_baseline_dla: Mapping[tuple[int, int], Estimate]
+    compensation_fraction: CompensationFraction | None
 
 
 def _estimate(values: torch.Tensor) -> Estimate:
@@ -137,6 +177,110 @@ def scaled_head_logit_attribution(
     return ((centered / scale) * direction).sum(dim=-1)
 
 
+def decompose_head_logit_attribution(
+    baseline_result: torch.Tensor,
+    knockout_result: torch.Tensor,
+    baseline_scale: torch.Tensor,
+    knockout_scale: torch.Tensor,
+    unembed: torch.Tensor,
+    io_token_ids: torch.Tensor,
+    s_token_ids: torch.Tensor,
+    end_positions: torch.Tensor,
+    *,
+    head: int,
+) -> DLADecomposition:
+    """Split total DLA change into result change and final-LN rescaling."""
+    baseline = scaled_head_logit_attribution(
+        baseline_result,
+        baseline_scale,
+        unembed,
+        io_token_ids,
+        s_token_ids,
+        end_positions,
+        head=head,
+    )
+    knockout = scaled_head_logit_attribution(
+        knockout_result,
+        knockout_scale,
+        unembed,
+        io_token_ids,
+        s_token_ids,
+        end_positions,
+        head=head,
+    )
+    knockout_at_baseline_scale = scaled_head_logit_attribution(
+        knockout_result,
+        baseline_scale,
+        unembed,
+        io_token_ids,
+        s_token_ids,
+        end_positions,
+        head=head,
+    )
+    delta_result = knockout_at_baseline_scale - baseline
+    delta_scale = knockout - knockout_at_baseline_scale
+    return DLADecomposition(
+        baseline=baseline,
+        knockout=knockout,
+        delta_total=knockout - baseline,
+        delta_result_fixed_scale=delta_result,
+        delta_scale=delta_scale,
+    )
+
+
+def compute_compensation_fraction(
+    *,
+    backup_delta_result: torch.Tensor,
+    removed_primary_baseline: torch.Tensor,
+    n_bootstrap: int = 2000,
+    seed: int = 0,
+) -> CompensationFraction:
+    """Estimate ratio-of-means compensation with paired bootstrap limits."""
+    if (
+        backup_delta_result.ndim != 1
+        or removed_primary_baseline.ndim != 1
+        or backup_delta_result.shape != removed_primary_baseline.shape
+        or backup_delta_result.numel() < 2
+    ):
+        raise ValueError("fraction inputs must be equal vectors with at least two rows")
+    if n_bootstrap <= 1:
+        raise ValueError("n_bootstrap must exceed one")
+    numerator = backup_delta_result.detach().float().cpu()
+    denominator = removed_primary_baseline.detach().float().cpu()
+    denominator_mean = denominator.mean()
+    if denominator_mean.abs() < 1e-8:
+        raise ValueError("removed primary baseline mean is too close to zero")
+    value = numerator.mean() / denominator_mean
+    generator = torch.Generator().manual_seed(seed)
+    sample_rows = torch.randint(
+        numerator.numel(),
+        (n_bootstrap, numerator.numel()),
+        generator=generator,
+    )
+    bootstrap_denominator = denominator[sample_rows].mean(dim=1)
+    valid = bootstrap_denominator.abs() >= 1e-8
+    bootstrap = (
+        numerator[sample_rows].mean(dim=1)[valid]
+        / bootstrap_denominator[valid]
+    )
+    if bootstrap.numel() < 2:
+        raise ValueError("bootstrap denominators are numerically unstable")
+    return CompensationFraction(
+        value=float(value.item()),
+        standard_error=float(bootstrap.std(unbiased=True).item()),
+        ci_lower=float(torch.quantile(bootstrap, 0.025).item()),
+        ci_upper=float(torch.quantile(bootstrap, 0.975).item()),
+        definition=(
+            "ratio of means: summed posterior-backup Δresult at fixed "
+            "baseline scale divided by summed removed-primary baseline DLA"
+        ),
+        final_logit_delta_warning=(
+            "This diagnostic is not an identity with the final logit-difference "
+            "delta; downstream nonlinear and residual effects remain."
+        ),
+    )
+
+
 def _head_attention(
     pattern: torch.Tensor,
     *,
@@ -176,13 +320,25 @@ def measure_backup_heads_from_cache(
     s_token_ids: torch.Tensor,
     end_positions: torch.Tensor,
     io_positions: torch.Tensor,
-    s_positions: torch.Tensor,
+    s1_positions: torch.Tensor,
+    s2_positions: torch.Tensor,
     heads: Sequence[tuple[int, int]],
+    causally_downstream_heads: Sequence[tuple[int, int]] | None = None,
+    primary_heads: Sequence[tuple[int, int]] = (),
+    same_layer_tolerance: float = 1e-6,
+    bootstrap_seed: int = 0,
 ) -> BackupExperimentResult:
     """Summarize baseline and post-knockout signals for backup heads."""
     heads = tuple(heads)
     if not heads or len(set(heads)) != len(heads):
         raise ValueError("heads must be a non-empty unique sequence")
+    downstream = (
+        set(heads)
+        if causally_downstream_heads is None
+        else set(causally_downstream_heads)
+    )
+    if not downstream.issubset(set(heads)):
+        raise ValueError("causally_downstream_heads must be a subset of heads")
     batch_size = baseline_logits.shape[0]
     if knockout_logits.shape != baseline_logits.shape:
         raise ValueError("baseline and knockout logits must have equal shape")
@@ -216,17 +372,10 @@ def measure_backup_heads_from_cache(
             if name not in cache:
                 raise KeyError(f"cache did not contain {name!r}")
 
-        baseline_dla = scaled_head_logit_attribution(
+        decomposition = decompose_head_logit_attribution(
             baseline_cache[result_name],
-            baseline_cache["ln_final.hook_scale"],
-            unembed,
-            io_token_ids,
-            s_token_ids,
-            end_positions,
-            head=head,
-        )
-        knockout_dla = scaled_head_logit_attribution(
             knockout_cache[result_name],
+            baseline_cache["ln_final.hook_scale"],
             knockout_cache["ln_final.hook_scale"],
             unembed,
             io_token_ids,
@@ -246,40 +395,107 @@ def measure_backup_heads_from_cache(
             query_positions=end_positions,
             key_positions=io_positions,
         )
-        baseline_s = _head_attention(
+        baseline_s1 = _head_attention(
             baseline_cache[pattern_name],
             head=head,
             query_positions=end_positions,
-            key_positions=s_positions,
+            key_positions=s1_positions,
         )
-        knockout_s = _head_attention(
+        knockout_s1 = _head_attention(
             knockout_cache[pattern_name],
             head=head,
             query_positions=end_positions,
-            key_positions=s_positions,
+            key_positions=s1_positions,
+        )
+        baseline_s2 = _head_attention(
+            baseline_cache[pattern_name],
+            head=head,
+            query_positions=end_positions,
+            key_positions=s2_positions,
+        )
+        knockout_s2 = _head_attention(
+            knockout_cache[pattern_name],
+            head=head,
+            query_positions=end_positions,
+            key_positions=s2_positions,
         )
         if any(
             values.shape != (batch_size,)
             for values in (
-                baseline_dla,
-                knockout_dla,
+                decomposition.baseline,
+                decomposition.knockout,
                 baseline_io,
                 knockout_io,
-                baseline_s,
-                knockout_s,
+                baseline_s1,
+                knockout_s1,
+                baseline_s2,
+                knockout_s2,
             )
         ):
             raise ValueError("all head measurements must have one value per example")
+        is_downstream = (layer, head) in downstream
+        if (
+            not is_downstream
+            and decomposition.delta_result_fixed_scale.abs().max().item()
+            > same_layer_tolerance
+        ):
+            raise RuntimeError(
+                f"non-downstream head {layer}.{head} changed result beyond "
+                f"tolerance {same_layer_tolerance}"
+            )
         head_metrics[(layer, head)] = BackupHeadMetrics(
-            baseline_dla=_estimate(baseline_dla),
-            knockout_dla=_estimate(knockout_dla),
-            delta_dla=_estimate(knockout_dla - baseline_dla),
+            baseline_dla=_estimate(decomposition.baseline),
+            knockout_dla=_estimate(decomposition.knockout),
+            delta_dla=_estimate(decomposition.delta_total),
+            delta_result_fixed_scale=_estimate(
+                decomposition.delta_result_fixed_scale
+            ),
+            delta_scale=_estimate(decomposition.delta_scale),
             baseline_attention_io=_estimate(baseline_io),
             knockout_attention_io=_estimate(knockout_io),
             delta_attention_io=_estimate(knockout_io - baseline_io),
-            baseline_attention_s=_estimate(baseline_s),
-            knockout_attention_s=_estimate(knockout_s),
-            delta_attention_s=_estimate(knockout_s - baseline_s),
+            baseline_attention_s1=_estimate(baseline_s1),
+            knockout_attention_s1=_estimate(knockout_s1),
+            delta_attention_s1=_estimate(knockout_s1 - baseline_s1),
+            baseline_attention_s2=_estimate(baseline_s2),
+            knockout_attention_s2=_estimate(knockout_s2),
+            delta_attention_s2=_estimate(knockout_s2 - baseline_s2),
+            is_causally_downstream=is_downstream,
+        )
+
+    primary_metrics: dict[tuple[int, int], Estimate] = {}
+    for layer, head in primary_heads:
+        result_name = f"blocks.{layer}.attn.hook_result"
+        if result_name not in baseline_cache:
+            raise KeyError(f"cache did not contain {result_name!r}")
+        primary_metrics[(layer, head)] = _estimate(
+            scaled_head_logit_attribution(
+                baseline_cache[result_name],
+                baseline_cache["ln_final.hook_scale"],
+                unembed,
+                io_token_ids,
+                s_token_ids,
+                end_positions,
+                head=head,
+            )
+        )
+
+    compensation_fraction = None
+    if primary_metrics:
+        numerator = torch.stack(
+            [
+                metrics.delta_result_fixed_scale.values
+                for head, metrics in head_metrics.items()
+                if head in downstream
+            ]
+        ).sum(dim=0)
+        denominator = torch.stack(
+            [metrics.values for metrics in primary_metrics.values()]
+        ).sum(dim=0)
+        compensation_fraction = compute_compensation_fraction(
+            backup_delta_result=numerator,
+            removed_primary_baseline=denominator,
+            seed=bootstrap_seed,
         )
 
     return BackupExperimentResult(
@@ -287,26 +503,9 @@ def measure_backup_heads_from_cache(
         knockout_logit_difference=_estimate(knockout_logit),
         delta_logit_difference=_estimate(knockout_logit - baseline_logit),
         heads=head_metrics,
+        removed_primary_baseline_dla=primary_metrics,
+        compensation_fraction=compensation_fraction,
     )
-
-
-def _capture_hooks(
-    names: Sequence[str],
-    destination: dict[str, torch.Tensor],
-) -> list[tuple[str, Any]]:
-    hooks: list[tuple[str, Any]] = []
-    for hook_name in names:
-        def capture(
-            value: torch.Tensor,
-            hook: Any,
-            *,
-            name: str = hook_name,
-        ) -> torch.Tensor:
-            destination[name] = value.detach().clone()
-            return value
-
-        hooks.append((hook_name, capture))
-    return hooks
 
 
 def measure_backup_name_movers(
@@ -341,20 +540,20 @@ def measure_backup_name_movers(
                 names_filter=cache_names,
             )
 
-    knockout_cache: dict[str, torch.Tensor] = {}
-    knockout_logits = _run_ablation(
+    knockout_logits, knockout_cache = knockout_nodes_with_cache(
         model,
         tokens,
         dataset.positions,
         dataset.groups,
         group_means,
         primary_nodes,
-        keep_mode=False,
-        additional_hooks=_capture_hooks(cache_names, knockout_cache),
+        names_filter=cache_names,
     )
-    missing = set(cache_names) - set(knockout_cache)
-    if missing:
-        raise RuntimeError(f"knockout cache hooks did not fire: {sorted(missing)}")
+    downstream_heads = tuple(
+        head
+        for head in heads
+        if head[0] > min(node.layer for node in primary_nodes)
+    )
 
     return measure_backup_heads_from_cache(
         baseline_logits=baseline_logits,
@@ -366,6 +565,12 @@ def measure_backup_name_movers(
         s_token_ids=dataset.s_token_ids.to(device),
         end_positions=dataset.positions["END"].to(device),
         io_positions=dataset.positions["IO"].to(device),
-        s_positions=dataset.positions["S1"].to(device),
+        s1_positions=dataset.positions["S1"].to(device),
+        s2_positions=dataset.positions["S2"].to(device),
         heads=heads,
+        causally_downstream_heads=downstream_heads,
+        primary_heads=tuple(
+            (node.layer, node.head) for node in primary_nodes
+        ),
+        bootstrap_seed=dataset.seed,
     )

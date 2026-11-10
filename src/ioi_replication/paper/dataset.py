@@ -356,6 +356,7 @@ def build_paired_dataset(
     n: int = 500,
     seed: int = 0,
     pattern: Literal["BABA", "ABBA", "mixed"] = "mixed",
+    _group_schedule: Sequence[tuple[str, int]] | None = None,
 ) -> PairedIOIDataset:
     """Generate deterministic, token-aligned pIOI/pABC examples.
 
@@ -368,6 +369,15 @@ def build_paired_dataset(
         raise ValueError("n must be positive")
     if pattern not in {"BABA", "ABBA", "mixed"}:
         raise ValueError("pattern must be 'BABA', 'ABBA', or 'mixed'")
+    if _group_schedule is not None:
+        if len(_group_schedule) != n:
+            raise ValueError("group schedule must have one entry per example")
+        if any(
+            scheduled_pattern not in {"ABBA", "BABA"}
+            or not 0 <= template_id < len(BABA_TEMPLATES)
+            for scheduled_pattern, template_id in _group_schedule
+        ):
+            raise ValueError("group schedule entries must be valid pattern/template pairs")
 
     vocabulary = filter_single_token_vocabulary(tokenizer)
     if len(vocabulary.names) < 5:
@@ -382,11 +392,14 @@ def build_paired_dataset(
     abc_prompts: list[str] = []
     metadata: list[PromptMetadata] = []
 
-    for _ in range(n):
-        template_id = rng.randrange(len(BABA_TEMPLATES))
-        selected_pattern = (
-            rng.choice(("BABA", "ABBA")) if pattern == "mixed" else pattern
-        )
+    for example_index in range(n):
+        if _group_schedule is None:
+            template_id = rng.randrange(len(BABA_TEMPLATES))
+            selected_pattern = (
+                rng.choice(("BABA", "ABBA")) if pattern == "mixed" else pattern
+            )
+        else:
+            selected_pattern, template_id = _group_schedule[example_index]
         templates = (
             BABA_TEMPLATES if selected_pattern == "BABA" else ABBA_TEMPLATES
         )
@@ -536,4 +549,29 @@ def build_paired_dataset(
         groups=groups,
         metadata=metadata,
         seed=seed,
+    )
+
+
+def build_balanced_paired_dataset(
+    tokenizer: Any,
+    *,
+    examples_per_group: int = 10,
+    seed: int = 0,
+) -> PairedIOIDataset:
+    """Build equal counts for all 30 exact ``(pattern, template_id)`` groups."""
+    if examples_per_group <= 0:
+        raise ValueError("examples_per_group must be positive")
+    schedule = [
+        (pattern, template_id)
+        for pattern in ("ABBA", "BABA")
+        for template_id in range(len(BABA_TEMPLATES))
+        for _ in range(examples_per_group)
+    ]
+    random.Random(seed).shuffle(schedule)
+    return build_paired_dataset(
+        tokenizer,
+        n=len(schedule),
+        seed=seed,
+        pattern="mixed",
+        _group_schedule=schedule,
     )

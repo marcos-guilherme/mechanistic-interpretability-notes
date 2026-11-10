@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 import torch
 
+import ioi_replication.paper as paper_api
 from ioi_replication.paper import (
+    PUBLISHED_CIRCUIT,
+    CircuitClass,
     HeadPositionNode,
     PathReceiver,
     SemanticPosition,
@@ -107,11 +110,20 @@ def test_real_gpt2_backup_knockout_has_finite_structured_signals(
 ) -> None:
     model, dataset = real_model_and_dataset
     device = torch.device(model.cfg.device)
+    reference = paper_api.build_balanced_paired_dataset(
+        model.tokenizer,
+        examples_per_group=1,
+        seed=72,
+    )
     means = cache_grouped_mean_activations(
         model,
-        dataset.abc_tokens.to(device),
-        dataset.groups,
+        reference.abc_tokens.to(device),
+        reference.groups,
         activation="result",
+        batch_size=8,
+        min_group_size=1,
+        reference_config={"kind": "balanced", "n": len(reference)},
+        reference_sha256=reference.dataset_sha256,
     )
 
     result = measure_backup_name_movers(
@@ -128,6 +140,109 @@ def test_real_gpt2_backup_knockout_has_finite_structured_signals(
         assert torch.isfinite(metrics.knockout_dla.values).all()
         assert torch.isfinite(metrics.baseline_attention_io.values).all()
         assert torch.isfinite(metrics.knockout_attention_io.values).all()
-        assert torch.isfinite(metrics.baseline_attention_s.values).all()
-        assert torch.isfinite(metrics.knockout_attention_s.values).all()
+        assert torch.isfinite(metrics.baseline_attention_s1.values).all()
+        assert torch.isfinite(metrics.knockout_attention_s1.values).all()
+        assert torch.isfinite(metrics.baseline_attention_s2.values).all()
+        assert torch.isfinite(metrics.knockout_attention_s2.values).all()
+    assert len(result.removed_primary_baseline_dla) == 3
+    assert torch.isfinite(
+        result.compensation_fraction.value
+        * torch.ones(())
+    )
+    assert model.cfg.use_attn_result is False
+
+
+def test_real_gpt2_knockout_replaces_only_primary_end_nodes(
+    real_model_and_dataset,
+) -> None:
+    model, target = real_model_and_dataset
+    device = torch.device(model.cfg.device)
+    reference = paper_api.build_balanced_paired_dataset(
+        model.tokenizer,
+        examples_per_group=1,
+        seed=73,
+    )
+    means = cache_grouped_mean_activations(
+        model,
+        reference.abc_tokens.to(device),
+        reference.groups,
+        batch_size=8,
+        min_group_size=1,
+    )
+    primary_nodes = PUBLISHED_CIRCUIT[CircuitClass.NAME_MOVERS]
+    hook_names = sorted(
+        {
+            f"blocks.{node.layer}.attn.hook_result"
+            for node in primary_nodes
+        }
+    )
+    tokens = target.ioi_tokens.to(device)
+    model.set_use_attn_result(True)
+    try:
+        _, baseline_cache = model.run_with_cache(
+            tokens,
+            names_filter=hook_names,
+        )
+    finally:
+        model.set_use_attn_result(False)
+
+    pre_ablation_cache = {}
+    _, knockout_cache = paper_api.knockout_nodes_with_cache(
+        model,
+        tokens,
+        target.positions,
+        target.groups,
+        means,
+        primary_nodes,
+        names_filter=hook_names,
+        before_cache=pre_ablation_cache,
+    )
+    row_groups = [None] * len(target)
+    for key, indices in target.groups.items():
+        for row in indices.tolist():
+            row_groups[row] = key
+
+    rows = torch.arange(len(target), device=device)
+    for hook_name in hook_names:
+        baseline = baseline_cache[hook_name]
+        knocked_out = knockout_cache[hook_name]
+        layer = int(hook_name.split(".")[1])
+        if layer == 9:
+            assert torch.allclose(
+                pre_ablation_cache[hook_name],
+                baseline,
+                atol=1e-6,
+                rtol=1e-6,
+            )
+        unchanged = torch.ones(
+            baseline.shape[:3],
+            dtype=torch.bool,
+            device=device,
+        )
+        for node in primary_nodes:
+            if node.layer != layer:
+                continue
+            end = target.positions["END"].to(device)
+            expected = torch.stack(
+                [
+                    means.activations[hook_name][key][
+                        target.positions["END"][row],
+                        node.head,
+                    ]
+                    for row, key in enumerate(row_groups)
+                ]
+            ).to(device)
+            assert torch.allclose(
+                knocked_out[rows, end, node.head],
+                expected,
+                atol=1e-5,
+                rtol=1e-5,
+            )
+            unchanged[rows, end, node.head] = False
+        assert torch.allclose(
+            knocked_out[unchanged],
+            pre_ablation_cache[hook_name][unchanged],
+            atol=1e-6,
+            rtol=1e-6,
+        )
     assert model.cfg.use_attn_result is False
