@@ -92,22 +92,29 @@ def apply_causal_clamp(
 def _orthogonal_random_direction(
     vectors: torch.Tensor, *, generator: torch.Generator
 ) -> torch.Tensor:
-    vectors = vectors.detach().float().cpu()
-    left, singular, _ = torch.linalg.svd(vectors.T, full_matrices=False)
-    if singular.numel():
-        keep = singular > singular[0] * 1e-6
-        basis = left[:, keep]
-    else:
-        basis = left[:, :0]
-    for _ in range(8):
-        candidate = torch.randn(
-            vectors.shape[1], generator=generator, dtype=torch.float32
+    try:
+        vectors = vectors.detach().float().cpu()
+        left, singular, _ = torch.linalg.svd(
+            vectors.T, full_matrices=False
         )
-        if basis.numel():
-            candidate = candidate - basis @ (basis.T @ candidate)
-        norm = candidate.norm()
-        if norm > 1e-6:
-            return candidate / norm
+        if singular.numel():
+            keep = singular > singular[0] * 1e-6
+            basis = left[:, keep]
+        else:
+            basis = left[:, :0]
+        for _ in range(8):
+            candidate = torch.randn(
+                vectors.shape[1], generator=generator, dtype=torch.float32
+            )
+            if basis.numel():
+                candidate = candidate - basis @ (basis.T @ candidate)
+            norm = candidate.norm()
+            if norm > 1e-6:
+                return candidate / norm
+    except torch.linalg.LinAlgError as error:
+        raise RandomControlError(
+            "random-control projection preparation failed"
+        ) from error
     raise RandomControlError(
         "could not construct a random direction outside source/target span"
     )

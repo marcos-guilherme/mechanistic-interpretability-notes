@@ -89,7 +89,12 @@ def _compact_classification(classification: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def evaluate_experiment(raw_diagnostics: dict[str, Any]) -> dict[str, Any]:
+def evaluate_experiment(
+    raw_diagnostics: dict[str, Any],
+    *,
+    expected_prompt_names: list[str] | None = None,
+    expected_alphas: list[float] | None = None,
+) -> dict[str, Any]:
     try:
         observations = raw_diagnostics["experiment"]["observations"]
         spider_present = bool(
@@ -113,11 +118,42 @@ def evaluate_experiment(raw_diagnostics: dict[str, Any]) -> dict[str, Any]:
             item["classification"]
         )
 
+    prompt_order = (
+        list(expected_prompt_names)
+        if expected_prompt_names is not None
+        else sorted(
+            {prompt for prompt, _alpha in grouped},
+            key=lambda prompt: (prompt != PRIMARY_PROMPT, prompt),
+        )
+    )
+    alpha_order = (
+        [float(alpha) for alpha in expected_alphas]
+        if expected_alphas is not None
+        else sorted({alpha for _prompt, alpha in grouped})
+    )
+    if (
+        PRIMARY_PROMPT not in prompt_order
+        or len(set(prompt_order)) != len(prompt_order)
+        or not alpha_order
+        or len(set(alpha_order)) != len(alpha_order)
+    ):
+        raise EvaluationDataError(
+            "expected prompt and alpha plan is invalid"
+        )
+    expected_pairs = {
+        (prompt, alpha)
+        for prompt in prompt_order
+        for alpha in alpha_order
+    }
+    if set(grouped) != expected_pairs:
+        raise EvaluationDataError(
+            "observations do not match the expected prompt and alpha plan"
+        )
+
     primary_alphas: list[dict[str, Any]] = []
     passing_alphas: list[float] = []
-    for (prompt, alpha), conditions in sorted(grouped.items()):
-        if prompt != PRIMARY_PROMPT:
-            continue
+    for alpha in alpha_order:
+        conditions = grouped[(PRIMARY_PROMPT, alpha)]
         missing = [name for name in CONDITIONS if name not in conditions]
         if missing:
             raise EvaluationDataError(
@@ -145,16 +181,39 @@ def evaluate_experiment(raw_diagnostics: dict[str, Any]) -> dict[str, Any]:
     if not primary_alphas:
         raise EvaluationDataError("missing primary main-prompt observations")
 
-    secondary_passing = 0
-    for (prompt, _alpha), conditions in grouped.items():
-        if prompt == PRIMARY_PROMPT:
-            continue
-        if all(name in conditions for name in CONDITIONS):
-            gates, _ = evaluate_conditions(
-                conditions,
-                spider_present=spider_present,
-            )
-            secondary_passing += int(all(gates.values()))
+    secondary_prompt_alphas: list[dict[str, Any]] = []
+    for prompt in prompt_order:
+        if prompt != PRIMARY_PROMPT:
+            for alpha in alpha_order:
+                conditions = grouped[(prompt, alpha)]
+                missing = [
+                    name for name in CONDITIONS if name not in conditions
+                ]
+                if missing:
+                    raise EvaluationDataError(
+                        f"missing paraphrase condition(s) for {prompt} "
+                        f"at alpha {alpha}: " + ", ".join(missing)
+                    )
+                gates, _ = evaluate_conditions(
+                    conditions,
+                    spider_present=spider_present,
+                )
+                secondary_prompt_alphas.append(
+                    {
+                        "prompt_name": prompt,
+                        "alpha": alpha,
+                        "conditions": conditions,
+                        "gates": gates,
+                        "passed": all(gates.values()),
+                    }
+                )
+
+    secondary_names = [
+        prompt for prompt in prompt_order if prompt != PRIMARY_PROMPT
+    ]
+    secondary_passing = sum(
+        int(item["passed"]) for item in secondary_prompt_alphas
+    )
 
     return {
         "primary": {
@@ -165,13 +224,8 @@ def evaluate_experiment(raw_diagnostics: dict[str, Any]) -> dict[str, Any]:
             "passing_alpha_count": len(passing_alphas),
         },
         "paraphrases": {
-            "prompt_count": len(
-                {
-                    prompt
-                    for prompt, _alpha in grouped
-                    if prompt != PRIMARY_PROMPT
-                }
-            ),
+            "prompt_count": len(secondary_names),
             "passing_prompt_alpha_count": secondary_passing,
+            "prompt_alphas": secondary_prompt_alphas,
         },
     }

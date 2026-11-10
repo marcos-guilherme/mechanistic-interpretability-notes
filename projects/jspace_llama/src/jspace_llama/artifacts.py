@@ -76,7 +76,17 @@ def build_artifacts(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     complete = provenance_is_complete(provenance)
     evaluated = (
-        evaluate_experiment(raw_diagnostics)
+        evaluate_experiment(
+            raw_diagnostics,
+            expected_prompt_names=[
+                str(prompt["name"])
+                for prompt in provenance["experiment"]["prompts"]
+            ],
+            expected_alphas=[
+                float(alpha)
+                for alpha in provenance["experiment"]["alphas"]
+            ],
+        )
         if raw_diagnostics is not None
         else {
             "primary": {
@@ -89,6 +99,7 @@ def build_artifacts(
             "paraphrases": {
                 "prompt_count": 0,
                 "passing_prompt_alpha_count": 0,
+                "prompt_alphas": [],
             },
         }
     )

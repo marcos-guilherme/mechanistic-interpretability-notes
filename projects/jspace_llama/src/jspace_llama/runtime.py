@@ -6,9 +6,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from huggingface_hub.errors import (
+    EntryNotFoundError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    OfflineModeIsEnabled,
+)
 import torch
 
 from jspace_llama.config import AssetsConfig
+
+
+HUGGINGFACE_OPERATIONAL_ERRORS = (
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    OfflineModeIsEnabled,
+    EntryNotFoundError,
+)
 
 
 class JSpaceExperimentError(RuntimeError):
@@ -116,6 +130,10 @@ def download_lens_file(
             filename=assets.lens_filename,
             revision=resolved_revision,
         )
+    except HUGGINGFACE_OPERATIONAL_ERRORS as exc:
+        raise AssetLoadError(
+            f"failed to download lens {assets.lens_repo_id}/{assets.lens_filename}"
+        ) from exc
     except OSError as exc:
         raise AssetLoadError(
             f"failed to download lens {assets.lens_repo_id}/{assets.lens_filename}"
@@ -211,6 +229,10 @@ def load_components(
     except torch.OutOfMemoryError as exc:
         raise ResourceExhaustionError(
             f"CUDA out of memory while loading {assets.model_id}"
+        ) from exc
+    except HUGGINGFACE_OPERATIONAL_ERRORS as exc:
+        raise AssetLoadError(
+            f"failed to load model asset {assets.model_id}"
         ) from exc
     except OSError as exc:
         raise AssetLoadError(

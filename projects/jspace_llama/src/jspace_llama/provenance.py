@@ -12,7 +12,11 @@ from typing import Any, Iterable
 
 from jspace_llama.config import AssetsConfig, ExperimentConfig
 from jspace_llama.jsonio import strict_json_loads
-from jspace_llama.runtime import AssetLoadError, LensIntegrityError
+from jspace_llama.runtime import (
+    HUGGINGFACE_OPERATIONAL_ERRORS,
+    AssetLoadError,
+    LensIntegrityError,
+)
 
 
 JSPACE_COMMIT = "04c822a255fe0a10d84e08ec499e5e09f4b7d37a"
@@ -106,6 +110,10 @@ def resolve_huggingface_revisions(
     try:
         model_revision = str(api.model_info(model_id).sha)
         lens_revision = str(api.model_info(lens_repo_id).sha)
+    except HUGGINGFACE_OPERATIONAL_ERRORS as error:
+        raise AssetLoadError(
+            "failed to resolve pinned Hugging Face revisions"
+        ) from error
     except OSError as error:
         raise AssetLoadError(
             "failed to resolve pinned Hugging Face revisions"

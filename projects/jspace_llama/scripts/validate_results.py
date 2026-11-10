@@ -299,6 +299,96 @@ def _recompute_primary(final: dict[str, Any]) -> tuple[list[float], int]:
     return passing, len(passing)
 
 
+def _recompute_paraphrases(
+    final: dict[str, Any],
+    experiment: dict[str, Any],
+    *,
+    completed: bool,
+) -> None:
+    paraphrases = final["paraphrases"]
+    entries = paraphrases["prompt_alphas"]
+    observed_names: set[str] = set()
+    observed_pairs: set[tuple[str, float]] = set()
+    recomputed_passing = 0
+    spider_present = final["primary"]["readout"]["spider_present"]
+    for index, entry in enumerate(entries):
+        prompt_name = entry["prompt_name"]
+        alpha = float(entry["alpha"])
+        pair = (prompt_name, alpha)
+        if pair in observed_pairs:
+            raise ResultsValidationError(
+                "paraphrase prompt/alpha pairs must be unique"
+            )
+        observed_names.add(prompt_name)
+        observed_pairs.add(pair)
+        gates, _reasons = _evaluate_conditions(
+            entry["conditions"],
+            spider_present=spider_present,
+        )
+        if entry["gates"] != gates:
+            raise ResultsValidationError(
+                f"paraphrase gates do not recompute at prompt_alphas[{index}]"
+            )
+        passed = all(gates.values())
+        if entry["passed"] is not passed:
+            raise ResultsValidationError(
+                f"paraphrase pass claim does not recompute at "
+                f"prompt_alphas[{index}]"
+            )
+        recomputed_passing += int(passed)
+
+    if paraphrases["prompt_count"] != len(observed_names):
+        raise ResultsValidationError(
+            "paraphrase prompt_count does not recompute"
+        )
+    claimed_passing = paraphrases["passing_prompt_alpha_count"]
+    if not 0 <= claimed_passing <= len(entries):
+        raise ResultsValidationError(
+            "paraphrase passing_prompt_alpha_count is out of bounds"
+        )
+    if claimed_passing != recomputed_passing:
+        raise ResultsValidationError(
+            "paraphrase passing_prompt_alpha_count does not recompute"
+        )
+
+    if not completed:
+        if entries or paraphrases["prompt_count"] != 0:
+            raise ResultsValidationError(
+                "paraphrase aggregates require a completed run"
+            )
+        return
+
+    prompt_names = [
+        prompt["name"] for prompt in experiment["prompts"]
+    ]
+    if (
+        len(set(prompt_names)) != len(prompt_names)
+        or prompt_names.count("main") != 1
+    ):
+        raise ResultsValidationError(
+            "paraphrase manifest prompt set is not unique"
+        )
+    expected_names = {
+        prompt_name for prompt_name in prompt_names if prompt_name != "main"
+    }
+    expected_alphas = {
+        float(alpha) for alpha in experiment["alphas"]
+    }
+    expected_pairs = {
+        (prompt_name, alpha)
+        for prompt_name in expected_names
+        for alpha in expected_alphas
+    }
+    if observed_names != expected_names:
+        raise ResultsValidationError(
+            "paraphrase prompt set differs from manifest provenance"
+        )
+    if observed_pairs != expected_pairs:
+        raise ResultsValidationError(
+            "paraphrase prompt/alpha pairs differ from manifest provenance"
+        )
+
+
 def validate_documents(
     manifest: dict[str, Any],
     final: dict[str, Any],
@@ -362,7 +452,13 @@ def validate_documents(
         raise ResultsValidationError(
             "passing_alpha_count claim does not recompute"
         )
-    if manifest["terminal_status"] == "completed":
+    completed = manifest["terminal_status"] == "completed"
+    _recompute_paraphrases(
+        final,
+        experiment,
+        completed=completed,
+    )
+    if completed:
         provenance_alphas = [float(value) for value in experiment["alphas"]]
         evaluated_alphas = [
             float(item["alpha"]) for item in primary["alphas"]

@@ -191,10 +191,9 @@ def test_success_requires_all_primary_gates_and_complete_provenance() -> None:
     assert final["primary"]["passing_alphas"] == [4.0]
     assert final["primary"]["alphas"][0]["passed"] is True
     assert final["primary"]["readout"]["spider_present"] is True
-    assert final["paraphrases"] == {
-        "prompt_count": 2,
-        "passing_prompt_alpha_count": 2,
-    }
+    assert final["paraphrases"]["prompt_count"] == 2
+    assert final["paraphrases"]["passing_prompt_alpha_count"] == 2
+    assert len(final["paraphrases"]["prompt_alphas"]) == 2
 
 
 def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(

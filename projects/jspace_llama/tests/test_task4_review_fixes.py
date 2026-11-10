@@ -11,12 +11,23 @@ from types import SimpleNamespace
 
 import jsonschema
 import pytest
+import torch
+from huggingface_hub.errors import (
+    EntryNotFoundError,
+    GatedRepoError,
+    HfHubHTTPError,
+    LocalEntryNotFoundError,
+    OfflineModeIsEnabled,
+    RevisionNotFoundError,
+)
 
 import test_artifact_pipeline as task4
 from jspace_llama.config import AssetsConfig
 from jspace_llama.interventions import (
     InterventionPreparationError,
     RandomControlError,
+    SwapLayer,
+    make_random_directions,
 )
 from jspace_llama.runtime import (
     AssetLoadError,
@@ -274,7 +285,12 @@ def test_compact_reasons_use_fixed_allowlist_and_never_exception_text(
         "code": "tokenization_failed",
         "message": "intervention concepts are not valid single tokens",
     }
-    for forbidden in ("101", "202", "cache", secret, "raw prompt"):
+    for forbidden in (
+        "ids [101, 202]",
+        r"C:\cache\tokenizer",
+        secret,
+        "raw prompt",
+    ):
         assert forbidden not in compact
     raw = json.loads(
         (tmp_path / "artifacts" / "readout_and_causal_swap.json").read_text(
@@ -533,3 +549,240 @@ def test_validator_gate_equations_are_independent(
     validator = load_script(VALIDATOR_PATH, "independent_gate_validator")
 
     validator.validate_documents(manifest, final, schema_dir=SCHEMAS)
+
+
+def test_random_control_linalg_failure_is_expected_and_writes_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jspace_llama.pipeline import run_pipeline
+
+    failure = torch.linalg.LinAlgError("SVD did not converge")
+
+    def fail_svd(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(torch.linalg, "svd", fail_svd)
+    prepared = {
+        12: SwapLayer(
+            vectors=torch.eye(2),
+            pseudoinverse=torch.eye(2),
+            noop=False,
+        )
+    }
+
+    with pytest.raises(RandomControlError) as caught:
+        make_random_directions(prepared, seed=42)
+    assert caught.value.__cause__ is failure
+
+    outcome = run_pipeline(
+        project_root=tmp_path,
+        execute=lambda: make_random_directions(prepared, seed=42),
+        base_provenance=task4.complete_provenance(),
+    )
+
+    assert outcome["status"] == "inconclusive"
+    assert outcome["reason"]["code"] == "random_control_failed"
+    manifest = json.loads(
+        (tmp_path / "results" / "execution_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["terminal_status"] == "expected_failure"
+
+
+def _hub_operational_error(kind: str) -> BaseException:
+    response = SimpleNamespace(
+        status_code=401,
+        headers={},
+        request=SimpleNamespace(url="https://huggingface.co/private/repo"),
+    )
+    if kind == "auth":
+        return HfHubHTTPError("authentication failed", response=response)
+    if kind == "gated":
+        return GatedRepoError("gated repository", response=response)
+    if kind == "revision":
+        return RevisionNotFoundError("missing revision", response=response)
+    if kind == "offline":
+        return OfflineModeIsEnabled("offline mode is enabled")
+    if kind == "local_entry":
+        return LocalEntryNotFoundError("local cache entry missing")
+    if kind == "entry":
+        return EntryNotFoundError("repository entry missing")
+    raise AssertionError(f"unsupported test exception kind: {kind}")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["auth", "gated", "revision", "offline", "local_entry", "entry"],
+)
+def test_huggingface_operational_failures_translate_to_asset_load_error(
+    kind: str,
+) -> None:
+    from jspace_llama.provenance import resolve_huggingface_revisions
+
+    error = _hub_operational_error(kind)
+
+    class FailingApi:
+        def model_info(self, repo_id):
+            raise error
+
+    with pytest.raises(AssetLoadError) as revision_failure:
+        resolve_huggingface_revisions(
+            AssetsConfig().model_id,
+            AssetsConfig().lens_repo_id,
+            api=FailingApi(),
+        )
+    assert revision_failure.value.__cause__ is error
+
+    def fail_download(**kwargs):
+        raise error
+
+    with pytest.raises(AssetLoadError) as download_failure:
+        download_lens_file(
+            AssetsConfig(),
+            resolved_revision="a" * 40,
+            downloader=fail_download,
+        )
+    assert download_failure.value.__cause__ is error
+
+
+def test_execute_real_experiment_translates_non_os_hub_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import huggingface_hub
+    import jspace_llama.pipeline as pipeline
+
+    error = EntryNotFoundError("snapshot entry missing")
+    monkeypatch.setattr(
+        pipeline,
+        "require_cuda",
+        lambda: SimpleNamespace(
+            gpu_name="NVIDIA L4",
+            dtype="bfloat16",
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_huggingface_revisions",
+        lambda *args: ("a" * 40, "b" * 40),
+    )
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(AssetLoadError) as caught:
+        pipeline.execute_real_experiment(
+            project_root=tmp_path,
+            config=task4.ExperimentConfig(),
+            provenance=task4.complete_provenance(),
+        )
+    assert caught.value.__cause__ is error
+
+
+def test_model_component_load_translates_hub_operational_failure() -> None:
+    error = EntryNotFoundError("model snapshot entry missing")
+
+    class FailingModel:
+        @classmethod
+        def load(cls, *args, **kwargs):
+            raise error
+
+    with pytest.raises(AssetLoadError) as caught:
+        load_components(
+            AssetsConfig(),
+            "lens.pt",
+            hf_model_cls=FailingModel,
+            lens_cls=object(),
+            dictionary_cls=object(),
+        )
+    assert caught.value.__cause__ is error
+
+
+def test_paraphrase_artifact_has_per_prompt_alpha_gate_aggregates() -> None:
+    _, final = task4.build_success_artifacts()
+    prompt_alphas = final["paraphrases"]["prompt_alphas"]
+
+    assert {
+        (item["prompt_name"], item["alpha"])
+        for item in prompt_alphas
+    } == {
+        ("paraphrase_animal", 4.0),
+        ("paraphrase_creature", 4.0),
+    }
+    assert all(item["passed"] is True for item in prompt_alphas)
+    assert all(all(item["gates"].values()) for item in prompt_alphas)
+    compact = json.dumps(final["paraphrases"])
+    assert "raw paraphrase" not in compact
+    assert "continuation" not in compact
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda p: p.update(prompt_count=1),
+        lambda p: p.update(passing_prompt_alpha_count=1),
+        lambda p: p["prompt_alphas"][0]["gates"].update(
+            baseline_eight=False
+        ),
+        lambda p: p["prompt_alphas"][0].update(passed=False),
+        lambda p: p["prompt_alphas"][0].update(prompt_name="unexpected"),
+        lambda p: p["prompt_alphas"][0].update(alpha=99.0),
+        lambda p: p["prompt_alphas"].pop(),
+    ],
+)
+def test_validator_recomputes_and_cross_checks_paraphrase_aggregates(
+    tamper,
+) -> None:
+    validator = load_script(
+        VALIDATOR_PATH,
+        "paraphrase_aggregate_validator",
+    )
+    manifest, final = task4.build_success_artifacts()
+    tamper(final["paraphrases"])
+
+    with pytest.raises(validator.ResultsValidationError, match="paraphrase"):
+        validator.validate_documents(manifest, final, schema_dir=SCHEMAS)
+
+
+def test_evaluation_failure_merges_into_existing_raw_diagnostics(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.pipeline import run_pipeline
+
+    payload = {
+        "provenance": task4.complete_provenance(),
+        **task4.successful_raw(),
+    }
+    payload["experiment"]["observations"] = [
+        observation
+        for observation in payload["experiment"]["observations"]
+        if not (
+            observation["prompt"]["name"] == "main"
+            and observation["condition"] == "target"
+        )
+    ]
+
+    outcome = run_pipeline(
+        project_root=tmp_path,
+        execute=lambda: payload,
+    )
+
+    raw = json.loads(
+        (tmp_path / "artifacts" / "readout_and_causal_swap.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert raw["readout"] == payload["readout"]
+    assert raw["experiment"] == payload["experiment"]
+    assert raw["failure"]["error_type"] == "EvaluationDataError"
+    assert raw["failure"]["cause_detail"] is None
+    assert outcome["reason"] == {
+        "code": "evaluation_data_invalid",
+        "message": "required aggregate evaluation data is missing",
+    }
+    compact = json.dumps(outcome)
+    assert "missing primary condition" not in compact

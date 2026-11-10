@@ -26,7 +26,7 @@ from jspace_llama.interventions import (
     InterventionPreparationError,
     RandomControlError,
 )
-from jspace_llama.jsonio import atomic_write_json
+from jspace_llama.jsonio import atomic_write_json, strict_json_loads
 from jspace_llama.provenance import (
     build_experiment_provenance,
     collect_software_provenance,
@@ -37,6 +37,7 @@ from jspace_llama.provenance import (
 )
 from jspace_llama.readout import ReadoutError, read_workspace
 from jspace_llama.runtime import (
+    HUGGINGFACE_OPERATIONAL_ERRORS,
     AssetLoadError,
     CudaRequiredError,
     DimensionMismatchError,
@@ -137,6 +138,8 @@ def execute_real_experiment(
         )
     except torch.OutOfMemoryError as error:
         raise ResourceExhaustionError("asset download exhausted memory") from error
+    except HUGGINGFACE_OPERATIONAL_ERRORS as error:
+        raise AssetLoadError("failed to download pinned assets") from error
     except OSError as error:
         raise AssetLoadError("failed to download pinned assets") from error
     lens_hash, lens_size = file_sha256(lens_path)
@@ -271,22 +274,25 @@ def _write_expected_diagnostics(
         if error.__cause__ is None
         else redact(str(error.__cause__))
     )
+    failure = {
+        "run_id": run_id,
+        "terminal_status": "expected_failure",
+        "error_type": type(error).__name__,
+        "detail": detail,
+        "cause_type": (
+            None
+            if error.__cause__ is None
+            else type(error.__cause__).__name__
+        ),
+        "cause_detail": cause_detail,
+    }
     try:
-        atomic_write_json(
-            path,
-            {
-                "run_id": run_id,
-                "terminal_status": "expected_failure",
-                "error_type": type(error).__name__,
-                "detail": detail,
-                "cause_type": (
-                    None
-                    if error.__cause__ is None
-                    else type(error.__cause__).__name__
-                ),
-                "cause_detail": cause_detail,
-            },
-        )
+        document: dict[str, Any] = failure
+        if path.exists():
+            existing = strict_json_loads(path.read_bytes())
+            if isinstance(existing, dict):
+                document = {**existing, "failure": failure}
+        atomic_write_json(path, document)
     except Exception:
         pass
 

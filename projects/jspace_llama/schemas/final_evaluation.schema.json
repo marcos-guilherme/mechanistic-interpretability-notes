@@ -116,10 +116,18 @@
     "paraphrases": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["prompt_count", "passing_prompt_alpha_count"],
+      "required": [
+        "prompt_count",
+        "passing_prompt_alpha_count",
+        "prompt_alphas"
+      ],
       "properties": {
         "prompt_count": {"type": "integer", "minimum": 0},
-        "passing_prompt_alpha_count": {"type": "integer", "minimum": 0}
+        "passing_prompt_alpha_count": {"type": "integer", "minimum": 0},
+        "prompt_alphas": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/paraphraseAlphaEvaluation"}
+        }
       }
     }
   },
@@ -238,6 +246,34 @@
           "items": {"type": "string"},
           "uniqueItems": true
         }
+      }
+    },
+    "paraphraseAlphaEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt_name",
+        "alpha",
+        "conditions",
+        "gates",
+        "passed"
+      ],
+      "properties": {
+        "prompt_name": {"type": "string", "minLength": 1},
+        "alpha": {"type": "number"},
+        "conditions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baseline", "noop", "random", "target"],
+          "properties": {
+            "baseline": {"$ref": "#/$defs/classification"},
+            "noop": {"$ref": "#/$defs/classification"},
+            "random": {"$ref": "#/$defs/classification"},
+            "target": {"$ref": "#/$defs/classification"}
+          }
+        },
+        "gates": {"$ref": "#/$defs/gates"},
+        "passed": {"type": "boolean"}
       }
     }
   }
