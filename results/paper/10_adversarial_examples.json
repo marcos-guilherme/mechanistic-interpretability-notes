@@ -1,128 +1,334 @@
 {
+  "comparison_to_paper": {
+    "paper_io_single": {
+      "io_probability": -0.03756593227386473,
+      "logit_difference_io_minus_s": -0.2838256764411926,
+      "s_wins_error_rate": 0.07600000238418578
+    }
+  },
   "config": {
+    "allowed_template_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "attack_seeds": {
+      "advex_double_io": 512,
+      "paper_io_single": 511,
+      "paper_s_control": 511
+    },
+    "base_seed": 510,
     "batch_size": 16,
-    "dataset_sha256": "c52bf8d46bf8c9774fe8c0eecc968a4cc4d3dc7707b9ff2601272fdd196a1122",
+    "dataset_sha256": {
+      "advex_double_io": "1392ce6879da96ee905830e6a5ea27216e774c0e2f0b576b73d0435f24270d96",
+      "paper_io_single": "e3974d08f3b00ec6c24984d09ff8f8f028e507ad160e0b1801daaad95dcd003e",
+      "paper_s_control": "b27aa0529dcc5ceb8cfc58cd36788bdc201ea28460315efc2d6301f7c15d73da"
+    },
     "device": "cuda",
     "dtype": "float32",
     "gpu": "NVIDIA GeForce RTX 3050",
+    "mixed_population": {
+      "ABBA": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "BABA": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    },
     "model_name": "gpt2",
     "n": 500,
     "padding_side": "right",
-    "prepend_bos": false,
-    "seed": 510
+    "prepend_bos": false
   },
   "methodology": {
-    "causal_limit": "Behavioral degradation supports the circuit prediction but does not by itself establish mediation by Duplicate Token and S-Inhibition heads.",
-    "comparison_scope": "Same five clauses, ordered-pair sampling, middle insertion, and behavioral metrics as the historical experiment.",
+    "advex_source_inconsistency": "advex.py obtains punct_idx from an IOIDataset without BOS, while show_tokens calls model.to_tokens with historical BOS-prefixed behavior, mixing token coordinate systems.",
+    "causal_limit": "Behavior alone does not prove mediation by Duplicate Token and S-Inhibition heads.",
+    "comparison_scope": "Figure 8 targets are compared only with paper_io_single; advex_double_io is reported as a separate historical extension.",
     "differences": [
-      "Attack-template sampling is seeded locally; advex.py used the global random module without recording a seed.",
-      "Base prompts use this project's deterministic paper dataset generator rather than the historical global RNG state.",
-      "TransformerLens 4.3 compatibility mode replaces the historical EasyTransformer runtime.",
-      "Confidence intervals use normal 1.96\u00d7SE intervals over paired per-example values."
-    ]
-  },
-  "metrics": {
-    "io_probability": {
-      "adversarial": {
-        "ci95": [
-          0.28644098388687705,
-          0.3196120108412113
-        ],
-        "mean": 0.3030264973640442,
-        "standard_error": 0.008462152166055885
-      },
-      "baseline": {
-        "ci95": [
-          0.4677255921552348,
-          0.5051647252847982
-        ],
-        "mean": 0.4864451587200165,
-        "standard_error": 0.009550974769148434
-      },
-      "delta": {
-        "ci95": [
-          -0.20025127505467435,
-          -0.1665860774595926
-        ],
-        "mean": -0.18341867625713348,
-        "standard_error": 0.008588218421519104
-      }
-    },
-    "logit_difference_io_minus_s": {
-      "adversarial": {
-        "ci95": [
-          0.34845091313677723,
-          0.6214525559489161
-        ],
-        "mean": 0.4849517345428467,
-        "standard_error": 0.06964455596264552
-      },
-      "baseline": {
-        "ci95": [
-          3.2957685494963553,
-          3.5607110952790353
-        ],
-        "mean": 3.4282398223876953,
-        "standard_error": 0.06758862608509969
-      },
-      "delta": {
-        "ci95": [
-          -3.083839857241736,
-          -2.8027363184479612
-        ],
-        "mean": -2.9432880878448486,
-        "standard_error": 0.07171140414086272
-      }
-    },
-    "s_wins_error_rate": {
-      "adversarial": {
-        "ci95": [
-          0.3589808981879756,
-          0.4450191218391851
-        ],
-        "mean": 0.4020000100135803,
-        "standard_error": 0.021948929758370064
-      },
-      "baseline": {
-        "ci95": [
-          -0.0019199280230668206,
-          0.005919928213056626
-        ],
-        "mean": 0.0020000000949949026,
-        "standard_error": 0.0020000000760124247
-      },
-      "delta": {
-        "ci95": [
-          0.35665962509601756,
-          0.4433403868249114
-        ],
-        "mean": 0.4000000059604645,
-        "standard_error": 0.02211284554528059
-      }
-    }
-  },
-  "observed_minus_paper": {
-    "adversarial_logit_difference": -0.7450482654571533,
-    "adversarial_s_wins_error_rate": 0.1680000100135803
+      "Names are filtered to GPT-2 single-token names; the historical generator did not validate this explicitly.",
+      "Base and attack-template RNGs use independent recorded seeds.",
+      "TransformerLens 4.3 compatibility mode replaces EasyTransformer.",
+      "Individual error-rate intervals are Wilson; paired deltas use normal 1.96\u00d7SE intervals over within-example differences."
+    ],
+    "position_policy": "Text insertion followed by complete no-BOS retokenization is an intentional correction; no shifted base position is reused."
   },
   "paper": "https://arxiv.org/abs/2211.00593",
-  "paper_targets": {
-    "adversarial_logit_difference": 1.23,
-    "adversarial_s_wins_error_rate": 0.234
+  "paper_figure_8_reference": {
+    "baseline": {
+      "io_probability": 0.49,
+      "logit_difference": 3.55,
+      "s_wins_error_rate": 0.007
+    },
+    "paper_io_single": {
+      "io_probability": 0.36,
+      "logit_difference": 1.23,
+      "s_wins_error_rate": 0.234
+    },
+    "paper_s_single": {
+      "io_probability": 0.59,
+      "logit_difference": 3.64,
+      "s_wins_error_rate": 0.004
+    }
+  },
+  "protocols": {
+    "advex_double_io": {
+      "attack": {
+        "clause_count": "double",
+        "role": "IO"
+      },
+      "delta_from_baseline": {
+        "io_probability": {
+          "ci95": [
+            -0.20465986473173575,
+            -0.1742985691347651
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": -0.18947921693325043,
+          "standard_error": 0.007745370791620839
+        },
+        "logit_difference_io_minus_s": {
+          "ci95": [
+            -2.98866378054653,
+            -2.7539357067581576
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": -2.8712997436523438,
+          "standard_error": 0.05988071098241536
+        },
+        "s_wins_error_rate": {
+          "ci95": [
+            0.34524476727945275,
+            0.43075525560873085
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": 0.3880000114440918,
+          "standard_error": 0.021814300926898136
+        }
+      },
+      "metrics": {
+        "io_probability": {
+          "ci95": [
+            0.2804260505240034,
+            0.3124058591325213
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 0.29641595482826233,
+          "standard_error": 0.008158264350970357
+        },
+        "logit_difference_io_minus_s": {
+          "ci95": [
+            0.2715790066076922,
+            0.5269623604462934
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 0.3992706835269928,
+          "standard_error": 0.0651500119015024
+        },
+        "s_wins_error_rate": {
+          "ci95": [
+            0.3521341694850665,
+            0.4374821906927827
+          ],
+          "ci_method": "wilson",
+          "mean": 0.39399999380111694,
+          "standard_error": 0.021874299601376136
+        }
+      },
+      "paper_figure_8_protocol": false
+    },
+    "baseline": {
+      "attack": null,
+      "metrics": {
+        "io_probability": {
+          "ci95": [
+            0.4665868116552875,
+            0.5052036212747052
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 0.48589521646499634,
+          "standard_error": 0.009851407965662157
+        },
+        "logit_difference_io_minus_s": {
+          "ci95": [
+            3.148625819617805,
+            3.3925156903919604
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 3.270570755004883,
+          "standard_error": 0.06221794703829436
+        },
+        "s_wins_error_rate": {
+          "ci95": [
+            0.0020425962719602363,
+            0.01749025210405338
+          ],
+          "ci_method": "wilson",
+          "mean": 0.006000000052154064,
+          "standard_error": 0.0034571525585184552
+        }
+      }
+    },
+    "paper_io_single": {
+      "attack": {
+        "clause_count": "single",
+        "role": "IO"
+      },
+      "delta_from_baseline": {
+        "io_probability": {
+          "ci95": [
+            -0.17824286190158417,
+            -0.14867937597149322
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": -0.1634611189365387,
+          "standard_error": 0.0075418441775675395
+        },
+        "logit_difference_io_minus_s": {
+          "ci95": [
+            -2.446420165551769,
+            -2.2023725781310923
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": -2.3243963718414307,
+          "standard_error": 0.0622581816160126
+        },
+        "s_wins_error_rate": {
+          "ci95": [
+            0.263641098158219,
+            0.3443588822914575
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": 0.30399999022483826,
+          "standard_error": 0.020591649838958805
+        }
+      },
+      "metrics": {
+        "io_probability": {
+          "ci95": [
+            0.3049811701623941,
+            0.3398869652898764
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 0.32243406772613525,
+          "standard_error": 0.008904703199348234
+        },
+        "logit_difference_io_minus_s": {
+          "ci95": [
+            0.8060790380056062,
+            1.0862696091120085
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 0.9461743235588074,
+          "standard_error": 0.07147849994094532
+        },
+        "s_wins_error_rate": {
+          "ci95": [
+            0.2710389112735686,
+            0.3518583381018213
+          ],
+          "ci_method": "wilson",
+          "mean": 0.3100000023841858,
+          "standard_error": 0.020704040896175106
+        }
+      },
+      "paper_figure_8_protocol": true
+    },
+    "paper_s_control": {
+      "attack": {
+        "clause_count": "single",
+        "role": "S"
+      },
+      "delta_from_baseline": {
+        "io_probability": {
+          "ci95": [
+            0.06539269101483584,
+            0.08393178570406674
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": 0.0746622383594513,
+          "standard_error": 0.004729447794822995
+        },
+        "logit_difference_io_minus_s": {
+          "ci95": [
+            0.09206477349371042,
+            0.18395977670579824
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": 0.13801227509975433,
+          "standard_error": 0.02344303363147075
+        },
+        "s_wins_error_rate": {
+          "ci95": [
+            -0.005919928213056626,
+            0.0019199280230668206
+          ],
+          "ci_method": "normal_paired_1.96_se",
+          "mean": -0.0020000000949949026,
+          "standard_error": 0.0020000000760124247
+        }
+      },
+      "metrics": {
+        "io_probability": {
+          "ci95": [
+            0.5426150954223271,
+            0.5784997546219234
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 0.5605574250221252,
+          "standard_error": 0.00915441801039456
+        },
+        "logit_difference_io_minus_s": {
+          "ci95": [
+            3.2845730369151456,
+            3.532592337840714
+          ],
+          "ci_method": "normal_1.96_se",
+          "mean": 3.4085826873779297,
+          "standard_error": 0.06327139245463509
+        },
+        "s_wins_error_rate": {
+          "ci95": [
+            0.0010976305226827934,
+            0.014465715215177033
+          ],
+          "ci_method": "wilson",
+          "mean": 0.004000000189989805,
+          "standard_error": 0.0028255917728564894
+        }
+      },
+      "paper_figure_8_protocol": true
+    }
   },
   "traceability": {
     "git_dirty": false,
+    "hash_method": "git rev-parse <source_commit>:<path> (normalized Git blob IDs)",
     "historical_source_commit": "ea15315dd24481e9e2ac5c3ef335d82907a1dc34",
     "historical_source_url": "https://github.com/redwoodresearch/Easy-Transformer/blob/ea15315dd24481e9e2ac5c3ef335d82907a1dc34/easy_transformer/advex.py",
-    "source_commit": "06442b21ca28b93b6abc2b759a1a131773fe8711",
-    "source_sha256": {
-      "notebook": "7e3c941ccdb821bbb1874be97843144c524ff0aaf3aec24da0749cb9d15b8762",
-      "paper/adversarial.py": "0339448bca6381af0f2dd50590edf64f4322236c8ba2c3f6bd8c42903add500f",
-      "paper/dataset.py": "1982ba31b61440fc0db95b21c41463081a467fcd5ad705d9f3d7be77f6898f22",
-      "paper/metrics.py": "dbc2d6f328190006df64056469b48d641b5a94aad88934588bf444aefa0f36b4",
-      "runtime.py": "7a2db960fe6a1d39a6eb7ef1a7a4f2ac8695a74834284ac9b6fdd7dee42cc708"
+    "source_blobs": {
+      "notebook": "ed785ae238575c30b02ca29e74b5d1158b810225",
+      "paper/adversarial.py": "c95d04155bc3028d6b10c66cf510120889c2dc4e",
+      "paper/dataset.py": "1c5eff7d0b1a8a6bf80329bc06595ed6e0ff4a6c",
+      "paper/metrics.py": "a9520baec5e091d597b00bb13823594c9518861b",
+      "runtime.py": "6815d71ebca30bd9d324d1e527306bcb653c0d05"
     },
-    "timestamp_utc": "2026-11-10T07:06:25.847996Z",
+    "source_commit": "fb194405ac5f879cb118ae63ca25bfd887687b46",
+    "timestamp_utc": "2026-11-10T07:25:06.552859Z",
     "versions": {
       "pandas": "3.1.1",
       "plotly": "7.1.0",
