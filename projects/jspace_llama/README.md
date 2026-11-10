@@ -1,38 +1,43 @@
-# J-space on Llama 3.1 8B Instruct
+# J-space no Llama 3.1 8B Instruct
 
-This project will test a minimal causal J-space intervention on
-`meta-llama/Llama-3.1-8B-Instruct` using the prefitted lens at
+O J-space foi o passo seguinte da minha exploração: em vez de analisar um
+circuito ou uma direção comportamental, quis testar se seria possível ler e
+alterar um conceito intermediário usado pelo modelo. Preparei um experimento
+causal mínimo no `meta-llama/Llama-3.1-8B-Instruct`, usando uma J-lens já
+ajustada e a troca `spider → ant`.
+
+Planejei a execução para uma NVIDIA L4 no Colab, com acesso autenticado ao
+modelo *gated* do Hugging Face. Pesos e lente são baixados apenas para caches
+ignorados, enquanto o Git recebe somente JSONs agregados e compactos. A lente
+pré-ajustada usada pelo projeto é
 `llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt`.
 
-The intended workflow runs on a Colab NVIDIA L4 with gated Hugging Face model
-access, downloads model and lens assets only into ignored caches, and retains
-only compact aggregate JSON results. The planned causal check swaps the
-intermediate concept `spider` for `ant` and compares the resulting answer with
-baseline and control interventions.
+Implementei configuração fixada, validação de CUDA e runtime, readout e
+intervenções com uso limitado de memória, controles, captura de proveniência e
+um pipeline de artefatos chamável pelo notebook.
+`notebooks/01_readout_and_causal_swap.ipynb` é a entrada fina para a execução
+real. A suíte do repositório testa o software sem carregar o modelo de 8B.
 
-The reusable core now provides pinned configuration, CUDA/runtime validation,
-memory-bounded readout and interventions, controls, provenance capture, and a
-notebook-callable artifact pipeline. `notebooks/01_readout_and_causal_swap.ipynb`
-is the thin entry point for the real run. The observed execution is documented
-below; the 8B model is intentionally not executed in the repository test suite.
+Em [`PROCESSO.md`](PROCESSO.md), explico o contexto científico, o problema, os
+métodos, o resultado inconclusivo e as limitações em formato voltado ao TCC.
 
-## Colab L4 workflow
+## Fluxo no Colab L4
 
-Install the verified CLI version:
+Instale a versão verificada da CLI:
 
 ```powershell
 uv tool install google-colab-cli==0.7.5
 ```
 
-First obtain access to the gated `meta-llama/Llama-3.1-8B-Instruct`
-repository with your Hugging Face account, then save its token at the standard
-local cache path:
+Primeiro, obtenha acesso ao repositório *gated*
+`meta-llama/Llama-3.1-8B-Instruct` com a mesma conta do Hugging Face usada no
+CLI. Depois, salve o token no cache local padrão:
 
 ```powershell
 uv run hf auth login
 ```
 
-From the repository root, run:
+Na raiz do repositório, execute:
 
 ```powershell
 python tools/colab/run_jspace.py probe
@@ -45,52 +50,56 @@ python tools/colab/run_jspace.py fetch
 python tools/colab/run_jspace.py stop
 ```
 
-The runner uses ADC authentication and the `jspace-llama` session by default.
-The archive contains only the project inputs needed remotely, and bootstrap
-installs `uv==0.12.1` before exporting the locked environment. Bootstrap
-atomically replaces `/content/jspace_llama_project`; this non-package
-basename prevents the `/content` checkout from shadowing the editable
-`jspace_llama` installation as a namespace package. `fetch` accepts only
-`results/execution_manifest.json` and `results/final_evaluation.json`; both
-must exist. Notebook execution validates the fresh ignored
-`_output.ipynb` written by colab-cli and retains it for diagnosis. Execution
-failures leave the Colab session available for diagnosis, so stop it
-explicitly. If L4 allocation is unavailable, stop the partial session and
-explicitly retry with `--gpu T4` or `--gpu A100`.
+O runner usa autenticação ADC e a sessão `jspace-llama` por padrão. O arquivo
+enviado contém apenas as entradas necessárias no runtime remoto, e o bootstrap
+instala `uv==0.12.1` antes de exportar o ambiente fixado. Ele substitui
+atomicamente `/content/jspace_llama_project`; esse nome, que não é o nome do
+pacote, impede que o checkout em `/content` sombreie a instalação editável de
+`jspace_llama` como *namespace package*.
 
-## Observed run
+O comando `fetch` aceita apenas `results/execution_manifest.json` e
+`results/final_evaluation.json`, e exige que ambos existam. A execução valida o
+`_output.ipynb` novo e ignorado que a colab-cli produz e o preserva para
+diagnóstico. Uma falha deixa a sessão disponível para investigação, por isso é
+necessário encerrá-la explicitamente. Se não houver L4, encerre a sessão
+parcial antes de tentar `--gpu T4` ou `--gpu A100`.
 
-Run `a116c3da-bb8f-4a31-a39a-4fd09dd6fcad` exercised the software, Colab L4,
-and compact-artifact path through Hugging Face asset resolution. It resolved
-model revision `0e9e39f249a16976918f6564b8830bc894c89659` and lens revision
-`d2527c3cdbaa60dd4b65cbca1604921f044e989a`, then ended as `inconclusive` with
-reason code `asset_load_failed` because the Hugging Face account was not
-authorized for the gated model repository.
+## A execução que consegui realizar
 
-The model weights were not downloaded, so no J-space readout or causal
-intervention ran. This outcome is neither positive nor negative evidence for
-J-space in Llama. Consequently, lens integrity and readout spider presence are
-recorded as `evaluated: false` with `null` measurements, rather than as false
-scientific observations. The source revision was
-`bda81311ed758749598d9cd41fb7bbf0d5d3897a`; its dirty flag is `true` because
-unrelated user work existed outside this project at sync time.
+Na execução `a116c3da-bb8f-4a31-a39a-4fd09dd6fcad`, consegui exercitar o
+software, a L4 no Colab e o caminho de artefatos compactos até a resolução dos
+ativos no Hugging Face. O fluxo resolveu a revisão do modelo
+`0e9e39f249a16976918f6564b8830bc894c89659` e a revisão da lente
+`d2527c3cdbaa60dd4b65cbca1604921f044e989a`, mas terminou como `inconclusive`,
+com o código `asset_load_failed`, porque minha conta ainda não estava
+autorizada para o repositório *gated* do modelo.
 
-The two compact result artifacts are intentionally versioned as an
-inconclusive execution record. To rerun, first obtain official gated-model
-access for the Hugging Face account, then repeat `auth-hf`, `execute`, `fetch`,
-and the local validation commands below. A future real rerun will replace this
-inconclusive record with newly measured values; the existing run is not
-retrofitted with operational stage metadata that it did not originally emit.
+Os pesos não foram baixados. Portanto, não houve inferência, readout de
+J-space ou intervenção causal. Não interpreto essa execução como evidência
+positiva nem negativa sobre J-space no Llama. Registrei a integridade da lente
+e a presença de `spider` no readout como `evaluated: false`, com medições
+`null`, em vez de transformar ausência de medição em observação científica
+falsa. A revisão do código-fonte foi
+`bda81311ed758749598d9cd41fb7bbf0d5d3897a`; o campo `dirty` ficou `true`
+porque já havia alterações fora deste projeto no momento do envio.
 
-## Result artifacts and validation
+Mantive os dois artefatos compactos como registro dessa execução inconclusiva.
+Para repetir o experimento, preciso primeiro obter acesso oficial ao modelo e
+então refazer `auth-hf`, `execute`, `fetch` e a validação local. Uma execução
+futura substituirá esse registro com valores efetivamente medidos; não
+preencho retroativamente metadados que a tentativa original não produziu.
 
-The real pipeline writes raw continuations, rendered prompts, workspace slots,
-and other diagnostics only to the ignored
-`artifacts/readout_and_causal_swap.json`. The two fetched files,
-`results/execution_manifest.json` and `results/final_evaluation.json`, contain
-compact aggregate evidence and reproducibility metadata only.
+## Artefatos e validação
 
-Validate fetched or fixture artifacts locally without loading the 8B model:
+O pipeline real grava continuações brutas, prompts renderizados, slots do
+workspace e outros diagnósticos apenas em
+`artifacts/readout_and_causal_swap.json`, que é ignorado pelo Git. Os arquivos
+baixados `results/execution_manifest.json` e
+`results/final_evaluation.json` contêm somente evidência agregada compacta e
+metadados de reprodutibilidade.
+
+É possível validar localmente os artefatos baixados ou as fixtures sem carregar
+o modelo de 8B:
 
 ```powershell
 cd projects/jspace_llama
@@ -98,14 +107,17 @@ uv run python scripts/validate_results.py
 uv run pytest -q
 ```
 
-`success` means that scoped source provenance is clean and digest-verified,
-lens integrity and readout are explicitly evaluated, and at least one tested
-alpha passes every primary `main`-prompt gate. The constrained answer parser
-must uniquely read eight for baseline and no-op, a coherent non-six answer for
-the random control, and uniquely six for the target without `ant` leakage or
-degradation. Negated, conflicting, missing, repetitive, or excessively
-incoherent answers do not pass. Any expected runtime failure, incomplete
-provenance, unmeasured state, or failed gate is `inconclusive` with a
-machine-readable reason; it is not negative evidence. Paraphrase counts are
-secondary transparency data and are not a general claim. Unexpected
-programming errors are recorded best-effort in the manifest and then re-raised.
+O estado `success` exige proveniência limpa e verificada por digest, integridade
+da lente e readout explicitamente avaliados e pelo menos um `alpha` que passe
+por todos os critérios do prompt principal `main`. O parser deve identificar
+unicamente oito no baseline e no no-op, uma resposta coerente diferente de seis
+no controle aleatório e unicamente seis na intervenção-alvo, sem vazamento de
+`ant` nem degradação.
+
+Respostas negadas, conflitantes, ausentes, repetitivas ou excessivamente
+incoerentes não passam. Falhas esperadas de runtime, proveniência incompleta,
+estados não medidos ou critérios não satisfeitos produzem `inconclusive` com
+motivo legível por máquina; não são tratados como evidência negativa. As
+contagens das paráfrases são dados secundários de transparência, não uma
+afirmação geral. Erros inesperados de programação são registrados da melhor
+forma possível no manifesto e depois relançados.

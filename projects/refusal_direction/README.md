@@ -1,13 +1,23 @@
-# Refusal Direction Replication
+# Replicação da direção de recusa
 
-Replicação parcial de Arditi et al., *Refusal in Language Models Is Mediated by a Single Direction*, usando `google/gemma-2b-it`.
+Depois de trabalhar com um circuito distribuído no GPT-2 Small, quis testar
+uma hipótese mecanística mais compacta: a possibilidade de um comportamento
+ser controlado por uma única direção no espaço residual. Nesta replicação,
+investiguei essa hipótese no Gemma 2B IT por meio de extração, ablação, adição
+e um controle aleatório ortogonal.
 
-O experimento extrai direções pela diferença entre as médias das ativações de pedidos nocivos e inofensivos, testa cada candidata por ablação e adição e compara a direção escolhida com um controle aleatório ortogonal. O Git preserva métricas agregadas e valores numéricos por exemplo, além de configurações e proveniência, sem os textos dos prompts ou das gerações.
+A referência é Arditi et al.,
+[*Refusal in Language Models Is Mediated by a Single
+Direction*](https://arxiv.org/abs/2406.11717). Extraí as direções pela
+diferença entre as médias das ativações de pedidos nocivos e inofensivos,
+testei cada candidata por ablação e adição e comparei a direção escolhida com
+o controle. No Git, mantive métricas agregadas, valores numéricos por exemplo,
+configurações e proveniência, sem os textos dos prompts ou das gerações.
 
-A narrativa de estudo e reprodução, incluindo decisões, evidências e
-limitações, está em [`PROCESSO.md`](PROCESSO.md).
+Em [`PROCESSO.md`](PROCESSO.md), conto como organizei o estudo, quais decisões
+tomei e quais limitações impedem uma conclusão mais ampla.
 
-## Resultado observado
+## O que observei
 
 Execução de 10 de novembro de 2026 em uma NVIDIA L4:
 
@@ -24,13 +34,13 @@ Execução de 10 de novembro de 2026 em uma NVIDIA L4:
   controle; a proximidade torna essa métrica evidência fraca de especificidade,
   como detalhado no [PROCESSO](PROCESSO.md).
 
-Esses números reproduzem o padrão causal central: remover a direção elimina a
-recusa, adicioná-la induz recusa e a ablação com uma orientação aleatória
-ortogonal não produz o mesmo efeito. A ablação normaliza a direção antes da
-projeção, portanto a comparação de controle não é justificada por igualdade de
-norma. A conclusão é restrita a esse padrão causal neste modelo, seed e
-recorte; a mesma validação efetiva foi usada para selecionar a direção e
-avaliar o efeito final.
+Interpreto esses números como uma reprodução do padrão causal central neste
+recorte: remover a direção elimina a recusa, adicioná-la induz recusa e a
+ablação com uma orientação aleatória ortogonal não produz o mesmo efeito. A
+ablação normaliza a direção antes da projeção, portanto não justifico a
+comparação de controle por igualdade de norma. Mantenho a conclusão restrita a
+este modelo, seed e recorte; a mesma validação efetiva foi usada para
+selecionar a direção e avaliar o efeito final.
 
 ## Escopo e desvios
 
