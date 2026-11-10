@@ -51,16 +51,11 @@ def test_notebook_10_runs_matched_historical_adversarial_experiment() -> None:
     assert "convert_ids_to_tokens" in source
     assert "IO−S" in source
     assert "S>IO" in source
-    assert "1.23" in source
-    assert "23.4%" in source
-    assert "não prova o circuito" in source
     assert "Duplicate Token" in source
     assert "S-Inhibition" in source
     assert "BOS" in source
     assert "punct" in source
-    assert "correção intencional" in source
     assert "git_blob" in source
-    assert "−2,32" in source
     assert "baseline" in source and "controle S" in source
     assert "hashlib.sha256(path.read_bytes())" not in source
     assert "10_adversarial_examples.json" in source

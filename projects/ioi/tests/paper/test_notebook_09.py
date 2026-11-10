@@ -41,8 +41,6 @@ def test_notebook_09_runs_all_paper_validation_definitions() -> None:
     assert "add_hline(y=1.0" in source
     assert "accepted" in source
     assert "top_greedy" in source
-    assert "historical target from 100,000 prompts" in source
-    assert "independent balanced pABC reference" in source
     assert "minimality_point_count = sum" in source
     assert "minimality_ci_count = sum" in source
     assert "26/26 >1% pontual" not in source

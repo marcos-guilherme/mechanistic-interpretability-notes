@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 artifacts/
+projects/refusal_direction/artifacts/
+projects/refusal_direction/results/*_output.ipynb
+projects/refusal_direction/.venv/
+.colab-staging/

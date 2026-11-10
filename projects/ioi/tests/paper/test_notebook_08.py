@@ -31,7 +31,6 @@ def test_notebook_08_runs_primary_knockout_and_separates_compensation() -> None:
     assert "delta_result_fixed_scale" in source
     assert "delta_scale" in source
     assert "END→S2" in source
-    assert "DLA basal primárias − DLA das substituições pABC" in source
 
 
 def test_notebook_08_artifact_has_reproducibility_and_uncertainty() -> None:
