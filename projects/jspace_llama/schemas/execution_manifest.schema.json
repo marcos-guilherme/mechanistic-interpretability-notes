@@ -46,7 +46,9 @@
           "required": ["commit", "dirty"],
           "properties": {
             "commit": {"$ref": "#/$defs/sha40OrNull"},
-            "dirty": {"type": ["boolean", "null"]}
+            "dirty": {"type": ["boolean", "null"]},
+            "scoped_dirty": {"type": ["boolean", "null"]},
+            "archive_sha256": {"$ref": "#/$defs/sha256OrNull"}
           }
         },
         "model": {
@@ -270,9 +272,17 @@
           "provenance": {
             "properties": {
               "source": {
+                "required": [
+                  "commit",
+                  "dirty",
+                  "scoped_dirty",
+                  "archive_sha256"
+                ],
                 "properties": {
                   "commit": {"$ref": "#/$defs/sha40"},
-                  "dirty": {"type": "boolean"}
+                  "dirty": {"type": "boolean"},
+                  "scoped_dirty": {"const": false},
+                  "archive_sha256": {"$ref": "#/$defs/sha256"}
                 }
               },
               "model": {
@@ -324,13 +334,15 @@
         "name",
         "text",
         "instruction_sha256",
-        "rendered_prompt_sha256"
+        "rendered_prompt_sha256",
+        "token_ids_sha256"
       ],
       "properties": {
         "name": {"type": "string"},
         "text": {"type": "string", "minLength": 1},
         "instruction_sha256": {"$ref": "#/$defs/sha256"},
-        "rendered_prompt_sha256": {"$ref": "#/$defs/sha256"}
+        "rendered_prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "token_ids_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
     "sha40OrNull": {
@@ -356,6 +368,10 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["code", "message"],
+          "dependentRequired": {
+            "stage": ["category"],
+            "category": ["stage"]
+          },
           "properties": {
             "code": {
               "enum": [
@@ -392,6 +408,34 @@
                 "required aggregate evaluation data is missing",
                 "unexpected programming error; see notebook traceback"
               ]
+            },
+            "stage": {
+              "enum": [
+                "asset_load",
+                "revision_resolution",
+                "model_download",
+                "lens_download",
+                "model_load",
+                "lens_load"
+              ]
+            },
+            "category": {
+              "enum": [
+                "asset_failure",
+                "gated_access_denied",
+                "revision_not_found",
+                "asset_not_found",
+                "offline",
+                "local_cache_missing",
+                "hub_http_error",
+                "io_error"
+              ]
+            }
+          },
+          "if": {"required": ["stage"]},
+          "then": {
+            "properties": {
+              "code": {"const": "asset_load_failed"}
             }
           }
         }

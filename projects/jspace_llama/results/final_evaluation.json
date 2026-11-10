@@ -1,7 +1,8 @@
 {
   "artifact": "final_evaluation",
   "integrity": {
-    "lens_integrity_verified": false,
+    "lens_integrity_evaluated": false,
+    "lens_integrity_verified": null,
     "lens_sha256": null
   },
   "manifest_sha256": "5b447660baee0f538e0c0dbfde88671d3f7e3d4ac7b5da5971c12f362eab72e3",
@@ -16,7 +17,8 @@
     "passing_alphas": [],
     "prompt_name": "main",
     "readout": {
-      "spider_present": false
+      "evaluated": false,
+      "spider_present": null
     }
   },
   "reason": {

@@ -26,14 +26,46 @@ REASON_MESSAGES = {
     "evaluation_data_invalid": "required aggregate evaluation data is missing",
     "unexpected_error": "unexpected programming error; see notebook traceback",
 }
+FAILURE_STAGES = {
+    "asset_load",
+    "revision_resolution",
+    "model_download",
+    "lens_download",
+    "model_load",
+    "lens_load",
+}
+FAILURE_CATEGORIES = {
+    "asset_failure",
+    "gated_access_denied",
+    "revision_not_found",
+    "asset_not_found",
+    "offline",
+    "local_cache_missing",
+    "hub_http_error",
+    "io_error",
+}
 
 
-def compact_reason(code: str) -> dict[str, str]:
+def compact_reason(
+    code: str,
+    *,
+    stage: str | None = None,
+    category: str | None = None,
+) -> dict[str, str]:
     try:
         message = REASON_MESSAGES[code]
     except KeyError as error:
         raise ValueError(f"unknown compact reason code: {code}") from error
-    return {"code": code, "message": message}
+    reason = {"code": code, "message": message}
+    if (stage is None) != (category is None):
+        raise ValueError("failure stage and category must be provided together")
+    if stage is not None:
+        if code != "asset_load_failed":
+            raise ValueError("operational metadata is only valid for asset failures")
+        if stage not in FAILURE_STAGES or category not in FAILURE_CATEGORIES:
+            raise ValueError("failure stage or category is not allowlisted")
+        reason.update(stage=stage, category=category)
+    return reason
 
 
 def build_execution_manifest(
@@ -48,7 +80,17 @@ def build_execution_manifest(
 ) -> dict[str, Any]:
     if reason is not None:
         code = reason.get("code")
-        if not isinstance(code, str) or reason != compact_reason(code):
+        stage = reason.get("stage")
+        category = reason.get("category")
+        if (
+            not isinstance(code, str)
+            or reason
+            != compact_reason(
+                code,
+                stage=stage,
+                category=category,
+            )
+        ):
             raise ValueError("manifest reason must be canonical")
     return {
         "schema_version": SCHEMA_VERSION,
@@ -73,6 +115,7 @@ def build_artifacts(
     provenance: dict[str, Any],
     raw_diagnostics: dict[str, Any] | None,
     reason_code: str | None = None,
+    failure_metadata: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     complete = provenance_is_complete(provenance)
     evaluated = (
@@ -91,7 +134,10 @@ def build_artifacts(
         else {
             "primary": {
                 "prompt_name": "main",
-                "readout": {"spider_present": False},
+                "readout": {
+                    "evaluated": False,
+                    "spider_present": None,
+                },
                 "alphas": [],
                 "passing_alphas": [],
                 "passing_alpha_count": 0,
@@ -108,8 +154,26 @@ def build_artifacts(
         reason_code = "incomplete_provenance"
     if reason_code is None and not gates_pass:
         reason_code = "primary_gates_failed"
-    reason = None if reason_code is None else compact_reason(reason_code)
-    status = "success" if complete and gates_pass and reason is None else "inconclusive"
+    reason = (
+        None
+        if reason_code is None
+        else compact_reason(reason_code, **(failure_metadata or {}))
+    )
+    lens_integrity = provenance["lens"].get("integrity_verified")
+    lens_integrity_evaluated = isinstance(lens_integrity, bool)
+    readout_evaluated = evaluated["primary"]["readout"]["evaluated"] is True
+    status = (
+        "success"
+        if (
+            complete
+            and gates_pass
+            and reason is None
+            and lens_integrity_evaluated
+            and lens_integrity is True
+            and readout_evaluated
+        )
+        else "inconclusive"
+    )
     manifest = build_execution_manifest(
         run_id=run_id,
         started_at=started_at,
@@ -128,9 +192,8 @@ def build_artifacts(
         "manifest_sha256": document_sha256(manifest),
         "integrity": {
             "lens_sha256": provenance["lens"]["sha256"],
-            "lens_integrity_verified": (
-                provenance["lens"].get("integrity_verified") is True
-            ),
+            "lens_integrity_evaluated": lens_integrity_evaluated,
+            "lens_integrity_verified": lens_integrity,
         },
         **evaluated,
     }

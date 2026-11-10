@@ -27,6 +27,10 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["code", "message"],
+          "dependentRequired": {
+            "stage": ["category"],
+            "category": ["stage"]
+          },
           "properties": {
             "code": {
               "enum": [
@@ -61,6 +65,34 @@
                 "random control preparation failed",
                 "required aggregate evaluation data is missing"
               ]
+            },
+            "stage": {
+              "enum": [
+                "asset_load",
+                "revision_resolution",
+                "model_download",
+                "lens_download",
+                "model_load",
+                "lens_load"
+              ]
+            },
+            "category": {
+              "enum": [
+                "asset_failure",
+                "gated_access_denied",
+                "revision_not_found",
+                "asset_not_found",
+                "offline",
+                "local_cache_missing",
+                "hub_http_error",
+                "io_error"
+              ]
+            }
+          },
+          "if": {"required": ["stage"]},
+          "then": {
+            "properties": {
+              "code": {"const": "asset_load_failed"}
             }
           }
         }
@@ -70,7 +102,11 @@
     "integrity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lens_sha256", "lens_integrity_verified"],
+      "required": [
+        "lens_sha256",
+        "lens_integrity_evaluated",
+        "lens_integrity_verified"
+      ],
       "properties": {
         "lens_sha256": {
           "oneOf": [
@@ -78,7 +114,8 @@
             {"$ref": "#/$defs/sha256"}
           ]
         },
-        "lens_integrity_verified": {"type": "boolean"}
+        "lens_integrity_evaluated": {"type": "boolean"},
+        "lens_integrity_verified": {"type": ["boolean", "null"]}
       }
     },
     "primary": {
@@ -96,9 +133,10 @@
         "readout": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["spider_present"],
+          "required": ["evaluated", "spider_present"],
           "properties": {
-            "spider_present": {"type": "boolean"}
+            "evaluated": {"type": "boolean"},
+            "spider_present": {"type": ["boolean", "null"]}
           }
         },
         "alphas": {
@@ -142,7 +180,18 @@
           "integrity": {
             "properties": {
               "lens_sha256": {"$ref": "#/$defs/sha256"},
+              "lens_integrity_evaluated": {"const": true},
               "lens_integrity_verified": {"const": true}
+            }
+          },
+          "primary": {
+            "properties": {
+              "readout": {
+                "properties": {
+                  "evaluated": {"const": true},
+                  "spider_present": {"type": "boolean"}
+                }
+              }
             }
           }
         }
@@ -159,6 +208,7 @@
       "additionalProperties": false,
       "required": [
         "answer_evidence",
+        "answer_parse",
         "target_entity_leakage",
         "degradation"
       ],
@@ -172,14 +222,29 @@
             "six": {"type": "boolean"}
           }
         },
+        "answer_parse": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "value"],
+          "properties": {
+            "status": {
+              "enum": ["unique", "negated", "conflicting", "no_answer"]
+            },
+            "value": {
+              "type": ["string", "null"],
+              "enum": ["six", "eight", null]
+            }
+          }
+        },
         "target_entity_leakage": {"type": "boolean"},
         "degradation": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["empty", "repetition"],
+          "required": ["empty", "repetition", "incoherent"],
           "properties": {
             "empty": {"type": "boolean"},
-            "repetition": {"type": "boolean"}
+            "repetition": {"type": "boolean"},
+            "incoherent": {"type": "boolean"}
           }
         }
       }
@@ -189,31 +254,27 @@
       "additionalProperties": false,
       "required": [
         "readout_spider_present",
-        "baseline_eight",
+        "baseline_unique_eight",
         "baseline_not_degraded",
-        "noop_eight",
-        "noop_not_six",
-        "random_not_comparable_six_reroute",
+        "noop_unique_eight",
+        "noop_not_degraded",
+        "random_unique_non_six",
         "random_not_degraded",
-        "target_six",
-        "target_not_eight",
+        "target_unique_six",
         "target_no_ant",
-        "target_nonempty",
-        "target_nonrepetitive"
+        "target_not_degraded"
       ],
       "properties": {
         "readout_spider_present": {"type": "boolean"},
-        "baseline_eight": {"type": "boolean"},
+        "baseline_unique_eight": {"type": "boolean"},
         "baseline_not_degraded": {"type": "boolean"},
-        "noop_eight": {"type": "boolean"},
-        "noop_not_six": {"type": "boolean"},
-        "random_not_comparable_six_reroute": {"type": "boolean"},
+        "noop_unique_eight": {"type": "boolean"},
+        "noop_not_degraded": {"type": "boolean"},
+        "random_unique_non_six": {"type": "boolean"},
         "random_not_degraded": {"type": "boolean"},
-        "target_six": {"type": "boolean"},
-        "target_not_eight": {"type": "boolean"},
+        "target_unique_six": {"type": "boolean"},
         "target_no_ant": {"type": "boolean"},
-        "target_nonempty": {"type": "boolean"},
-        "target_nonrepetitive": {"type": "boolean"}
+        "target_not_degraded": {"type": "boolean"}
       }
     },
     "alphaEvaluation": {

@@ -34,6 +34,10 @@ class ChatTokenizer:
         self.calls.append(instruction)
         return f"<chat>{instruction}</chat>"
 
+    def encode(self, text, *, add_special_tokens):
+        assert add_special_tokens is False
+        return [1, len(text)]
+
 
 def test_classification_records_answer_leakage_and_degradation() -> None:
     classified = classify_continuation(
@@ -42,8 +46,13 @@ def test_classification_records_answer_leakage_and_degradation() -> None:
 
     assert classified == {
         "answer_evidence": {"eight": True, "six": True},
+        "answer_parse": {"status": "conflicting", "value": None},
         "target_entity_leakage": True,
-        "degradation": {"empty": False, "repetition": False},
+        "degradation": {
+            "empty": False,
+            "repetition": False,
+            "incoherent": False,
+        },
     }
     assert classify_continuation("   ")["degradation"]["empty"] is True
     assert (

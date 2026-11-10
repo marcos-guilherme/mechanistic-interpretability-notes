@@ -16,6 +16,7 @@ from jspace_llama.runtime import (
     HUGGINGFACE_OPERATIONAL_ERRORS,
     AssetLoadError,
     LensIntegrityError,
+    translate_huggingface_error,
 )
 
 
@@ -49,6 +50,76 @@ def text_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def token_ids_sha256(token_ids: Iterable[int]) -> str:
+    canonical = (
+        "["
+        + ",".join(str(int(token_id)) for token_id in token_ids)
+        + "]"
+    )
+    return text_sha256(canonical)
+
+
+def _runtime_source_files(
+    project_root: Path,
+    repository_root: Path,
+) -> list[tuple[str, Path]]:
+    project = project_root.resolve()
+    repository = repository_root.resolve()
+    candidates: list[Path] = []
+    for pattern in (
+        "src/**/*.py",
+        "notebooks/*.ipynb",
+        "schemas/*.json",
+        "scripts/*.py",
+    ):
+        candidates.extend(project.glob(pattern))
+    candidates.extend(
+        project / name for name in ("pyproject.toml", "uv.lock")
+    )
+    runner = repository / "tools" / "colab" / "run_jspace.py"
+    if runner.is_file():
+        candidates.append(runner)
+
+    labeled: list[tuple[str, Path]] = []
+    for path in candidates:
+        if not path.is_file() or path.name.endswith("_output.ipynb"):
+            continue
+        try:
+            relative = path.resolve().relative_to(project)
+        except ValueError:
+            if path.resolve() != runner.resolve():
+                continue
+            label = "tools/colab/run_jspace.py"
+        else:
+            label = f"projects/jspace_llama/{relative.as_posix()}"
+        labeled.append((label, path))
+    return sorted(set(labeled), key=lambda item: item[0])
+
+
+def runtime_source_sha256(
+    project_root: str | Path,
+    repository_root: str | Path | None = None,
+) -> str:
+    project = Path(project_root)
+    repository = (
+        Path(repository_root)
+        if repository_root is not None
+        else project.resolve().parents[1]
+    )
+    digest = hashlib.sha256()
+    files = _runtime_source_files(project, repository)
+    if not files:
+        raise ValueError("no runtime-critical source files found")
+    for label, path in files:
+        label_bytes = label.encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(label_bytes).to_bytes(8, "big"))
+        digest.update(label_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def file_sha256(path: str | Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -62,10 +133,11 @@ def file_sha256(path: str | Path) -> tuple[str, int]:
 def read_source_provenance(project_root: str | Path) -> dict[str, Any]:
     path = Path(project_root) / SOURCE_PROVENANCE_FILENAME
     payload = strict_json_loads(path.read_bytes())
-    if not isinstance(payload, dict) or set(payload) != {
-        "schema_version",
-        "commit",
-        "dirty",
+    legacy_fields = {"schema_version", "commit", "dirty"}
+    current_fields = legacy_fields | {"scoped_dirty", "archive_sha256"}
+    if not isinstance(payload, dict) or set(payload) not in {
+        frozenset(legacy_fields),
+        frozenset(current_fields),
     }:
         raise ValueError("source provenance has unexpected fields")
     if payload["schema_version"] != 1:
@@ -76,7 +148,19 @@ def read_source_provenance(project_root: str | Path) -> dict[str, Any]:
         raise ValueError("source provenance commit must be a 40-character hash")
     if not isinstance(dirty, bool):
         raise ValueError("source provenance dirty must be boolean")
-    return {"commit": commit, "dirty": dirty}
+    source = {"commit": commit, "dirty": dirty}
+    if "scoped_dirty" in payload:
+        scoped_dirty = payload["scoped_dirty"]
+        archive_sha256 = payload["archive_sha256"]
+        if not isinstance(scoped_dirty, bool):
+            raise ValueError("source provenance scoped_dirty must be boolean")
+        if not _is_concrete_hex(archive_sha256, HEX_64):
+            raise ValueError("source provenance archive_sha256 must be concrete")
+        source.update(
+            scoped_dirty=scoped_dirty,
+            archive_sha256=archive_sha256,
+        )
+    return source
 
 
 def package_version(distribution: str) -> str:
@@ -111,12 +195,15 @@ def resolve_huggingface_revisions(
         model_revision = str(api.model_info(model_id).sha)
         lens_revision = str(api.model_info(lens_repo_id).sha)
     except HUGGINGFACE_OPERATIONAL_ERRORS as error:
-        raise AssetLoadError(
-            "failed to resolve pinned Hugging Face revisions"
+        raise translate_huggingface_error(
+            error,
+            stage="revision_resolution",
         ) from error
     except OSError as error:
         raise AssetLoadError(
-            "failed to resolve pinned Hugging Face revisions"
+            "failed to resolve pinned Hugging Face revisions",
+            stage="revision_resolution",
+            category="io_error",
         ) from error
     for label, revision in (
         ("model", model_revision),
@@ -124,7 +211,9 @@ def resolve_huggingface_revisions(
     ):
         if not _is_concrete_hex(revision, HEX_40):
             raise AssetLoadError(
-                f"resolved {label} revision is not a commit hash"
+                f"resolved {label} revision is not a commit hash",
+                stage="revision_resolution",
+                category="asset_failure",
             )
     return model_revision, lens_revision
 
@@ -142,6 +231,7 @@ def build_experiment_provenance(
                 "text": str(prompt.instruction),
                 "instruction_sha256": text_sha256(prompt.instruction),
                 "rendered_prompt_sha256": text_sha256(prompt.rendered),
+                "token_ids_sha256": token_ids_sha256(prompt.token_ids),
             }
             for prompt in prepared_prompts
         ],
@@ -210,6 +300,10 @@ def _valid_prompts(prompts: Any) -> bool:
             )
             or prompt.get("rendered_prompt_sha256")
             == prompt.get("instruction_sha256")
+            or not _is_concrete_hex(
+                prompt.get("token_ids_sha256"),
+                HEX_64,
+            )
         ):
             return False
     return True
@@ -258,6 +352,8 @@ def provenance_is_complete(provenance: dict[str, Any]) -> bool:
             (
                 _is_concrete_hex(source["commit"], HEX_40),
                 isinstance(source["dirty"], bool),
+                source["scoped_dirty"] is False,
+                _is_concrete_hex(source["archive_sha256"], HEX_64),
                 model["id"] == APPROVED_ASSETS.model_id,
                 _is_concrete_hex(model["resolved_revision"], HEX_40),
                 model["layer_count"] == APPROVED_MODEL_LAYER_COUNT,

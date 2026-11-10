@@ -69,14 +69,18 @@ authorized for the gated model repository.
 
 The model weights were not downloaded, so no J-space readout or causal
 intervention ran. This outcome is neither positive nor negative evidence for
-J-space in Llama. The source revision was
+J-space in Llama. Consequently, lens integrity and readout spider presence are
+recorded as `evaluated: false` with `null` measurements, rather than as false
+scientific observations. The source revision was
 `bda81311ed758749598d9cd41fb7bbf0d5d3897a`; its dirty flag is `true` because
 unrelated user work existed outside this project at sync time.
 
 The two compact result artifacts are intentionally versioned as an
 inconclusive execution record. To rerun, first obtain official gated-model
 access for the Hugging Face account, then repeat `auth-hf`, `execute`, `fetch`,
-and the local validation commands below.
+and the local validation commands below. A future real rerun will replace this
+inconclusive record with newly measured values; the existing run is not
+retrofitted with operational stage metadata that it did not originally emit.
 
 ## Result artifacts and validation
 
@@ -94,12 +98,14 @@ uv run python scripts/validate_results.py
 uv run pytest -q
 ```
 
-`success` means that provenance is complete and at least one tested alpha
-passes every primary `main`-prompt gate: baseline and no-op preserve eight,
-the random control neither degrades nor comparably reroutes to six, the target
-cleanly reroutes to six without eight or `ant`, and the selected-layer readout
-contains `spider`. Any expected runtime failure, incomplete provenance, or
-failed gate is `inconclusive` with a machine-readable reason; it is not negative
-evidence. Paraphrase counts are secondary transparency data and are not a
-general claim. Unexpected programming errors are recorded best-effort in the
-manifest and then re-raised.
+`success` means that scoped source provenance is clean and digest-verified,
+lens integrity and readout are explicitly evaluated, and at least one tested
+alpha passes every primary `main`-prompt gate. The constrained answer parser
+must uniquely read eight for baseline and no-op, a coherent non-six answer for
+the random control, and uniquely six for the target without `ant` leakage or
+degradation. Negated, conflicting, missing, repetitive, or excessively
+incoherent answers do not pass. Any expected runtime failure, incomplete
+provenance, unmeasured state, or failed gate is `inconclusive` with a
+machine-readable reason; it is not negative evidence. Paraphrase counts are
+secondary transparency data and are not a general claim. Unexpected
+programming errors are recorded best-effort in the manifest and then re-raised.

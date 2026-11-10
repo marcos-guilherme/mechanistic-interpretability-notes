@@ -16,19 +16,24 @@ class ReadoutError(JSpaceExperimentError):
 
 def _read_activations(
     model: Any,
-    prompt: str,
+    token_ids: Sequence[int],
     layers: Sequence[int],
     max_seq_len: int,
 ) -> tuple[list[int], dict[int, torch.Tensor]]:
     from jspace.hooks import ActivationRecorder
 
-    input_ids = model.encode(prompt, max_length=max_seq_len)
+    sequence = [int(token_id) for token_id in token_ids[:max_seq_len]]
+    input_ids = torch.tensor(
+        [sequence],
+        dtype=torch.long,
+        device=model.input_device,
+    )
     with ActivationRecorder(model.layers, at=sorted(set(layers))) as recorder:
         model.forward(input_ids)
         activations = {
             layer: recorder.activations[layer].detach() for layer in set(layers)
         }
-    return input_ids[0].tolist(), activations
+    return sequence, activations
 
 
 def _concept_summary(
@@ -106,7 +111,7 @@ def _read_layer_slots(
 def read_workspace(
     model: Any,
     dictionary: Any,
-    prompt: str,
+    token_ids: Sequence[int],
     *,
     layers: Sequence[int],
     positions: Sequence[int] = (-1,),
@@ -126,7 +131,7 @@ def read_workspace(
         pursuit_fn = gradient_pursuit
 
     sequence, activations = activation_reader(
-        model, prompt, list(layers), max_seq_len
+        model, token_ids, list(layers), max_seq_len
     )
     tokenizer = dictionary.model.tokenizer
     slots: list[dict[str, Any]] = []

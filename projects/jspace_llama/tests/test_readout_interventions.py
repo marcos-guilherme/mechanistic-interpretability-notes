@@ -42,8 +42,8 @@ class ReadoutDictionary:
         self.evicted.append(layer)
 
 
-def fake_activations(model, prompt, layers, max_seq_len):
-    assert prompt == "<chat>prompt</chat>"
+def fake_activations(model, token_ids, layers, max_seq_len):
+    assert tuple(token_ids) == (99,)
     assert max_seq_len == 32
     return [99], {
         1: torch.tensor([[[1.0, 0.0, 0.0]]]),
@@ -72,7 +72,7 @@ def test_workspace_readout_is_json_ready_and_evicts_each_layer() -> None:
     result = read_workspace(
         model=object(),
         dictionary=dictionary,
-        prompt="<chat>prompt</chat>",
+        token_ids=(99,),
         layers=[1, 2],
         positions=[-1],
         k=3,
@@ -108,7 +108,7 @@ def test_workspace_readout_evicts_failing_layer() -> None:
         read_workspace(
             model=object(),
             dictionary=dictionary,
-            prompt="<chat>prompt</chat>",
+            token_ids=(99,),
             layers=[1, 2],
             k=3,
             max_seq_len=32,
@@ -138,7 +138,7 @@ def test_workspace_releases_layer_tensor_before_materializing_next() -> None:
     read_workspace(
         model=object(),
         dictionary=dictionary,
-        prompt="<chat>prompt</chat>",
+        token_ids=(99,),
         layers=[1, 2],
         positions=[-1],
         k=3,
@@ -314,22 +314,34 @@ class TinyGeneratingModel:
         self.layers = [torch.nn.Identity() for _ in range(3)]
         self.hidden = torch.tensor([[[2.0, 1.0, 5.0, -2.0]]])
         self.calls: list[dict[str, object]] = []
+        self._hf_model = self
+        self.input_device = torch.device("cpu")
+        self.tokenizer = SimpleNamespace(
+            eos_token_id=2,
+            decode=lambda token_ids: "continuation",
+        )
 
-    def generate(self, prompt, *, max_new_tokens, hook, first_line):
-        with hook or contextlib.nullcontext():
-            prefill = self.layers[1](self.hidden.clone())
-            decode = self.layers[1](self.hidden.clone())
+    def generate(
+        self,
+        input_ids,
+        *,
+        max_new_tokens,
+        do_sample,
+        pad_token_id,
+    ):
+        prefill = self.layers[1](self.hidden.clone())
+        decode = self.layers[1](self.hidden.clone())
         self.calls.append(
             {
-                "prompt": prompt,
+                "input_ids": input_ids.tolist(),
                 "max_new_tokens": max_new_tokens,
-                "first_line": first_line,
-                "hook": type(hook).__name__ if hook is not None else None,
+                "do_sample": do_sample,
+                "pad_token_id": pad_token_id,
                 "prefill": prefill,
                 "decode": decode,
             }
         )
-        return "continuation"
+        return torch.cat((input_ids, torch.tensor([[2]])), dim=1)
 
 
 def _request(condition: str) -> GenerationRequest:
@@ -337,6 +349,7 @@ def _request(condition: str) -> GenerationRequest:
         prompt_name="main",
         instruction="instruction",
         rendered_prompt="<chat>instruction</chat>",
+        token_ids=(1, 42),
         condition=condition,
         layers=(1,),
         alpha=1.0,
@@ -355,10 +368,7 @@ def test_model_runner_exercises_real_hook_contexts() -> None:
         assert runner(_request(condition)) == "continuation"
 
     baseline, noop, random, target = model.calls
-    assert baseline["hook"] is None
-    assert noop["hook"] == "MemoryBoundedLensSwap"
-    assert random["hook"] == "NormMatchedRandomControl"
-    assert target["hook"] == "MemoryBoundedLensSwap"
+    assert all(call["input_ids"] == [[1, 42]] for call in model.calls)
     assert torch.equal(noop["prefill"], model.hidden)
     assert not torch.equal(random["prefill"], model.hidden)
     assert not torch.equal(target["prefill"], model.hidden)

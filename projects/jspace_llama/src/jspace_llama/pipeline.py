@@ -47,6 +47,7 @@ from jspace_llama.runtime import (
     TokenizationError,
     load_components,
     require_cuda,
+    translate_huggingface_error,
     validate_intervention_tokens,
 )
 
@@ -62,7 +63,12 @@ def _partial_provenance(
     try:
         source = read_source_provenance(project_root)
     except (FileNotFoundError, ValueError):
-        source = {"commit": None, "dirty": None}
+        source = {
+            "commit": None,
+            "dirty": None,
+            "scoped_dirty": None,
+            "archive_sha256": None,
+        }
     return {
         "source": source,
         "model": {
@@ -131,6 +137,20 @@ def execute_real_experiment(
             repo_id=config.assets.model_id,
             revision=model_revision,
         )
+    except torch.OutOfMemoryError as error:
+        raise ResourceExhaustionError("asset download exhausted memory") from error
+    except HUGGINGFACE_OPERATIONAL_ERRORS as error:
+        raise translate_huggingface_error(
+            error,
+            stage="model_download",
+        ) from error
+    except OSError as error:
+        raise AssetLoadError(
+            "failed to download pinned model",
+            stage="model_download",
+            category="io_error",
+        ) from error
+    try:
         lens_path = hf_hub_download(
             repo_id=config.assets.lens_repo_id,
             filename=config.assets.lens_filename,
@@ -139,9 +159,16 @@ def execute_real_experiment(
     except torch.OutOfMemoryError as error:
         raise ResourceExhaustionError("asset download exhausted memory") from error
     except HUGGINGFACE_OPERATIONAL_ERRORS as error:
-        raise AssetLoadError("failed to download pinned assets") from error
+        raise translate_huggingface_error(
+            error,
+            stage="lens_download",
+        ) from error
     except OSError as error:
-        raise AssetLoadError("failed to download pinned assets") from error
+        raise AssetLoadError(
+            "failed to download pinned lens",
+            stage="lens_download",
+            category="io_error",
+        ) from error
     lens_hash, lens_size = file_sha256(lens_path)
     provenance["lens"]["sha256"] = lens_hash
     provenance["lens"]["size_bytes"] = lens_size
@@ -165,7 +192,7 @@ def execute_real_experiment(
     readout = read_workspace(
         bundle.model,
         bundle.dictionary,
-        prepared[0].rendered,
+        prepared[0].token_ids,
         layers=bundle.layers,
         focus_concept=config.source,
     )
@@ -360,6 +387,14 @@ def run_pipeline(
             provenance=provenance,
             raw_diagnostics=None,
             reason_code=_reason_code(error),
+            failure_metadata=(
+                {
+                    "stage": error.stage,
+                    "category": error.category,
+                }
+                if isinstance(error, AssetLoadError)
+                else None
+            ),
         )
         atomic_write_json(manifest_path, manifest)
         atomic_write_json(evaluation_path, final)

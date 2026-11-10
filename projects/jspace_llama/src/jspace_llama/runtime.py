@@ -8,9 +8,11 @@ from typing import Any, Callable, Iterable
 
 from huggingface_hub.errors import (
     EntryNotFoundError,
+    GatedRepoError,
     HfHubHTTPError,
     LocalEntryNotFoundError,
     OfflineModeIsEnabled,
+    RevisionNotFoundError,
 )
 import torch
 
@@ -34,7 +36,16 @@ class CudaRequiredError(JSpaceExperimentError):
 
 
 class AssetLoadError(JSpaceExperimentError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str = "asset_load",
+        category: str = "asset_failure",
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.category = category
 
 
 class ResourceExhaustionError(JSpaceExperimentError):
@@ -55,6 +66,34 @@ class LayerBandError(JSpaceExperimentError):
 
 class LensIntegrityError(JSpaceExperimentError):
     pass
+
+
+def translate_huggingface_error(
+    error: BaseException,
+    *,
+    stage: str,
+) -> AssetLoadError:
+    if isinstance(error, GatedRepoError):
+        category = "gated_access_denied"
+    elif isinstance(error, RevisionNotFoundError):
+        category = "revision_not_found"
+    elif isinstance(error, OfflineModeIsEnabled):
+        category = "offline"
+    elif isinstance(error, LocalEntryNotFoundError):
+        category = "local_cache_missing"
+    elif isinstance(error, EntryNotFoundError):
+        category = "asset_not_found"
+    elif isinstance(error, HfHubHTTPError):
+        category = "hub_http_error"
+    else:
+        category = "asset_failure"
+    translated = AssetLoadError(
+        "Hugging Face asset operation failed",
+        stage=stage,
+        category=category,
+    )
+    translated.__cause__ = error
+    return translated
 
 
 @dataclass(frozen=True)
@@ -131,12 +170,15 @@ def download_lens_file(
             revision=resolved_revision,
         )
     except HUGGINGFACE_OPERATIONAL_ERRORS as exc:
-        raise AssetLoadError(
-            f"failed to download lens {assets.lens_repo_id}/{assets.lens_filename}"
+        raise translate_huggingface_error(
+            exc,
+            stage="lens_download",
         ) from exc
     except OSError as exc:
         raise AssetLoadError(
-            f"failed to download lens {assets.lens_repo_id}/{assets.lens_filename}"
+            "failed to download lens asset",
+            stage="lens_download",
+            category="io_error",
         ) from exc
 
 
@@ -231,12 +273,15 @@ def load_components(
             f"CUDA out of memory while loading {assets.model_id}"
         ) from exc
     except HUGGINGFACE_OPERATIONAL_ERRORS as exc:
-        raise AssetLoadError(
-            f"failed to load model asset {assets.model_id}"
+        raise translate_huggingface_error(
+            exc,
+            stage="model_load",
         ) from exc
     except OSError as exc:
         raise AssetLoadError(
-            f"failed to load model asset {assets.model_id}"
+            "failed to load model asset",
+            stage="model_load",
+            category="io_error",
         ) from exc
     try:
         lens = lens_cls.load(str(lens_path))
@@ -245,7 +290,11 @@ def load_components(
             "CUDA out of memory while loading lens"
         ) from exc
     except (OSError, EOFError, ValueError) as exc:
-        raise AssetLoadError("failed to load lens asset") from exc
+        raise AssetLoadError(
+            "failed to load lens asset",
+            stage="lens_load",
+            category="io_error",
+        ) from exc
     resolved_layers = resolve_layer_band(model, lens, layers)
     try:
         dictionary = dictionary_cls(model, lens, device="cuda")

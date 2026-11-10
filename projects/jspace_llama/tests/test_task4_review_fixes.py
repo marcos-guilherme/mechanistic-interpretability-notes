@@ -499,6 +499,7 @@ def test_final_artifact_agrees_on_verified_lens_integrity() -> None:
 
     assert final["integrity"] == {
         "lens_sha256": manifest["provenance"]["lens"]["sha256"],
+        "lens_integrity_evaluated": True,
         "lens_integrity_verified": True,
     }
 
@@ -726,7 +727,7 @@ def test_paraphrase_artifact_has_per_prompt_alpha_gate_aggregates() -> None:
         lambda p: p.update(prompt_count=1),
         lambda p: p.update(passing_prompt_alpha_count=1),
         lambda p: p["prompt_alphas"][0]["gates"].update(
-            baseline_eight=False
+            baseline_unique_eight=False
         ),
         lambda p: p["prompt_alphas"][0].update(passed=False),
         lambda p: p["prompt_alphas"][0].update(prompt_name="unexpected"),

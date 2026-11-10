@@ -34,11 +34,15 @@ def load_script(path: Path, name: str):
 
 
 def complete_provenance() -> dict:
+    from jspace_llama.provenance import runtime_source_sha256
+
     prompt_cases = ExperimentConfig().prompts.cases
     return {
         "source": {
             "commit": hashlib.sha1(b"source commit").hexdigest(),
             "dirty": False,
+            "scoped_dirty": False,
+            "archive_sha256": runtime_source_sha256(PROJECT, ROOT),
         },
         "model": {
             "id": "meta-llama/Llama-3.1-8B-Instruct",
@@ -81,6 +85,9 @@ def complete_provenance() -> dict:
                     "rendered_prompt_sha256": hashlib.sha256(
                         f"<chat>{case.text}</chat>".encode()
                     ).hexdigest(),
+                    "token_ids_sha256": hashlib.sha256(
+                        b"[1,2]"
+                    ).hexdigest(),
                 }
                 for case in prompt_cases
             ],
@@ -111,10 +118,25 @@ def classification(
     empty: bool = False,
     repetition: bool = False,
 ) -> dict:
+    value = (
+        "six"
+        if six and not eight
+        else "eight" if eight and not six else None
+    )
+    status = (
+        "unique"
+        if value is not None
+        else "conflicting" if six and eight else "no_answer"
+    )
     return {
         "answer_evidence": {"eight": eight, "six": six},
+        "answer_parse": {"status": status, "value": value},
         "target_entity_leakage": ant,
-        "degradation": {"empty": empty, "repetition": repetition},
+        "degradation": {
+            "empty": empty,
+            "repetition": repetition,
+            "incoherent": False,
+        },
     }
 
 
@@ -210,6 +232,7 @@ def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(
         name="main",
         instruction="Exact unrendered prompt",
         rendered="<chat>Exact unrendered prompt</chat>",
+        token_ids=(1, 2),
     )
     experiment = build_experiment_provenance(config, [prompt], [12, 13])
     assert experiment["prompts"][0]["text"] == "Exact unrendered prompt"
@@ -250,9 +273,9 @@ def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(
         ),
         (
             lambda raw: observation(raw, "baseline")["classification"][
-                "answer_evidence"
-            ].update(eight=False),
-            "baseline_missing_eight",
+                "answer_parse"
+            ].update(status="no_answer", value=None),
+            "baseline_answer_invalid",
         ),
         (
             lambda raw: observation(raw, "baseline")["classification"][
@@ -262,21 +285,21 @@ def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(
         ),
         (
             lambda raw: observation(raw, "noop")["classification"][
-                "answer_evidence"
-            ].update(eight=False),
-            "noop_missing_eight",
+                "answer_parse"
+            ].update(status="no_answer", value=None),
+            "noop_answer_invalid",
         ),
         (
             lambda raw: observation(raw, "noop")["classification"][
-                "answer_evidence"
-            ].update(six=True),
-            "noop_contains_six",
+                "answer_parse"
+            ].update(value="six"),
+            "noop_answer_invalid",
         ),
         (
             lambda raw: observation(raw, "random")["classification"][
-                "answer_evidence"
-            ].update(eight=False, six=True),
-            "random_comparable_six_reroute",
+                "answer_parse"
+            ].update(value="six"),
+            "random_answer_invalid",
         ),
         (
             lambda raw: observation(raw, "random")["classification"][
@@ -286,15 +309,15 @@ def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(
         ),
         (
             lambda raw: observation(raw, "target")["classification"][
-                "answer_evidence"
-            ].update(six=False),
-            "target_missing_six",
+                "answer_parse"
+            ].update(status="no_answer", value=None),
+            "target_answer_invalid",
         ),
         (
             lambda raw: observation(raw, "target")["classification"][
-                "answer_evidence"
-            ].update(eight=True),
-            "target_contains_eight",
+                "answer_parse"
+            ].update(value="eight"),
+            "target_answer_invalid",
         ),
         (
             lambda raw: observation(raw, "target")["classification"].update(
@@ -306,13 +329,13 @@ def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(
             lambda raw: observation(raw, "target")["classification"][
                 "degradation"
             ].update(empty=True),
-            "target_empty",
+            "target_degraded",
         ),
         (
             lambda raw: observation(raw, "target")["classification"][
                 "degradation"
             ].update(repetition=True),
-            "target_repetitive",
+            "target_degraded",
         ),
     ],
 )
@@ -413,6 +436,8 @@ def test_pipeline_writes_expected_failure_artifacts_but_reraises_bugs(
     assert final["reason"] == {
         "code": "asset_load_failed",
         "message": "model or lens asset loading failed",
+        "stage": "asset_load",
+        "category": "asset_failure",
     }
     validator = load_script(VALIDATOR_PATH, "validate_expected_failure")
     manifest = json.loads(
@@ -635,7 +660,7 @@ def test_archive_embeds_source_commit_and_dirty_state(
 
     def fake_git(command, **kwargs):
         commands.append(command)
-        stdout = "9" * 40 + "\n" if "rev-parse" in command else " M README.md\n"
+        stdout = "9" * 40 + "\n" if "rev-parse" in command else ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git)
@@ -653,7 +678,9 @@ def test_archive_embeds_source_commit_and_dirty_state(
     assert source == {
         "schema_version": 1,
         "commit": "9" * 40,
-        "dirty": True,
+        "dirty": False,
+        "scoped_dirty": False,
+        "archive_sha256": source["archive_sha256"],
     }
     assert "jspace_llama/source_provenance.json" in names
     assert any("status" in command for command in commands)

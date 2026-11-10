@@ -18,7 +18,19 @@ class EvaluationDataError(JSpaceExperimentError):
 
 def _degraded(classification: dict[str, Any]) -> bool:
     degradation = classification["degradation"]
-    return bool(degradation["empty"] or degradation["repetition"])
+    return bool(
+        degradation["empty"]
+        or degradation["repetition"]
+        or degradation["incoherent"]
+    )
+
+
+def _uniquely_parsed_as(
+    classification: dict[str, Any],
+    expected: str,
+) -> bool:
+    answer = classification["answer_parse"]
+    return answer["status"] == "unique" and answer["value"] == expected
 
 
 def evaluate_conditions(
@@ -32,38 +44,30 @@ def evaluate_conditions(
     target = classifications["target"]
     gates = {
         "readout_spider_present": spider_present,
-        "baseline_eight": bool(baseline["answer_evidence"]["eight"]),
+        "baseline_unique_eight": _uniquely_parsed_as(baseline, "eight"),
         "baseline_not_degraded": not _degraded(baseline),
-        "noop_eight": bool(noop["answer_evidence"]["eight"]),
-        "noop_not_six": not bool(noop["answer_evidence"]["six"]),
-        "random_not_comparable_six_reroute": not (
-            random["answer_evidence"]["six"]
-            and not random["answer_evidence"]["eight"]
+        "noop_unique_eight": _uniquely_parsed_as(noop, "eight"),
+        "noop_not_degraded": not _degraded(noop),
+        "random_unique_non_six": (
+            random["answer_parse"]["status"] == "unique"
+            and random["answer_parse"]["value"] != "six"
         ),
         "random_not_degraded": not _degraded(random),
-        "target_six": bool(target["answer_evidence"]["six"]),
-        "target_not_eight": not bool(target["answer_evidence"]["eight"]),
+        "target_unique_six": _uniquely_parsed_as(target, "six"),
         "target_no_ant": not bool(target["target_entity_leakage"]),
-        "target_nonempty": not bool(target["degradation"]["empty"]),
-        "target_nonrepetitive": not bool(
-            target["degradation"]["repetition"]
-        ),
+        "target_not_degraded": not _degraded(target),
     }
     reason_by_gate = {
         "readout_spider_present": "readout_spider_missing",
-        "baseline_eight": "baseline_missing_eight",
+        "baseline_unique_eight": "baseline_answer_invalid",
         "baseline_not_degraded": "baseline_degraded",
-        "noop_eight": "noop_missing_eight",
-        "noop_not_six": "noop_contains_six",
-        "random_not_comparable_six_reroute": (
-            "random_comparable_six_reroute"
-        ),
+        "noop_unique_eight": "noop_answer_invalid",
+        "noop_not_degraded": "noop_degraded",
+        "random_unique_non_six": "random_answer_invalid",
         "random_not_degraded": "random_degraded",
-        "target_six": "target_missing_six",
-        "target_not_eight": "target_contains_eight",
+        "target_unique_six": "target_answer_invalid",
         "target_no_ant": "target_contains_ant",
-        "target_nonempty": "target_empty",
-        "target_nonrepetitive": "target_repetitive",
+        "target_not_degraded": "target_degraded",
     }
     reasons = [
         reason_by_gate[name] for name, passed in gates.items() if not passed
@@ -77,6 +81,10 @@ def _compact_classification(classification: dict[str, Any]) -> dict[str, Any]:
             "eight": bool(classification["answer_evidence"]["eight"]),
             "six": bool(classification["answer_evidence"]["six"]),
         },
+        "answer_parse": {
+            "status": str(classification["answer_parse"]["status"]),
+            "value": classification["answer_parse"]["value"],
+        },
         "target_entity_leakage": bool(
             classification["target_entity_leakage"]
         ),
@@ -84,6 +92,9 @@ def _compact_classification(classification: dict[str, Any]) -> dict[str, Any]:
             "empty": bool(classification["degradation"]["empty"]),
             "repetition": bool(
                 classification["degradation"]["repetition"]
+            ),
+            "incoherent": bool(
+                classification["degradation"]["incoherent"]
             ),
         },
     }
@@ -218,7 +229,10 @@ def evaluate_experiment(
     return {
         "primary": {
             "prompt_name": PRIMARY_PROMPT,
-            "readout": {"spider_present": spider_present},
+            "readout": {
+                "evaluated": True,
+                "spider_present": spider_present,
+            },
             "alphas": primary_alphas,
             "passing_alphas": passing_alphas,
             "passing_alpha_count": len(passing_alphas),

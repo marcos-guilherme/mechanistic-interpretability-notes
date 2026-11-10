@@ -72,14 +72,19 @@ def apply_causal_clamp(
     alpha: float,
 ) -> torch.Tensor:
     """Apply upstream LensSwap clamp math to arbitrary leading dimensions."""
-    if layer.noop:
-        return hidden.clone()
     vectors = layer.vectors.to(device=hidden.device, dtype=torch.float32)
     pseudoinverse = layer.pseudoinverse.to(
         device=hidden.device, dtype=torch.float32
     )
     values = hidden.float()
-    coordinates = values @ pseudoinverse.T
+    coordinates, reconstruction = _reconstruct_coordinates(
+        values,
+        pseudoinverse,
+        vectors,
+    )
+    if layer.noop:
+        identity = values + (reconstruction - reconstruction)
+        return identity.to(dtype=hidden.dtype)
     mass = (
         coordinates[..., 0] + coordinates[..., 1].clamp_min(0.0)
     ).clamp_min(0.0)
@@ -87,6 +92,15 @@ def apply_causal_clamp(
         [torch.zeros_like(mass), float(alpha) * mass], dim=-1
     )
     return values + (clamped - coordinates) @ vectors
+
+
+def _reconstruct_coordinates(
+    values: torch.Tensor,
+    pseudoinverse: torch.Tensor,
+    vectors: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    coordinates = values @ pseudoinverse.T
+    return coordinates, coordinates @ vectors
 
 
 def _orthogonal_random_direction(

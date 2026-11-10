@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -176,6 +177,45 @@ def _load_schema(path: Path) -> dict[str, Any]:
     return schema
 
 
+def _runtime_source_sha256(project_root: Path) -> str:
+    project = project_root.resolve()
+    repository = project.parents[1]
+    candidates: list[tuple[str, Path]] = []
+    for pattern in (
+        "src/**/*.py",
+        "notebooks/*.ipynb",
+        "schemas/*.json",
+        "scripts/*.py",
+    ):
+        for path in project.glob(pattern):
+            if path.is_file() and not path.name.endswith("_output.ipynb"):
+                relative = path.relative_to(project).as_posix()
+                candidates.append(
+                    (f"projects/jspace_llama/{relative}", path)
+                )
+    for name in ("pyproject.toml", "uv.lock"):
+        path = project / name
+        if path.is_file():
+            candidates.append((f"projects/jspace_llama/{name}", path))
+    runner = repository / "tools" / "colab" / "run_jspace.py"
+    if runner.is_file():
+        candidates.append(("tools/colab/run_jspace.py", runner))
+    if not candidates:
+        raise ResultsValidationError(
+            "no local runtime-critical source files found"
+        )
+
+    digest = hashlib.sha256()
+    for label, path in sorted(candidates, key=lambda item: item[0]):
+        label_bytes = label.encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(label_bytes).to_bytes(8, "big"))
+        digest.update(label_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def _validate_schema(
     document: dict[str, Any],
     schema_path: Path,
@@ -219,7 +259,19 @@ def _reject_forbidden(value: Any, location: str = "$") -> None:
 
 def _degraded(classification: dict[str, Any]) -> bool:
     degradation = classification["degradation"]
-    return bool(degradation["empty"] or degradation["repetition"])
+    return bool(
+        degradation["empty"]
+        or degradation["repetition"]
+        or degradation["incoherent"]
+    )
+
+
+def _uniquely_parsed_as(
+    classification: dict[str, Any],
+    expected: str,
+) -> bool:
+    answer = classification["answer_parse"]
+    return answer["status"] == "unique" and answer["value"] == expected
 
 
 def _evaluate_conditions(
@@ -233,38 +285,30 @@ def _evaluate_conditions(
     target = conditions["target"]
     gates = {
         "readout_spider_present": bool(spider_present),
-        "baseline_eight": bool(baseline["answer_evidence"]["eight"]),
+        "baseline_unique_eight": _uniquely_parsed_as(baseline, "eight"),
         "baseline_not_degraded": not _degraded(baseline),
-        "noop_eight": bool(noop["answer_evidence"]["eight"]),
-        "noop_not_six": not bool(noop["answer_evidence"]["six"]),
-        "random_not_comparable_six_reroute": not (
-            bool(random["answer_evidence"]["six"])
-            and not bool(random["answer_evidence"]["eight"])
+        "noop_unique_eight": _uniquely_parsed_as(noop, "eight"),
+        "noop_not_degraded": not _degraded(noop),
+        "random_unique_non_six": (
+            random["answer_parse"]["status"] == "unique"
+            and random["answer_parse"]["value"] != "six"
         ),
         "random_not_degraded": not _degraded(random),
-        "target_six": bool(target["answer_evidence"]["six"]),
-        "target_not_eight": not bool(target["answer_evidence"]["eight"]),
+        "target_unique_six": _uniquely_parsed_as(target, "six"),
         "target_no_ant": not bool(target["target_entity_leakage"]),
-        "target_nonempty": not bool(target["degradation"]["empty"]),
-        "target_nonrepetitive": not bool(
-            target["degradation"]["repetition"]
-        ),
+        "target_not_degraded": not _degraded(target),
     }
     reason_by_gate = {
         "readout_spider_present": "readout_spider_missing",
-        "baseline_eight": "baseline_missing_eight",
+        "baseline_unique_eight": "baseline_answer_invalid",
         "baseline_not_degraded": "baseline_degraded",
-        "noop_eight": "noop_missing_eight",
-        "noop_not_six": "noop_contains_six",
-        "random_not_comparable_six_reroute": (
-            "random_comparable_six_reroute"
-        ),
+        "noop_unique_eight": "noop_answer_invalid",
+        "noop_not_degraded": "noop_degraded",
+        "random_unique_non_six": "random_answer_invalid",
         "random_not_degraded": "random_degraded",
-        "target_six": "target_missing_six",
-        "target_not_eight": "target_contains_eight",
+        "target_unique_six": "target_answer_invalid",
         "target_no_ant": "target_contains_ant",
-        "target_nonempty": "target_empty",
-        "target_nonrepetitive": "target_repetitive",
+        "target_not_degraded": "target_degraded",
     }
     reasons = [
         reason_by_gate[name] for name, passed in gates.items() if not passed
@@ -274,7 +318,18 @@ def _evaluate_conditions(
 
 def _recompute_primary(final: dict[str, Any]) -> tuple[list[float], int]:
     primary = final["primary"]
-    spider_present = primary["readout"]["spider_present"]
+    readout = primary["readout"]
+    spider_present = readout["spider_present"]
+    if readout["evaluated"] is not True:
+        if primary["alphas"] or spider_present is not None:
+            raise ResultsValidationError(
+                "unevaluated readout cannot carry measurements"
+            )
+        return [], 0
+    if not isinstance(spider_present, bool):
+        raise ResultsValidationError(
+            "evaluated readout requires spider presence measurement"
+        )
     passing: list[float] = []
     for index, alpha in enumerate(primary["alphas"]):
         gates, reasons = _evaluate_conditions(
@@ -394,6 +449,7 @@ def validate_documents(
     final: dict[str, Any],
     *,
     schema_dir: str | Path,
+    project_root: str | Path = PROJECT,
 ) -> None:
     schemas = Path(schema_dir)
     _validate_directory(schemas)
@@ -424,18 +480,31 @@ def validate_documents(
         raise ResultsValidationError(
             "provenance_complete claim does not recompute"
         )
+    source = manifest["provenance"]["source"]
+    archive_sha256 = source.get("archive_sha256")
+    if archive_sha256 is not None:
+        actual_source_sha256 = _runtime_source_sha256(
+            Path(project_root),
+        )
+        if archive_sha256 != actual_source_sha256:
+            raise ResultsValidationError(
+                "source archive digest does not match local runtime files"
+            )
     manifest_lens = manifest["provenance"]["lens"]
     final_integrity = final["integrity"]
     if (
         final_integrity["lens_sha256"] != manifest_lens["sha256"]
         or final_integrity["lens_integrity_verified"]
-        is not (manifest_lens.get("integrity_verified") is True)
+        is not manifest_lens.get("integrity_verified")
+        or final_integrity["lens_integrity_evaluated"]
+        is not isinstance(manifest_lens.get("integrity_verified"), bool)
     ):
         raise ResultsValidationError(
             "lens integrity differs across artifacts"
         )
     if manifest["terminal_status"] == "completed" and (
         manifest_lens.get("integrity_verified") is not True
+            or final_integrity["lens_integrity_evaluated"] is not True
         or final_integrity["lens_integrity_verified"] is not True
     ):
         raise ResultsValidationError(
@@ -492,6 +561,16 @@ def validate_documents(
         if manifest["reason"]["message"] != REASON_MESSAGES.get(code):
             raise ResultsValidationError(
                 "compact reason is not from the fixed allowlist"
+            )
+        stage = manifest["reason"].get("stage")
+        category = manifest["reason"].get("category")
+        if (stage is None) != (category is None):
+            raise ResultsValidationError(
+                "failure stage and category must appear together"
+            )
+        if stage is not None and code != "asset_load_failed":
+            raise ResultsValidationError(
+                "operational metadata is only valid for asset failures"
             )
     if final["status"] == "success" and final["reason"] is not None:
         raise ResultsValidationError("success cannot have an inconclusive reason")

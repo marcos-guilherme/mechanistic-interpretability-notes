@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -437,7 +438,87 @@ def _add_regular_file(
         handle.addfile(info, source)
 
 
-def capture_source_provenance(repository_root: Path = ROOT) -> dict[str, object]:
+def _runtime_critical_files(
+    project: Path,
+    repository_root: Path,
+) -> list[tuple[str, Path]]:
+    candidates = [
+        path
+        for path in _archive_candidates(project)
+        if (
+            path.relative_to(project).parts[0]
+            in {"src", "notebooks", "schemas", "scripts"}
+            or path.name in {"pyproject.toml", "uv.lock"}
+        )
+        and path.name != "README.md"
+        and "tests" not in path.relative_to(project).parts
+    ]
+    runner = repository_root / "tools" / "colab" / "run_jspace.py"
+    if runner.is_file():
+        _validate_regular_metadata(
+            runner,
+            os.lstat(runner),
+            context="local runner",
+        )
+        candidates.append(runner)
+
+    labeled: list[tuple[str, Path]] = []
+    for path in candidates:
+        if path.resolve() == runner.resolve():
+            label = "tools/colab/run_jspace.py"
+        else:
+            relative = path.relative_to(project).as_posix()
+            label = f"projects/jspace_llama/{relative}"
+        labeled.append((label, path))
+    return sorted(labeled, key=lambda item: item[0])
+
+
+def runtime_source_sha256(
+    project: Path,
+    repository_root: Path,
+) -> str:
+    digest = hashlib.sha256()
+    files = _runtime_critical_files(project, repository_root)
+    if not files:
+        raise ValueError("no runtime-critical source files found")
+    for label, path in files:
+        metadata = os.lstat(path)
+        _validate_regular_metadata(path, metadata, context="runtime source")
+        with open_validated_file(path, metadata) as source:
+            content = source.read()
+        label_bytes = label.encode("utf-8")
+        digest.update(len(label_bytes).to_bytes(8, "big"))
+        digest.update(label_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _runtime_git_pathspecs(
+    project: Path,
+    repository_root: Path,
+) -> list[str]:
+    try:
+        project_relative = project.resolve().relative_to(
+            repository_root.resolve()
+        ).as_posix()
+    except ValueError:
+        project_relative = "projects/jspace_llama"
+    return [
+        f"{project_relative}/src",
+        f"{project_relative}/notebooks",
+        f"{project_relative}/schemas",
+        f"{project_relative}/scripts",
+        f"{project_relative}/pyproject.toml",
+        f"{project_relative}/uv.lock",
+        "tools/colab/run_jspace.py",
+    ]
+
+
+def capture_source_provenance(
+    repository_root: Path = ROOT,
+    project: Path = PROJECT,
+) -> dict[str, object]:
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repository_root,
@@ -448,16 +529,29 @@ def capture_source_provenance(repository_root: Path = ROOT) -> dict[str, object]
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise ValueError("git returned an invalid source commit")
     status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=normal"],
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--",
+            *_runtime_git_pathspecs(project, repository_root),
+        ],
         cwd=repository_root,
         text=True,
         capture_output=True,
         check=True,
     ).stdout
+    scoped_dirty = bool(status.strip())
     return {
         "schema_version": 1,
         "commit": revision,
-        "dirty": bool(status.strip()),
+        "dirty": scoped_dirty,
+        "scoped_dirty": scoped_dirty,
+        "archive_sha256": runtime_source_sha256(
+            project,
+            repository_root,
+        ),
     }
 
 
@@ -502,7 +596,7 @@ def build_archive(
             _add_regular_file(handle, path, project)
         _add_source_provenance(
             handle,
-            capture_source_provenance(repository_root),
+            capture_source_provenance(repository_root, project),
         )
     return archive
 
