@@ -236,6 +236,15 @@ def test_base_and_attack_seeds_control_only_their_own_sampling() -> None:
     assert first.base_prompts != changed_base.base_prompts
 
 
+def test_default_base_and_attack_seeds_are_independent() -> None:
+    dataset = build_adversarial_dataset(
+        WhitespaceTokenizer(),
+        n=4,
+    )
+
+    assert dataset.base_seed != dataset.attack_seed
+
+
 @pytest.mark.parametrize(
     ("role", "role_occurrences", "other_occurrences"),
     [("IO", 3, 2), ("S", 3, 2)],

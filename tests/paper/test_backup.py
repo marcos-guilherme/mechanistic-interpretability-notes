@@ -174,7 +174,7 @@ def test_backup_measurements_separate_baseline_from_intervention_changes() -> No
 def test_compensation_fraction_is_ratio_of_means_with_bootstrap_limits() -> None:
     fraction = backup_module.compute_compensation_fraction(
         backup_delta_result=torch.tensor([1.0, 2.0, 3.0, 4.0]),
-        removed_primary_baseline=torch.tensor([2.0, 4.0, 6.0, 8.0]),
+        removed_primary_effective=torch.tensor([2.0, 4.0, 6.0, 8.0]),
         n_bootstrap=200,
         seed=7,
     )
@@ -184,6 +184,25 @@ def test_compensation_fraction_is_ratio_of_means_with_bootstrap_limits() -> None
     assert fraction.ci_lower <= fraction.value <= fraction.ci_upper
     assert "ratio of means" in fraction.definition
     assert "not" in fraction.final_logit_delta_warning.lower()
+
+
+def test_compensation_denominator_subtracts_pabc_substitution_dla() -> None:
+    baseline_primary = torch.tensor([6.0, 8.0, 10.0, 12.0])
+    replacement_primary = torch.tensor([2.0, 2.0, 2.0, 2.0])
+    effectively_removed = baseline_primary - replacement_primary
+    backup_compensation = effectively_removed * 0.25
+
+    fraction = backup_module.compute_compensation_fraction(
+        backup_delta_result=backup_compensation,
+        removed_primary_effective=effectively_removed,
+        n_bootstrap=200,
+        seed=8,
+    )
+
+    assert fraction.value == pytest.approx(0.25)
+    assert "baseline primary DLA minus pABC substitution DLA" in (
+        fraction.definition
+    )
 
 
 def test_published_backup_head_set_has_eight_entries() -> None:

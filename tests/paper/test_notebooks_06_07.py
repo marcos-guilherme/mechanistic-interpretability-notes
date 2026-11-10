@@ -26,6 +26,7 @@ def test_notebook_06_uses_published_circuit_and_semantic_activation_patching() -
     )
     assert "was_use_attn_result" in source
     assert "atribuição direta apenas em `END`" in source
+    assert "N pequeno não sustenta contestar sinais ou rankings inesperados" in source
     assert "results/paper/06_circuit_discovery.json" in source.replace("\\", "/")
 
 

@@ -17,6 +17,7 @@ from ioi_replication.paper.validation import (
     evaluate_completeness,
     evaluate_completeness_study,
     evaluate_faithfulness,
+    evaluate_all_minimality,
     evaluate_minimality,
     greedy_completeness,
     random_completeness,
@@ -295,6 +296,39 @@ def test_minimality_validates_against_evaluator_circuit_nodes() -> None:
             node=_node(0),
             context=(_node(2),),
         )
+
+
+def test_all_minimality_respects_evaluator_circuit_nodes() -> None:
+    nodes = (_node(0), _node(1))
+    contexts = {
+        nodes[0]: (nodes[1],),
+        nodes[1]: (nodes[0],),
+    }
+    removed_sets = {
+        frozenset(),
+        frozenset({nodes[0]}),
+        frozenset({nodes[1]}),
+        frozenset(nodes),
+    }
+    evaluator = _SyntheticEvaluator(
+        {
+            **{
+                ("circuit", removed): (
+                    3.0 - float(len(removed)),
+                ) * 4
+                for removed in removed_sets
+            },
+            ("model", frozenset()): (4.0,) * 4,
+        },
+        circuit_nodes=nodes,
+    )
+
+    results = evaluate_all_minimality(
+        evaluator,
+        contexts=contexts,
+    )
+
+    assert tuple(result.node for result in results) == nodes
 
 
 def test_historical_completeness_uses_six_classes_and_eleven_name_movers() -> None:

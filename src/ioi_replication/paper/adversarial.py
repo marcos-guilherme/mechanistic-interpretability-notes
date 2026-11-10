@@ -287,7 +287,7 @@ def build_adversarial_dataset(
     n: int = 500,
     seed: int | None = None,
     base_seed: int = 0,
-    attack_seed: int = 0,
+    attack_seed: int | None = None,
     role: Literal["IO", "S"] = "IO",
     clause_count: Literal["single", "double"] = "double",
     pattern: Literal["BABA", "ABBA", "mixed"] = "mixed",
@@ -297,8 +297,8 @@ def build_adversarial_dataset(
 
     ``single`` samples one of the five Figure 8 clauses. ``double`` samples one
     of the 25 ordered pairs from historical ``advex.py``. Base prompt sampling
-    and clause sampling use independent RNGs. ``seed`` remains as a legacy
-    alias which sets both seeds when the new arguments retain their defaults.
+    and clause sampling use independent RNGs and distinct default seeds.
+    ``seed`` remains as a legacy alias which explicitly sets both seeds.
     """
     if n <= 0:
         raise ValueError("n must be positive")
@@ -307,12 +307,14 @@ def build_adversarial_dataset(
     if clause_count not in {"single", "double"}:
         raise ValueError("clause_count must be 'single' or 'double'")
     if seed is not None:
-        if base_seed != 0 or attack_seed != 0:
+        if base_seed != 0 or attack_seed is not None:
             raise ValueError(
                 "seed cannot be combined with base_seed or attack_seed"
             )
         base_seed = seed
         attack_seed = seed
+    elif attack_seed is None:
+        attack_seed = 1
     selected_template_ids = (
         tuple(range(15))
         if allowed_template_ids is None

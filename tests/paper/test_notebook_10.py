@@ -36,6 +36,7 @@ def test_notebook_10_runs_matched_historical_adversarial_experiment() -> None:
     assert "BATCH_SIZE = 16" in source
     assert "BASE_SEED = 510" in source
     assert "PAPER_ATTACK_SEED = 511" in source
+    assert "S_CONTROL_ATTACK_SEED = 513" in source
     assert "ADVEX_ATTACK_SEED = 512" in source
     assert "ALLOWED_TEMPLATE_IDS = tuple(range(7))" in source
     assert "build_adversarial_dataset" in source
@@ -59,6 +60,8 @@ def test_notebook_10_runs_matched_historical_adversarial_experiment() -> None:
     assert "punct" in source
     assert "correção intencional" in source
     assert "git_blob" in source
+    assert "−2,32" in source
+    assert "baseline" in source and "controle S" in source
     assert "hashlib.sha256(path.read_bytes())" not in source
     assert "10_adversarial_examples.json" in source
 
@@ -70,7 +73,7 @@ def test_notebook_10_artifact_is_traceable_paired_and_finite() -> None:
     assert config["base_seed"] == 510
     assert config["attack_seeds"] == {
         "paper_io_single": 511,
-        "paper_s_control": 511,
+        "paper_s_control": 513,
         "advex_double_io": 512,
     }
     assert config["n"] == 500
@@ -152,7 +155,11 @@ def test_notebook_10_artifact_is_traceable_paired_and_finite() -> None:
         "io_probability": 0.36,
         "s_wins_error_rate": 0.234,
     }
-    assert set(artifact["comparison_to_paper"]) == {"paper_io_single"}
+    assert set(artifact["comparison_to_paper"]) == {
+        "baseline",
+        "paper_io_single",
+        "paper_s_control",
+    }
     assert set(artifact["comparison_to_paper"]["paper_io_single"]) == {
         "logit_difference_io_minus_s",
         "s_wins_error_rate",
@@ -160,7 +167,7 @@ def test_notebook_10_artifact_is_traceable_paired_and_finite() -> None:
     }
     assert "advex_double_io" not in artifact["comparison_to_paper"]
     assert artifact["methodology"]["comparison_scope"].startswith(
-        "Figure 8 targets are compared only"
+        "Figure 8 targets are compared with baseline"
     )
     assert "single-token" in " ".join(
         artifact["methodology"]["differences"]

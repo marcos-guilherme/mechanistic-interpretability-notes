@@ -582,7 +582,25 @@ def evaluate_all_minimality(
     ] = HISTORICAL_MINIMALITY_CONTEXTS,
     threshold_fraction: float = PAPER_MINIMALITY_THRESHOLD,
 ) -> tuple[MinimalityResult, ...]:
-    validate_minimality_contexts(contexts)
+    circuit_nodes = tuple(
+        getattr(evaluator, "circuit_nodes", published_nodes())
+    )
+    if contexts is HISTORICAL_MINIMALITY_CONTEXTS and set(contexts) != set(
+        circuit_nodes
+    ):
+        circuit = set(circuit_nodes)
+        contexts = {
+            node: tuple(
+                context_node
+                for context_node in HISTORICAL_MINIMALITY_CONTEXTS[node]
+                if context_node in circuit
+            )
+            for node in circuit_nodes
+        }
+    validate_minimality_contexts(
+        contexts,
+        circuit_nodes=circuit_nodes,
+    )
     return tuple(
         evaluate_minimality(
             evaluator,
@@ -590,7 +608,7 @@ def evaluate_all_minimality(
             context=contexts[node],
             threshold_fraction=threshold_fraction,
         )
-        for node in published_nodes()
+        for node in circuit_nodes
     )
 
 

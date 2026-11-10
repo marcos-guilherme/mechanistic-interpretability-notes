@@ -1,6 +1,7 @@
 import json
 import math
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).parents[2]
@@ -42,6 +43,8 @@ def test_notebook_09_runs_all_paper_validation_definitions() -> None:
     assert "top_greedy" in source
     assert "historical target from 100,000 prompts" in source
     assert "independent balanced pABC reference" in source
+    assert "26/26 >1% pontual, mas 24/26 com CI95" in source
+    assert "git_blob" in source
     assert "09_faithfulness_completeness_minimality.json" in source
 
 
@@ -121,18 +124,38 @@ def test_notebook_09_artifact_is_complete_traceable_and_finite() -> None:
     traceability = artifact["traceability"]
     assert len(traceability["source_commit"]) == 40
     assert traceability["git_dirty"] in {True, False}
-    assert all(
-        len(value) == 64
-        for value in traceability["source_sha256"].values()
+    assert traceability["hash_method"] == (
+        "git rev-parse <source_commit>:<path> (normalized Git blob IDs)"
     )
-    assert set(traceability["source_sha256"]) >= {
+    assert all(
+        len(value) == 40
+        for value in traceability["source_blobs"].values()
+    )
+    assert set(traceability["source_blobs"]) >= {
         "validation",
         "ablation",
         "circuit",
         "runtime",
         "notebook",
     }
-    assert traceability["git_dirty"] is False
+    source_paths = {
+        "validation": "src/ioi_replication/paper/validation.py",
+        "ablation": "src/ioi_replication/paper/ablation.py",
+        "circuit": "src/ioi_replication/paper/circuit.py",
+        "runtime": "src/ioi_replication/runtime.py",
+        "notebook": "notebooks/09_faithfulness_completeness_minimality.ipynb",
+    }
+    for name, relative_path in source_paths.items():
+        expected = subprocess.check_output(
+            [
+                "git",
+                "rev-parse",
+                f"{traceability['source_commit']}:{relative_path}",
+            ],
+            cwd=ROOT,
+            text=True,
+        ).strip()
+        assert traceability["source_blobs"][name] == expected
     assert traceability["timestamp_utc"].endswith("Z")
     assert artifact["methodology"]["comparison_scope"] == (
         "Same formulas and head-position ablation; independent balanced pABC "

@@ -85,6 +85,8 @@ class BackupExperimentResult:
     delta_logit_difference: Estimate
     heads: Mapping[tuple[int, int], BackupHeadMetrics]
     removed_primary_baseline_dla: Mapping[tuple[int, int], Estimate]
+    primary_substitution_dla: Mapping[tuple[int, int], Estimate]
+    effectively_removed_primary_dla: Mapping[tuple[int, int], Estimate]
     compensation_fraction: CompensationFraction | None
 
 
@@ -231,22 +233,22 @@ def decompose_head_logit_attribution(
 def compute_compensation_fraction(
     *,
     backup_delta_result: torch.Tensor,
-    removed_primary_baseline: torch.Tensor,
+    removed_primary_effective: torch.Tensor,
     n_bootstrap: int = 2000,
     seed: int = 0,
 ) -> CompensationFraction:
     """Estimate ratio-of-means compensation with paired bootstrap limits."""
     if (
         backup_delta_result.ndim != 1
-        or removed_primary_baseline.ndim != 1
-        or backup_delta_result.shape != removed_primary_baseline.shape
+        or removed_primary_effective.ndim != 1
+        or backup_delta_result.shape != removed_primary_effective.shape
         or backup_delta_result.numel() < 2
     ):
         raise ValueError("fraction inputs must be equal vectors with at least two rows")
     if n_bootstrap <= 1:
         raise ValueError("n_bootstrap must exceed one")
     numerator = backup_delta_result.detach().float().cpu()
-    denominator = removed_primary_baseline.detach().float().cpu()
+    denominator = removed_primary_effective.detach().float().cpu()
     denominator_mean = denominator.mean()
     if denominator_mean.abs() < 1e-8:
         raise ValueError("removed primary baseline mean is too close to zero")
@@ -272,7 +274,9 @@ def compute_compensation_fraction(
         ci_upper=float(torch.quantile(bootstrap, 0.975).item()),
         definition=(
             "ratio of means: summed posterior-backup Δresult at fixed "
-            "baseline scale divided by summed removed-primary baseline DLA"
+            "baseline scale divided by effectively removed contribution "
+            "(baseline primary DLA minus pABC substitution DLA, both at "
+            "baseline scale)"
         ),
         final_logit_delta_warning=(
             "This diagnostic is not an identity with the final logit-difference "
@@ -464,20 +468,34 @@ def measure_backup_heads_from_cache(
         )
 
     primary_metrics: dict[tuple[int, int], Estimate] = {}
+    substitution_metrics: dict[tuple[int, int], Estimate] = {}
+    effective_metrics: dict[tuple[int, int], Estimate] = {}
     for layer, head in primary_heads:
         result_name = f"blocks.{layer}.attn.hook_result"
-        if result_name not in baseline_cache:
+        if result_name not in baseline_cache or result_name not in knockout_cache:
             raise KeyError(f"cache did not contain {result_name!r}")
-        primary_metrics[(layer, head)] = _estimate(
-            scaled_head_logit_attribution(
-                baseline_cache[result_name],
-                baseline_cache["ln_final.hook_scale"],
-                unembed,
-                io_token_ids,
-                s_token_ids,
-                end_positions,
-                head=head,
-            )
+        baseline_primary = scaled_head_logit_attribution(
+            baseline_cache[result_name],
+            baseline_cache["ln_final.hook_scale"],
+            unembed,
+            io_token_ids,
+            s_token_ids,
+            end_positions,
+            head=head,
+        )
+        substitution = scaled_head_logit_attribution(
+            knockout_cache[result_name],
+            baseline_cache["ln_final.hook_scale"],
+            unembed,
+            io_token_ids,
+            s_token_ids,
+            end_positions,
+            head=head,
+        )
+        primary_metrics[(layer, head)] = _estimate(baseline_primary)
+        substitution_metrics[(layer, head)] = _estimate(substitution)
+        effective_metrics[(layer, head)] = _estimate(
+            baseline_primary - substitution
         )
 
     compensation_fraction = None
@@ -490,11 +508,11 @@ def measure_backup_heads_from_cache(
             ]
         ).sum(dim=0)
         denominator = torch.stack(
-            [metrics.values for metrics in primary_metrics.values()]
+            [metrics.values for metrics in effective_metrics.values()]
         ).sum(dim=0)
         compensation_fraction = compute_compensation_fraction(
             backup_delta_result=numerator,
-            removed_primary_baseline=denominator,
+            removed_primary_effective=denominator,
             seed=bootstrap_seed,
         )
 
@@ -504,6 +522,8 @@ def measure_backup_heads_from_cache(
         delta_logit_difference=_estimate(knockout_logit - baseline_logit),
         heads=head_metrics,
         removed_primary_baseline_dla=primary_metrics,
+        primary_substitution_dla=substitution_metrics,
+        effectively_removed_primary_dla=effective_metrics,
         compensation_fraction=compensation_fraction,
     )
 
