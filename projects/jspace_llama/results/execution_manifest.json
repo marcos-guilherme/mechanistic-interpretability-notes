@@ -1,0 +1,67 @@
+{
+  "artifact": "execution_manifest",
+  "ended_at": "2026-11-10T21:53:09.925825Z",
+  "provenance": {
+    "experiment": {
+      "alphas": [
+        4.0
+      ],
+      "generation": {
+        "decoding": "greedy",
+        "do_sample": false,
+        "first_line": false,
+        "max_new_tokens": 12
+      },
+      "intervention": {
+        "mode": "source_to_target_clamp",
+        "prefill_only": true,
+        "random_control": "norm_matched_orthogonal",
+        "source_concept": "spider",
+        "target_concept": "ant"
+      },
+      "layers": [],
+      "prompts": [],
+      "seed": 42
+    },
+    "hardware": {
+      "cuda_version": "13.2",
+      "dtype": "bfloat16",
+      "gpu_name": "NVIDIA L4"
+    },
+    "lens": {
+      "filename": "llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt",
+      "integrity_verified": null,
+      "repo_id": "neuronpedia/jacobian-lens",
+      "resolved_revision": "d2527c3cdbaa60dd4b65cbca1604921f044e989a",
+      "sha256": null,
+      "size_bytes": null
+    },
+    "model": {
+      "id": "meta-llama/Llama-3.1-8B-Instruct",
+      "layer_count": null,
+      "resolved_revision": "0e9e39f249a16976918f6564b8830bc894c89659"
+    },
+    "software": {
+      "huggingface_hub": "2.4.0",
+      "jspace": "0.1.0",
+      "jspace_commit": "04c822a255fe0a10d84e08ec499e5e09f4b7d37a",
+      "python": "3.13.16",
+      "pytorch": "2.15.0",
+      "transformers": "5.22.2"
+    },
+    "source": {
+      "commit": "bda81311ed758749598d9cd41fb7bbf0d5d3897a",
+      "dirty": true
+    }
+  },
+  "provenance_complete": false,
+  "reason": {
+    "code": "asset_load_failed",
+    "message": "model or lens asset loading failed"
+  },
+  "run_id": "a116c3da-bb8f-4a31-a39a-4fd09dd6fcad",
+  "schema_version": 1,
+  "started_at": "2026-11-10T21:53:07.802772Z",
+  "status": "inconclusive",
+  "terminal_status": "expected_failure"
+}

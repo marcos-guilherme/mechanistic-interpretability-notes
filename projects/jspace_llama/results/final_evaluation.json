@@ -1,0 +1,29 @@
+{
+  "artifact": "final_evaluation",
+  "integrity": {
+    "lens_integrity_verified": false,
+    "lens_sha256": null
+  },
+  "manifest_sha256": "5b447660baee0f538e0c0dbfde88671d3f7e3d4ac7b5da5971c12f362eab72e3",
+  "paraphrases": {
+    "passing_prompt_alpha_count": 0,
+    "prompt_alphas": [],
+    "prompt_count": 0
+  },
+  "primary": {
+    "alphas": [],
+    "passing_alpha_count": 0,
+    "passing_alphas": [],
+    "prompt_name": "main",
+    "readout": {
+      "spider_present": false
+    }
+  },
+  "reason": {
+    "code": "asset_load_failed",
+    "message": "model or lens asset loading failed"
+  },
+  "run_id": "a116c3da-bb8f-4a31-a39a-4fd09dd6fcad",
+  "schema_version": 1,
+  "status": "inconclusive"
+}

@@ -13,8 +13,8 @@ baseline and control interventions.
 The reusable core now provides pinned configuration, CUDA/runtime validation,
 memory-bounded readout and interventions, controls, provenance capture, and a
 notebook-callable artifact pipeline. `notebooks/01_readout_and_causal_swap.ipynb`
-is the thin entry point for the real run. Results are not yet available; the 8B
-model is intentionally not executed in the repository test suite.
+is the thin entry point for the real run. The observed execution is documented
+below; the 8B model is intentionally not executed in the repository test suite.
 
 ## Colab L4 workflow
 
@@ -57,6 +57,26 @@ must exist. Notebook execution validates the fresh ignored
 failures leave the Colab session available for diagnosis, so stop it
 explicitly. If L4 allocation is unavailable, stop the partial session and
 explicitly retry with `--gpu T4` or `--gpu A100`.
+
+## Observed run
+
+Run `a116c3da-bb8f-4a31-a39a-4fd09dd6fcad` exercised the software, Colab L4,
+and compact-artifact path through Hugging Face asset resolution. It resolved
+model revision `0e9e39f249a16976918f6564b8830bc894c89659` and lens revision
+`d2527c3cdbaa60dd4b65cbca1604921f044e989a`, then ended as `inconclusive` with
+reason code `asset_load_failed` because the Hugging Face account was not
+authorized for the gated model repository.
+
+The model weights were not downloaded, so no J-space readout or causal
+intervention ran. This outcome is neither positive nor negative evidence for
+J-space in Llama. The source revision was
+`bda81311ed758749598d9cd41fb7bbf0d5d3897a`; its dirty flag is `true` because
+unrelated user work existed outside this project at sync time.
+
+The two compact result artifacts are intentionally versioned as an
+inconclusive execution record. To rerun, first obtain official gated-model
+access for the Hugging Face account, then repeat `auth-hf`, `execute`, `fetch`,
+and the local validation commands below.
 
 ## Result artifacts and validation
 
