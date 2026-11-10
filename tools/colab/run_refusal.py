@@ -20,6 +20,11 @@ EXCLUDED_PARTS = {
 }
 
 
+def huggingface_token_path(home: Path | None = None) -> Path:
+    base = home if home is not None else Path.home()
+    return base / ".cache" / "huggingface" / "token"
+
+
 def start_command(session: str, gpu: str) -> list[str]:
     return [*AUTH, "new", "-s", session, "--gpu", gpu]
 
@@ -39,8 +44,22 @@ def upload_command(session: str, local: Path, remote: str) -> list[str]:
     ]
 
 
-def exec_command(session: str, file: Path) -> list[str]:
-    return [*AUTH, "exec", "-s", session, "-f", str(file)]
+def exec_command(
+    session: str,
+    file: Path,
+    *,
+    timeout: int,
+) -> list[str]:
+    return [
+        *AUTH,
+        "exec",
+        "-s",
+        session,
+        "-f",
+        str(file),
+        "--timeout",
+        str(timeout),
+    ]
 
 
 def download_command(session: str, remote: str, local: Path) -> list[str]:
@@ -89,6 +108,7 @@ def main() -> int:
             "start",
             "sync",
             "bootstrap",
+            "auth-hf",
             "execute",
             "fetch",
             "stop",
@@ -101,6 +121,7 @@ def main() -> int:
         default="L4",
     )
     parser.add_argument("--notebook", type=Path)
+    parser.add_argument("--timeout", type=int, default=7200)
     args = parser.parse_args()
 
     if args.action == "probe":
@@ -121,6 +142,27 @@ def main() -> int:
             exec_command(
                 args.session,
                 PROJECT / "scripts" / "colab_bootstrap.py",
+                timeout=600,
+            )
+        )
+    elif args.action == "auth-hf":
+        token = huggingface_token_path()
+        if not token.is_file():
+            parser.error(
+                "Hugging Face token not found; run `uv run hf auth login`"
+            )
+        run(
+            upload_command(
+                args.session,
+                token,
+                "/content/hf_token",
+            )
+        )
+        run(
+            exec_command(
+                args.session,
+                PROJECT / "scripts" / "colab_prepare_hf_auth.py",
+                timeout=60,
             )
         )
     elif args.action == "execute":
@@ -129,12 +171,19 @@ def main() -> int:
         notebook = args.notebook.resolve()
         if not notebook.is_file():
             parser.error(f"notebook does not exist: {notebook}")
-        run(exec_command(args.session, notebook))
+        run(
+            exec_command(
+                args.session,
+                notebook,
+                timeout=args.timeout,
+            )
+        )
     elif args.action == "fetch":
         run(
             exec_command(
                 args.session,
                 PROJECT / "scripts" / "colab_pack_results.py",
+                timeout=300,
             )
         )
         local = ROOT / ".colab-staging" / "refusal_results.tar.gz"

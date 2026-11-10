@@ -21,6 +21,12 @@ def test_ablation_removes_projection() -> None:
     assert torch.equal(result, torch.tensor([[[0.0, 4.0], [0.0, 2.0]]]))
 
 
+def test_ablation_with_zero_direction_is_a_noop() -> None:
+    hidden = torch.tensor([[[3.0, 4.0], [1.0, 2.0]]])
+    result = ablate_direction(hidden, torch.zeros(2))
+    assert torch.equal(result, hidden)
+
+
 def test_pre_hook_preserves_auxiliary_inputs() -> None:
     hook = residual_intervention_pre_hook(
         torch.tensor([1.0, 0.0]),

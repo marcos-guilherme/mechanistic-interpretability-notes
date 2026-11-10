@@ -29,3 +29,27 @@ def test_stop_command_is_always_explicit() -> None:
         "-s",
         "refusal-gemma",
     ]
+
+
+def test_exec_command_sets_remote_timeout() -> None:
+    assert MODULE.exec_command(
+        "refusal-gemma",
+        Path("stage.py"),
+        timeout=300,
+    ) == [
+        "colab",
+        "--auth=adc",
+        "exec",
+        "-s",
+        "refusal-gemma",
+        "-f",
+        "stage.py",
+        "--timeout",
+        "300",
+    ]
+
+
+def test_huggingface_token_uses_standard_cache_path(tmp_path) -> None:
+    assert MODULE.huggingface_token_path(tmp_path) == (
+        tmp_path / ".cache" / "huggingface" / "token"
+    )

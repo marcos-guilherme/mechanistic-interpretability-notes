@@ -10,10 +10,7 @@ Mode = Literal["add", "ablate"]
 
 
 def _unit(direction: torch.Tensor) -> torch.Tensor:
-    norm = direction.norm()
-    if norm == 0:
-        raise ValueError("direction must have non-zero norm")
-    return direction / norm
+    return direction / (direction.norm() + 1e-8)
 
 
 def add_direction(

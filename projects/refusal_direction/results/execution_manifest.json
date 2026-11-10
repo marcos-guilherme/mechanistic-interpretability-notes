@@ -1,0 +1,43 @@
+{
+  "config": {
+    "batch_size": 4,
+    "ce_tolerance": 0.1,
+    "dtype": "bfloat16",
+    "max_new_tokens": 128,
+    "model_name": "google/gemma-2b-it",
+    "model_revision": "main",
+    "seed": 42,
+    "train_per_class": 128,
+    "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3",
+    "validation_per_class": 32
+  },
+  "experiment": "execution_manifest",
+  "provenance": {
+    "model_name": "google/gemma-2b-it",
+    "requested_model_revision": "main",
+    "resolved_model_revision": "96988410cbdaeb8d5093d1ebdc5a8fb563e02bad",
+    "runtime": {
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "gpu": "NVIDIA L4",
+      "python": "3.13.16",
+      "torch": "2.14.1+cu130"
+    },
+    "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3"
+  },
+  "results": {
+    "completed_stages": [
+      "baseline",
+      "extract",
+      "intervene",
+      "evaluate"
+    ],
+    "result_files": [
+      "01_baseline.json",
+      "02_candidates.json",
+      "03_interventions.json",
+      "final_evaluation.json"
+    ]
+  },
+  "schema_version": 1
+}

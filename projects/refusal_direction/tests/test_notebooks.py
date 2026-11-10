@@ -30,4 +30,7 @@ def test_notebooks_are_thin_and_explanatory() -> None:
             line for cell in notebook["cells"] for line in cell["source"]
         )
         assert "refusal_direction_replication" in source
+        assert source.index("sys.path.insert") < source.index(
+            "from refusal_direction_replication"
+        )
         assert "run_gemma_pipeline" not in source

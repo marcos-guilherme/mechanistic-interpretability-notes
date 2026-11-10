@@ -11,6 +11,21 @@ DESTINATION = Path("/content")
 PROJECT = DESTINATION / "refusal_direction"
 
 
+def run_checked(command: list[str], *, cwd: Path | None = None) -> None:
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout)
+    if completed.stderr:
+        print(completed.stderr, file=sys.stderr)
+    completed.check_returncode()
+
+
 def safe_extract() -> None:
     with tarfile.open(ARCHIVE, "r:gz") as handle:
         root = DESTINATION.resolve()
@@ -23,7 +38,7 @@ def safe_extract() -> None:
 
 def main() -> int:
     safe_extract()
-    subprocess.run(
+    run_checked(
         [
             sys.executable,
             "-m",
@@ -32,15 +47,13 @@ def main() -> int:
             "-e",
             str(PROJECT),
         ],
-        check=True,
     )
-    subprocess.run(
+    run_checked(
         [
             sys.executable,
             str(PROJECT / "scripts" / "fetch_upstream_splits.py"),
         ],
         cwd=PROJECT,
-        check=True,
     )
     return 0
 
