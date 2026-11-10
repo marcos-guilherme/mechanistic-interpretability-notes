@@ -4,7 +4,7 @@
     "dataset_sha256": "cc24fb0ddfc5f820a335d3a59b6e42cffb298fe34f77a9dabfe3a202af21e5c8",
     "device": "cuda",
     "dtype": "float32",
-    "git_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+    "git_commit": "e88048c460f27992ba221fdaceb7052c219e2911",
     "model_name": "gpt2",
     "n_examples": 256,
     "n_groups": 30,
@@ -12,6 +12,15 @@
     "pattern": "mixed",
     "prepend_bos": false,
     "torch_version": "2.15.0+cu132",
+    "transformer_lens_compatibility_mode": {
+      "center_unembed": true,
+      "center_writing_weights": true,
+      "disable_warnings": false,
+      "fold_ln": true,
+      "fold_value_biases": true,
+      "no_processing": false,
+      "refactor_factored_attn_matrices": false
+    },
     "transformer_lens_version": "4.3.0"
   },
   "deviation_from_paper": {

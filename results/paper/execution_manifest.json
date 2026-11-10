@@ -5,62 +5,66 @@
     "torch_version": "2.15.0+cu132",
     "type": "cuda"
   },
-  "finished_at_utc": "2026-11-10T07:53:58.448170Z",
+  "finished_at_utc": "2026-11-10T08:52:48.858349Z",
   "initial_git_dirty": false,
   "kernel": "ioi-replication",
   "notebooks": [
     {
-      "duration_seconds": 25.571,
+      "duration_seconds": 25.531,
       "exit_status": "success",
-      "finished_at_utc": "2026-11-10T07:37:41.143233Z",
+      "finished_at_utc": "2026-11-10T08:15:07.113708Z",
       "notebook": "notebooks/05_paper_dataset_and_baseline.ipynb",
       "return_code": 0,
-      "started_at_utc": "2026-11-10T07:37:15.573534Z"
+      "started_at_utc": "2026-11-10T08:14:41.583184Z"
     },
     {
-      "duration_seconds": 69.102,
+      "duration_seconds": 827.213,
       "exit_status": "success",
-      "finished_at_utc": "2026-11-10T07:38:50.246805Z",
+      "finished_at_utc": "2026-11-10T08:28:54.318210Z",
       "notebook": "notebooks/06_circuit_discovery.ipynb",
       "return_code": 0,
-      "started_at_utc": "2026-11-10T07:37:41.146233Z"
+      "started_at_utc": "2026-11-10T08:15:07.116703Z"
     },
     {
-      "duration_seconds": 43.622,
+      "duration_seconds": 562.182,
       "exit_status": "success",
-      "finished_at_utc": "2026-11-10T07:39:33.872788Z",
+      "finished_at_utc": "2026-11-10T08:38:16.497348Z",
       "notebook": "notebooks/07_path_patching.ipynb",
       "return_code": 0,
-      "started_at_utc": "2026-11-10T07:38:50.251812Z"
+      "started_at_utc": "2026-11-10T08:28:54.323216Z"
     },
     {
-      "duration_seconds": 31.86,
+      "duration_seconds": 35.056,
       "exit_status": "success",
-      "finished_at_utc": "2026-11-10T07:40:05.736136Z",
+      "finished_at_utc": "2026-11-10T08:38:51.555893Z",
       "notebook": "notebooks/08_backup_name_movers.ipynb",
       "return_code": 0,
-      "started_at_utc": "2026-11-10T07:39:33.876792Z"
+      "started_at_utc": "2026-11-10T08:38:16.500352Z"
     },
     {
-      "duration_seconds": 797.241,
+      "duration_seconds": 800.455,
       "exit_status": "success",
-      "finished_at_utc": "2026-11-10T07:53:22.966700Z",
+      "finished_at_utc": "2026-11-10T08:52:12.022560Z",
       "notebook": "notebooks/09_faithfulness_completeness_minimality.ipynb",
       "return_code": 0,
-      "started_at_utc": "2026-11-10T07:40:05.739138Z"
+      "started_at_utc": "2026-11-10T08:38:51.578893Z"
     },
     {
-      "duration_seconds": 35.468,
+      "duration_seconds": 36.518,
       "exit_status": "success",
-      "finished_at_utc": "2026-11-10T07:53:58.437169Z",
+      "finished_at_utc": "2026-11-10T08:52:48.545361Z",
       "notebook": "notebooks/10_adversarial_examples.ipynb",
       "return_code": 0,
-      "started_at_utc": "2026-11-10T07:53:22.969704Z"
+      "started_at_utc": "2026-11-10T08:52:12.027560Z"
     }
   ],
   "schema_version": 1,
-  "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
-  "started_at_utc": "2026-11-10T07:37:15.570534Z",
+  "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911",
+  "started_at_utc": "2026-11-10T08:14:41.580189Z",
   "status": "success",
+  "summary": {
+    "exit_status": "success",
+    "return_code": 0
+  },
   "timeout_seconds": 7200
 }

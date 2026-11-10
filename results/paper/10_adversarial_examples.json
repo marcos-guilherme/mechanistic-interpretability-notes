@@ -64,7 +64,16 @@
     "model_name": "gpt2",
     "n": 500,
     "padding_side": "right",
-    "prepend_bos": false
+    "prepend_bos": false,
+    "transformer_lens_compatibility_mode": {
+      "center_unembed": true,
+      "center_writing_weights": true,
+      "disable_warnings": false,
+      "fold_ln": true,
+      "fold_value_biases": true,
+      "no_processing": false,
+      "refactor_factored_attn_matrices": false
+    }
   },
   "methodology": {
     "advex_source_inconsistency": "advex.py obtains punct_idx from an IOIDataset without BOS, while show_tokens calls model.to_tokens with historical BOS-prefixed behavior, mixing token coordinate systems.",
@@ -331,14 +340,14 @@
     "historical_source_commit": "ea15315dd24481e9e2ac5c3ef335d82907a1dc34",
     "historical_source_url": "https://github.com/redwoodresearch/Easy-Transformer/blob/ea15315dd24481e9e2ac5c3ef335d82907a1dc34/easy_transformer/advex.py",
     "source_blobs": {
-      "notebook": "da3f1b55ec3234870c6419482ba05f1d8dd290d8",
+      "notebook": "5d074d957c62919ed4abc19c7baeb453b4aa6e40",
       "paper/adversarial.py": "4ebe4ffad8da9ad1367c3b19fc0170c38429bbeb",
       "paper/dataset.py": "1c5eff7d0b1a8a6bf80329bc06595ed6e0ff4a6c",
       "paper/metrics.py": "a9520baec5e091d597b00bb13823594c9518861b",
-      "runtime.py": "6815d71ebca30bd9d324d1e527306bcb653c0d05"
+      "runtime.py": "b02f607d784e2986a80b98027e2b54f55469ba06"
     },
-    "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
-    "timestamp_utc": "2026-11-10T07:53:56.303997Z",
+    "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911",
+    "timestamp_utc": "2026-11-10T08:52:46.329761Z",
     "versions": {
       "pandas": "3.1.1",
       "plotly": "7.1.0",

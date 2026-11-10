@@ -13,15 +13,15 @@
       "mean_logit_difference": 3.6441750526428223
     },
     "circuit_discovery": {
-      "baseline_logit_difference": 3.858616590499878,
+      "baseline_logit_difference": 3.644707202911377,
       "published_class_mean_patch_effect": {
-        "backup_name_movers": -0.1416790783405304,
-        "duplicate_token": -0.384291410446167,
-        "induction": -0.29905569553375244,
-        "name_movers": 0.13094552357991537,
-        "negative_name_movers": 0.9351198673248291,
-        "previous_token": -0.10830497741699219,
-        "s_inhibition": -0.7718640565872192
+        "backup_name_movers": -0.0687420666217804,
+        "duplicate_token": -0.32288964589436847,
+        "induction": -0.49656546115875244,
+        "name_movers": -0.024695634841918945,
+        "negative_name_movers": 1.0890448093414307,
+        "previous_token": -0.2817864418029785,
+        "s_inhibition": -0.8785779476165771
       }
     },
     "completeness_greedy_max": 4.121578426361084,
@@ -37,15 +37,36 @@
       "total": 26
     },
     "path_patching": {
-      "duplicate_3.0_to_s_inhibition_7.3_v": -0.09731721878051758,
-      "induction_5.5_to_s_inhibition_7.3_v": -0.16524982452392578,
-      "s_inhibition_7.3_to_name_mover_9.9_q": -0.11320972442626953
+      "historical_four_pass_semantic": {
+        "freeze_mlps_false": {
+          "duplicate_3.0_to_s_inhibition_7.3_v": -0.06302475929260254,
+          "induction_5.5_to_s_inhibition_7.3_v": -0.05966925621032715,
+          "multi_duplicate_induction_to_s_inhibition_v": -0.5383644104003906,
+          "s_inhibition_7.3_to_name_mover_9.9_q": -0.07191348075866699
+        },
+        "freeze_mlps_true": {
+          "duplicate_3.0_to_s_inhibition_7.3_v": -0.045818328857421875,
+          "induction_5.5_to_s_inhibition_7.3_v": -0.05022239685058594,
+          "multi_duplicate_induction_to_s_inhibition_v": -0.4522559642791748,
+          "s_inhibition_7.3_to_name_mover_9.9_q": -0.06441736221313477
+        }
+      },
+      "primary_method": "historical_four_pass_semantic",
+      "published_path_grid": {
+        "n_edges": 88
+      },
+      "transformerlens_direct_path_all_positions": {
+        "duplicate_3.0_to_s_inhibition_7.3_v": -0.04578971862792969,
+        "induction_5.5_to_s_inhibition_7.3_v": -0.05046820640563965,
+        "s_inhibition_7.3_to_name_mover_9.9_q": -0.06503629684448242
+      }
     }
   },
   "paper": "arXiv:2211.00593",
   "schema_version": 1,
   "sources": {
     "adversarial": {
+      "classification": "adversarial-evaluation",
       "config": {
         "allowed_template_ids": [
           0,
@@ -94,12 +115,22 @@
         "model_name": "gpt2",
         "n": 500,
         "padding_side": "right",
-        "prepend_bos": false
+        "prepend_bos": false,
+        "transformer_lens_compatibility_mode": {
+          "center_unembed": true,
+          "center_writing_weights": true,
+          "disable_warnings": false,
+          "fold_ln": true,
+          "fold_value_biases": true,
+          "no_processing": false,
+          "refactor_factored_attn_matrices": false
+        }
       },
       "path": "results/paper/10_adversarial_examples.json",
-      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+      "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911"
     },
     "backup": {
+      "classification": "backup-compensation",
       "config": {
         "device": "cuda",
         "dtype": "float32",
@@ -112,18 +143,28 @@
         "reference_dataset_sha256": "e157407aba5515c941915a94e76663662ff0de7c019889ed39bd3a8dd23562f9",
         "seed_reference": 309,
         "seed_target": 308,
-        "target_dataset_sha256": "31cc588949aaa9836a297eb1df54ffc0310d8bc1fee054b2aa3178e3203754b3"
+        "target_dataset_sha256": "31cc588949aaa9836a297eb1df54ffc0310d8bc1fee054b2aa3178e3203754b3",
+        "transformer_lens_compatibility_mode": {
+          "center_unembed": true,
+          "center_writing_weights": true,
+          "disable_warnings": false,
+          "fold_ln": true,
+          "fold_value_biases": true,
+          "no_processing": false,
+          "refactor_factored_attn_matrices": false
+        }
       },
       "path": "results/paper/08_backup_name_movers.json",
-      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+      "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911"
     },
     "baseline": {
+      "classification": "baseline",
       "config": {
         "batch_size": 32,
         "dataset_sha256": "cc24fb0ddfc5f820a335d3a59b6e42cffb298fe34f77a9dabfe3a202af21e5c8",
         "device": "cuda",
         "dtype": "float32",
-        "git_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+        "git_commit": "e88048c460f27992ba221fdaceb7052c219e2911",
         "model_name": "gpt2",
         "n_examples": 256,
         "n_groups": 30,
@@ -131,17 +172,27 @@
         "pattern": "mixed",
         "prepend_bos": false,
         "torch_version": "2.15.0+cu132",
+        "transformer_lens_compatibility_mode": {
+          "center_unembed": true,
+          "center_writing_weights": true,
+          "disable_warnings": false,
+          "fold_ln": true,
+          "fold_value_biases": true,
+          "no_processing": false,
+          "refactor_factored_attn_matrices": false
+        },
         "transformer_lens_version": "4.3.0"
       },
       "path": "results/paper/baseline_seed_42_n_256.json",
-      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+      "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911"
     },
     "circuit": {
+      "classification": "diagnostic-validation",
       "config": {
         "activation": "result",
-        "dataset_sha256": "cb4f451c0de475c5e4180d0f9782ecc2e4d4f6bc08d424cf91a383dafe6e30a8",
+        "dataset_sha256": "230498a6bfb41c33a2fc89634a20ff28bd207962bbe420e341dec45cc6fd6b43",
         "model_name": "gpt2",
-        "n_examples": 4,
+        "n_examples": 64,
         "seed": 106,
         "semantic_positions": [
           "IO",
@@ -149,28 +200,48 @@
           "S2",
           "S1+1",
           "END"
-        ]
+        ],
+        "transformer_lens_compatibility_mode": {
+          "center_unembed": true,
+          "center_writing_weights": true,
+          "disable_warnings": false,
+          "fold_ln": true,
+          "fold_value_biases": true,
+          "no_processing": false,
+          "refactor_factored_attn_matrices": false
+        }
       },
       "path": "results/paper/06_circuit_discovery.json",
-      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+      "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911"
     },
     "path_patching": {
+      "classification": "path-grid",
       "config": {
         "allow_internal_interactions": false,
-        "dataset_sha256": "a9c668d845ab9fef7630428c87155240aef93f5033462576923204d5cb6dec8d",
+        "dataset_sha256": "9fc55b67ce2b590bad8061f42ae93234627ad1430bf6649ea6165aa6fed64d91",
         "freeze_mlps_modes": [
           false,
           true
         ],
         "metric": "mean IO-minus-S logit difference at semantic END",
         "model_name": "gpt2",
-        "n_examples": 2,
-        "seed": 107
+        "n_examples": 64,
+        "seed": 107,
+        "transformer_lens_compatibility_mode": {
+          "center_unembed": true,
+          "center_writing_weights": true,
+          "disable_warnings": false,
+          "fold_ln": true,
+          "fold_value_biases": true,
+          "no_processing": false,
+          "refactor_factored_attn_matrices": false
+        }
       },
       "path": "results/paper/07_path_patching.json",
-      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+      "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911"
     },
     "validation": {
+      "classification": "faithfulness-completeness-minimality",
       "config": {
         "batch_size_reference": 16,
         "batch_size_target": 50,
@@ -189,10 +260,19 @@
         "seed_reference": 410,
         "seed_target": 409,
         "seed_validation": 411,
-        "target_dataset_sha256": "716e2c278f567c853436c29309e535803b03728b92a1d092a144d05b4d9a14e2"
+        "target_dataset_sha256": "716e2c278f567c853436c29309e535803b03728b92a1d092a144d05b4d9a14e2",
+        "transformer_lens_compatibility_mode": {
+          "center_unembed": true,
+          "center_writing_weights": true,
+          "disable_warnings": false,
+          "fold_ln": true,
+          "fold_value_biases": true,
+          "no_processing": false,
+          "refactor_factored_attn_matrices": false
+        }
       },
       "path": "results/paper/09_faithfulness_completeness_minimality.json",
-      "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b"
+      "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911"
     }
   }
 }

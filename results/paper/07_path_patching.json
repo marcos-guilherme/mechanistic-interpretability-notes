@@ -1,23 +1,43 @@
 {
   "paper": "arXiv:2211.00593",
+  "classification": "path-grid",
   "config": {
     "model_name": "gpt2",
     "seed": 107,
-    "n_examples": 2,
-    "dataset_sha256": "a9c668d845ab9fef7630428c87155240aef93f5033462576923204d5cb6dec8d",
+    "n_examples": 64,
+    "dataset_sha256": "9fc55b67ce2b590bad8061f42ae93234627ad1430bf6649ea6165aa6fed64d91",
     "metric": "mean IO-minus-S logit difference at semantic END",
     "freeze_mlps_modes": [
       false,
       true
     ],
-    "allow_internal_interactions": false
+    "allow_internal_interactions": false,
+    "transformer_lens_compatibility_mode": {
+      "disable_warnings": false,
+      "no_processing": false,
+      "fold_ln": true,
+      "center_writing_weights": true,
+      "center_unembed": true,
+      "fold_value_biases": true,
+      "refactor_factored_attn_matrices": false
+    }
+  },
+  "traceability": {
+    "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911",
+    "hash_method": "git rev-parse <source_commit>:<path> (normalized Git blob IDs)",
+    "source_blobs": {
+      "patching": "d004a466c8d6579b3611f6d4490272fa0c1394c5",
+      "circuit": "3a47ecb64b9e2bc80988028d1ca66e1ff39c2256",
+      "runtime": "b02f607d784e2986a80b98027e2b54f55469ba06",
+      "notebook": "7e9f65eb0ea39155afee8b70c31c5d2bb1184d04"
+    }
   },
   "historical_four_pass_semantic": {
     "freeze_mlps_false": {
       "duplicate_3.0_to_s_inhibition_7.3_v": {
-        "baseline": 3.0995378494262695,
-        "patched": 3.0106773376464844,
-        "effect": -0.08886051177978516,
+        "baseline": 3.603050708770752,
+        "patched": 3.5400259494781494,
+        "effect": -0.06302475929260254,
         "senders": [
           {
             "layer": 3,
@@ -35,9 +55,9 @@
         ]
       },
       "induction_5.5_to_s_inhibition_7.3_v": {
-        "baseline": 3.0995378494262695,
-        "patched": 2.981776714324951,
-        "effect": -0.11776113510131836,
+        "baseline": 3.603050708770752,
+        "patched": 3.543381452560425,
+        "effect": -0.05966925621032715,
         "senders": [
           {
             "layer": 5,
@@ -55,9 +75,9 @@
         ]
       },
       "s_inhibition_7.3_to_name_mover_9.9_q": {
-        "baseline": 3.0995378494262695,
-        "patched": 2.997884750366211,
-        "effect": -0.1016530990600586,
+        "baseline": 3.603050708770752,
+        "patched": 3.531137228012085,
+        "effect": -0.07191348075866699,
         "senders": [
           {
             "layer": 7,
@@ -75,9 +95,9 @@
         ]
       },
       "multi_duplicate_induction_to_s_inhibition_v": {
-        "baseline": 3.0995378494262695,
-        "patched": 2.549734115600586,
-        "effect": -0.5498037338256836,
+        "baseline": 3.603050708770752,
+        "patched": 3.0646862983703613,
+        "effect": -0.5383644104003906,
         "senders": [
           {
             "layer": 0,
@@ -108,9 +128,9 @@
     },
     "freeze_mlps_true": {
       "duplicate_3.0_to_s_inhibition_7.3_v": {
-        "baseline": 3.0995378494262695,
-        "patched": 3.0008316040039062,
-        "effect": -0.09870624542236328,
+        "baseline": 3.603050708770752,
+        "patched": 3.55723237991333,
+        "effect": -0.045818328857421875,
         "senders": [
           {
             "layer": 3,
@@ -128,9 +148,9 @@
         ]
       },
       "induction_5.5_to_s_inhibition_7.3_v": {
-        "baseline": 3.0995378494262695,
-        "patched": 2.9402804374694824,
-        "effect": -0.1592574119567871,
+        "baseline": 3.603050708770752,
+        "patched": 3.552828311920166,
+        "effect": -0.05022239685058594,
         "senders": [
           {
             "layer": 5,
@@ -148,9 +168,9 @@
         ]
       },
       "s_inhibition_7.3_to_name_mover_9.9_q": {
-        "baseline": 3.0995378494262695,
-        "patched": 2.9869866371154785,
-        "effect": -0.11255121231079102,
+        "baseline": 3.603050708770752,
+        "patched": 3.538633346557617,
+        "effect": -0.06441736221313477,
         "senders": [
           {
             "layer": 7,
@@ -168,9 +188,9 @@
         ]
       },
       "multi_duplicate_induction_to_s_inhibition_v": {
-        "baseline": 3.0995378494262695,
-        "patched": 2.5890188217163086,
-        "effect": -0.5105190277099609,
+        "baseline": 3.603050708770752,
+        "patched": 3.150794744491577,
+        "effect": -0.4522559642791748,
         "senders": [
           {
             "layer": 0,
@@ -200,25 +220,2131 @@
       }
     }
   },
+  "published_path_grid": {
+    "n_edges": 88,
+    "freeze_mlps": false,
+    "allow_internal_interactions": false,
+    "rows": [
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:2.2@S1+1",
+        "receiver_label": "induction:5.5.k@S1+1",
+        "sender": {
+          "layer": 2,
+          "head": 2,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 5,
+          "head": 5,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.551570415496826,
+        "effect": -0.05148029327392578
+      },
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:2.2@S1+1",
+        "receiver_label": "induction:5.8.k@S1+1",
+        "sender": {
+          "layer": 2,
+          "head": 2,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 5,
+          "head": 8,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.603656768798828,
+        "effect": 0.0006060600280761719
+      },
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:2.2@S1+1",
+        "receiver_label": "induction:5.9.k@S1+1",
+        "sender": {
+          "layer": 2,
+          "head": 2,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 5,
+          "head": 9,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5838379859924316,
+        "effect": -0.019212722778320312
+      },
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:2.2@S1+1",
+        "receiver_label": "induction:6.9.k@S1+1",
+        "sender": {
+          "layer": 2,
+          "head": 2,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 6,
+          "head": 9,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.521127223968506,
+        "effect": -0.0819234848022461
+      },
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:4.11@S1+1",
+        "receiver_label": "induction:5.5.k@S1+1",
+        "sender": {
+          "layer": 4,
+          "head": 11,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 5,
+          "head": 5,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.348688840866089,
+        "effect": -0.2543618679046631
+      },
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:4.11@S1+1",
+        "receiver_label": "induction:5.8.k@S1+1",
+        "sender": {
+          "layer": 4,
+          "head": 11,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 5,
+          "head": 8,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5989890098571777,
+        "effect": -0.004061698913574219
+      },
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:4.11@S1+1",
+        "receiver_label": "induction:5.9.k@S1+1",
+        "sender": {
+          "layer": 4,
+          "head": 11,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 5,
+          "head": 9,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.577486038208008,
+        "effect": -0.02556467056274414
+      },
+      {
+        "sender_class": "previous_token",
+        "receiver_class": "induction",
+        "sender_label": "previous_token:4.11@S1+1",
+        "receiver_label": "induction:6.9.k@S1+1",
+        "sender": {
+          "layer": 4,
+          "head": 11,
+          "position": "S1+1"
+        },
+        "receiver": {
+          "layer": 6,
+          "head": 9,
+          "component": "k",
+          "position": "S1+1"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.39711332321167,
+        "effect": -0.20593738555908203
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.1@S2",
+        "receiver_label": "s_inhibition:7.3.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 1,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 3,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5829882621765137,
+        "effect": -0.02006244659423828
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.1@S2",
+        "receiver_label": "s_inhibition:7.9.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 1,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 9,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5047316551208496,
+        "effect": -0.09831905364990234
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.1@S2",
+        "receiver_label": "s_inhibition:8.6.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 1,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 6,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.588463544845581,
+        "effect": -0.014587163925170898
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.1@S2",
+        "receiver_label": "s_inhibition:8.10.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 1,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 10,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.533828020095825,
+        "effect": -0.06922268867492676
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.10@S2",
+        "receiver_label": "s_inhibition:7.3.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 10,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 3,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.584240436553955,
+        "effect": -0.018810272216796875
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.10@S2",
+        "receiver_label": "s_inhibition:7.9.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 10,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 9,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.627366781234741,
+        "effect": 0.024316072463989258
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.10@S2",
+        "receiver_label": "s_inhibition:8.6.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 10,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 6,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5719242095947266,
+        "effect": -0.03112649917602539
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:0.10@S2",
+        "receiver_label": "s_inhibition:8.10.v@S2",
+        "sender": {
+          "layer": 0,
+          "head": 10,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 10,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.636582851409912,
+        "effect": 0.033532142639160156
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:3.0@S2",
+        "receiver_label": "s_inhibition:7.3.v@S2",
+        "sender": {
+          "layer": 3,
+          "head": 0,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 3,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5400259494781494,
+        "effect": -0.06302475929260254
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:3.0@S2",
+        "receiver_label": "s_inhibition:7.9.v@S2",
+        "sender": {
+          "layer": 3,
+          "head": 0,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 9,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.4730286598205566,
+        "effect": -0.1300220489501953
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:3.0@S2",
+        "receiver_label": "s_inhibition:8.6.v@S2",
+        "sender": {
+          "layer": 3,
+          "head": 0,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 6,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.4936351776123047,
+        "effect": -0.10941553115844727
+      },
+      {
+        "sender_class": "duplicate_token",
+        "receiver_class": "s_inhibition",
+        "sender_label": "duplicate_token:3.0@S2",
+        "receiver_label": "s_inhibition:8.10.v@S2",
+        "sender": {
+          "layer": 3,
+          "head": 0,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 10,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.4284229278564453,
+        "effect": -0.17462778091430664
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.5@S2",
+        "receiver_label": "s_inhibition:7.3.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 5,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 3,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.543381452560425,
+        "effect": -0.05966925621032715
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.5@S2",
+        "receiver_label": "s_inhibition:7.9.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 5,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 9,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.247645854949951,
+        "effect": -0.3554048538208008
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.5@S2",
+        "receiver_label": "s_inhibition:8.6.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 5,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 6,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 2.7411179542541504,
+        "effect": -0.8619327545166016
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.5@S2",
+        "receiver_label": "s_inhibition:8.10.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 5,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 10,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.314507007598877,
+        "effect": -0.288543701171875
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.8@S2",
+        "receiver_label": "s_inhibition:7.3.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 8,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 3,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.589043140411377,
+        "effect": -0.014007568359375
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.8@S2",
+        "receiver_label": "s_inhibition:7.9.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 8,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 9,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6151137351989746,
+        "effect": 0.012063026428222656
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.8@S2",
+        "receiver_label": "s_inhibition:8.6.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 8,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 6,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5698492527008057,
+        "effect": -0.03320145606994629
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.8@S2",
+        "receiver_label": "s_inhibition:8.10.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 8,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 10,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.616819381713867,
+        "effect": 0.013768672943115234
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.9@S2",
+        "receiver_label": "s_inhibition:7.3.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 3,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.619492530822754,
+        "effect": 0.016441822052001953
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.9@S2",
+        "receiver_label": "s_inhibition:7.9.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 9,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6355600357055664,
+        "effect": 0.03250932693481445
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.9@S2",
+        "receiver_label": "s_inhibition:8.6.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 6,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.61277437210083,
+        "effect": 0.009723663330078125
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:5.9@S2",
+        "receiver_label": "s_inhibition:8.10.v@S2",
+        "sender": {
+          "layer": 5,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 10,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.621838092803955,
+        "effect": 0.018787384033203125
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:6.9@S2",
+        "receiver_label": "s_inhibition:7.3.v@S2",
+        "sender": {
+          "layer": 6,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 3,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5892539024353027,
+        "effect": -0.013796806335449219
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:6.9@S2",
+        "receiver_label": "s_inhibition:7.9.v@S2",
+        "sender": {
+          "layer": 6,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 7,
+          "head": 9,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.509793519973755,
+        "effect": -0.09325718879699707
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:6.9@S2",
+        "receiver_label": "s_inhibition:8.6.v@S2",
+        "sender": {
+          "layer": 6,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 6,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.326819896697998,
+        "effect": -0.2762308120727539
+      },
+      {
+        "sender_class": "induction",
+        "receiver_class": "s_inhibition",
+        "sender_label": "induction:6.9@S2",
+        "receiver_label": "s_inhibition:8.10.v@S2",
+        "sender": {
+          "layer": 6,
+          "head": 9,
+          "position": "S2"
+        },
+        "receiver": {
+          "layer": 8,
+          "head": 10,
+          "component": "v",
+          "position": "S2"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.526158332824707,
+        "effect": -0.07689237594604492
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "name_movers:9.9.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.531137228012085,
+        "effect": -0.07191348075866699
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "name_movers:10.0.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.51824688911438,
+        "effect": -0.08480381965637207
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "name_movers:9.6.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6150882244110107,
+        "effect": 0.012037515640258789
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "name_movers:9.9.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.4538681507110596,
+        "effect": -0.14918255805969238
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "name_movers:10.0.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.441539764404297,
+        "effect": -0.16151094436645508
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "name_movers:9.6.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6329753398895264,
+        "effect": 0.029924631118774414
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "name_movers:9.9.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.2348928451538086,
+        "effect": -0.36815786361694336
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "name_movers:10.0.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.3413877487182617,
+        "effect": -0.26166296005249023
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "name_movers:9.6.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.702836513519287,
+        "effect": 0.09978580474853516
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "name_movers:9.9.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.4470419883728027,
+        "effect": -0.15600872039794922
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "name_movers:10.0.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.4269442558288574,
+        "effect": -0.17610645294189453
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "name_movers:9.6.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6344244480133057,
+        "effect": 0.03137373924255371
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:10.10.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5568718910217285,
+        "effect": -0.04617881774902344
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:10.6.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5532729625701904,
+        "effect": -0.04977774620056152
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:10.2.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.563488006591797,
+        "effect": -0.03956270217895508
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:10.1.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 1,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5758681297302246,
+        "effect": -0.027182579040527344
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:11.2.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5270941257476807,
+        "effect": -0.07595658302307129
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:9.7.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.579921007156372,
+        "effect": -0.023129701614379883
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:9.0.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6031410694122314,
+        "effect": 9.036064147949219e-05
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "backup_name_movers:11.9.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5853519439697266,
+        "effect": -0.01769876480102539
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:10.10.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5267081260681152,
+        "effect": -0.07634258270263672
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:10.6.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5309598445892334,
+        "effect": -0.07209086418151855
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:10.2.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.543961524963379,
+        "effect": -0.05908918380737305
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:10.1.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 1,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5538687705993652,
+        "effect": -0.04918193817138672
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:11.2.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5138535499572754,
+        "effect": -0.08919715881347656
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:9.7.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5792884826660156,
+        "effect": -0.023762226104736328
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:9.0.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6020965576171875,
+        "effect": -0.0009541511535644531
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "backup_name_movers:11.9.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5709426403045654,
+        "effect": -0.03210806846618652
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:10.10.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.473599433898926,
+        "effect": -0.12945127487182617
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:10.6.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.4806418418884277,
+        "effect": -0.12240886688232422
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:10.2.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.508321762084961,
+        "effect": -0.09472894668579102
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:10.1.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 1,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.510190486907959,
+        "effect": -0.09286022186279297
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:11.2.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.549201011657715,
+        "effect": -0.05384969711303711
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:9.7.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5745277404785156,
+        "effect": -0.028522968292236328
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:9.0.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.609644889831543,
+        "effect": 0.006594181060791016
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "backup_name_movers:11.9.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.57206130027771,
+        "effect": -0.030989408493041992
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:10.10.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5354909896850586,
+        "effect": -0.06755971908569336
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:10.6.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 6,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5053319931030273,
+        "effect": -0.09771871566772461
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:10.2.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.512068510055542,
+        "effect": -0.09098219871520996
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:10.1.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 1,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.550203561782837,
+        "effect": -0.05284714698791504
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:11.2.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 2,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.41507625579834,
+        "effect": -0.1879744529724121
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:9.7.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6510534286499023,
+        "effect": 0.04800271987915039
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:9.0.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 9,
+          "head": 0,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.595717668533325,
+        "effect": -0.007333040237426758
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "backup_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "backup_name_movers:11.9.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 9,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.547478199005127,
+        "effect": -0.055572509765625
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "negative_name_movers:10.7.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.632683277130127,
+        "effect": 0.029632568359375
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:7.3@END",
+        "receiver_label": "negative_name_movers:11.10.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 3,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.63419246673584,
+        "effect": 0.03114175796508789
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "negative_name_movers:10.7.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6266915798187256,
+        "effect": 0.023640871047973633
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:7.9@END",
+        "receiver_label": "negative_name_movers:11.10.q@END",
+        "sender": {
+          "layer": 7,
+          "head": 9,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6421890258789062,
+        "effect": 0.0391383171081543
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "negative_name_movers:10.7.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.5924389362335205,
+        "effect": -0.010611772537231445
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:8.6@END",
+        "receiver_label": "negative_name_movers:11.10.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 6,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6476569175720215,
+        "effect": 0.04460620880126953
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "negative_name_movers:10.7.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 10,
+          "head": 7,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.686166286468506,
+        "effect": 0.0831155776977539
+      },
+      {
+        "sender_class": "s_inhibition",
+        "receiver_class": "negative_name_movers",
+        "sender_label": "s_inhibition:8.10@END",
+        "receiver_label": "negative_name_movers:11.10.q@END",
+        "sender": {
+          "layer": 8,
+          "head": 10,
+          "position": "END"
+        },
+        "receiver": {
+          "layer": 11,
+          "head": 10,
+          "component": "q",
+          "position": "END"
+        },
+        "baseline": 3.603050708770752,
+        "patched": 3.6656219959259033,
+        "effect": 0.06257128715515137
+      }
+    ],
+    "sender_labels": [
+      "previous_token:2.2@S1+1",
+      "previous_token:4.11@S1+1",
+      "duplicate_token:0.1@S2",
+      "duplicate_token:0.10@S2",
+      "duplicate_token:3.0@S2",
+      "induction:5.5@S2",
+      "induction:5.8@S2",
+      "induction:5.9@S2",
+      "induction:6.9@S2",
+      "s_inhibition:7.3@END",
+      "s_inhibition:7.9@END",
+      "s_inhibition:8.6@END",
+      "s_inhibition:8.10@END"
+    ],
+    "receiver_labels": [
+      "induction:5.5.k@S1+1",
+      "induction:5.8.k@S1+1",
+      "induction:5.9.k@S1+1",
+      "induction:6.9.k@S1+1",
+      "s_inhibition:7.3.v@S2",
+      "s_inhibition:7.9.v@S2",
+      "s_inhibition:8.6.v@S2",
+      "s_inhibition:8.10.v@S2",
+      "name_movers:9.9.q@END",
+      "name_movers:10.0.q@END",
+      "name_movers:9.6.q@END",
+      "backup_name_movers:10.10.q@END",
+      "backup_name_movers:10.6.q@END",
+      "backup_name_movers:10.2.q@END",
+      "backup_name_movers:10.1.q@END",
+      "backup_name_movers:11.2.q@END",
+      "backup_name_movers:9.7.q@END",
+      "backup_name_movers:9.0.q@END",
+      "backup_name_movers:11.9.q@END",
+      "negative_name_movers:10.7.q@END",
+      "negative_name_movers:11.10.q@END"
+    ],
+    "effect_matrix": [
+      [
+        -0.05148029327392578,
+        0.0006060600280761719,
+        -0.019212722778320312,
+        -0.0819234848022461,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        -0.2543618679046631,
+        -0.004061698913574219,
+        -0.02556467056274414,
+        -0.20593738555908203,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        -0.02006244659423828,
+        -0.09831905364990234,
+        -0.014587163925170898,
+        -0.06922268867492676,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        -0.018810272216796875,
+        0.024316072463989258,
+        -0.03112649917602539,
+        0.033532142639160156,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        -0.06302475929260254,
+        -0.1300220489501953,
+        -0.10941553115844727,
+        -0.17462778091430664,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        -0.05966925621032715,
+        -0.3554048538208008,
+        -0.8619327545166016,
+        -0.288543701171875,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        -0.014007568359375,
+        0.012063026428222656,
+        -0.03320145606994629,
+        0.013768672943115234,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        0.016441822052001953,
+        0.03250932693481445,
+        0.009723663330078125,
+        0.018787384033203125,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        -0.013796806335449219,
+        -0.09325718879699707,
+        -0.2762308120727539,
+        -0.07689237594604492,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        -0.07191348075866699,
+        -0.08480381965637207,
+        0.012037515640258789,
+        -0.04617881774902344,
+        -0.04977774620056152,
+        -0.03956270217895508,
+        -0.027182579040527344,
+        -0.07595658302307129,
+        -0.023129701614379883,
+        9.036064147949219e-05,
+        -0.01769876480102539,
+        0.029632568359375,
+        0.03114175796508789
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        -0.14918255805969238,
+        -0.16151094436645508,
+        0.029924631118774414,
+        -0.07634258270263672,
+        -0.07209086418151855,
+        -0.05908918380737305,
+        -0.04918193817138672,
+        -0.08919715881347656,
+        -0.023762226104736328,
+        -0.0009541511535644531,
+        -0.03210806846618652,
+        0.023640871047973633,
+        0.0391383171081543
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        -0.36815786361694336,
+        -0.26166296005249023,
+        0.09978580474853516,
+        -0.12945127487182617,
+        -0.12240886688232422,
+        -0.09472894668579102,
+        -0.09286022186279297,
+        -0.05384969711303711,
+        -0.028522968292236328,
+        0.006594181060791016,
+        -0.030989408493041992,
+        -0.010611772537231445,
+        0.04460620880126953
+      ],
+      [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        -0.15600872039794922,
+        -0.17610645294189453,
+        0.03137373924255371,
+        -0.06755971908569336,
+        -0.09771871566772461,
+        -0.09098219871520996,
+        -0.05284714698791504,
+        -0.1879744529724121,
+        0.04800271987915039,
+        -0.007333040237426758,
+        -0.055572509765625,
+        0.0831155776977539,
+        0.06257128715515137
+      ]
+    ]
+  },
   "transformerlens_direct_path_all_positions": {
     "duplicate_3.0_to_s_inhibition_7.3_v": {
-      "baseline": 3.0995378494262695,
-      "patched": 3.002220630645752,
-      "effect": -0.09731721878051758,
+      "baseline": 3.603050708770752,
+      "patched": 3.5572609901428223,
+      "effect": -0.04578971862792969,
       "position_scope": "all_positions",
       "other_readers": "original source write"
     },
     "induction_5.5_to_s_inhibition_7.3_v": {
-      "baseline": 3.0995378494262695,
-      "patched": 2.9342880249023438,
-      "effect": -0.16524982452392578,
+      "baseline": 3.603050708770752,
+      "patched": 3.5525825023651123,
+      "effect": -0.05046820640563965,
       "position_scope": "all_positions",
       "other_readers": "original source write"
     },
     "s_inhibition_7.3_to_name_mover_9.9_q": {
-      "baseline": 3.0995378494262695,
-      "patched": 2.986328125,
-      "effect": -0.11320972442626953,
+      "baseline": 3.603050708770752,
+      "patched": 3.5380144119262695,
+      "effect": -0.06503629684448242,
       "position_scope": "all_positions",
       "other_readers": "original source write"
     }

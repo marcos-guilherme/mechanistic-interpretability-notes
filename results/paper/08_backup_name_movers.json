@@ -12,7 +12,16 @@
     "device": "cuda",
     "gpu": "NVIDIA GeForce RTX 3050",
     "reference_batch_size": 16,
-    "mean_ablation": "pABC exact (pattern, template_id), absolute position, hook_result"
+    "mean_ablation": "pABC exact (pattern, template_id), absolute position, hook_result",
+    "transformer_lens_compatibility_mode": {
+      "disable_warnings": false,
+      "no_processing": false,
+      "fold_ln": true,
+      "center_writing_weights": true,
+      "center_unembed": true,
+      "fold_value_biases": true,
+      "refactor_factored_attn_matrices": false
+    }
   },
   "reference": {
     "group_counts": {
@@ -57,18 +66,18 @@
     "sha256": "e157407aba5515c941915a94e76663662ff0de7c019889ed39bd3a8dd23562f9"
   },
   "traceability": {
-    "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+    "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911",
     "source_sha256": {
       "paper/ablation.py": "6fe5a64e8883ea1f850d56eea5bbe094fba5a79001819b2502416d4a5c4c48a2",
       "paper/backup.py": "e3199b16a23ae3a03b29f2da8a8c8f7bef865927148c079c32a565dafd0d7644",
       "paper/dataset.py": "ef158efe2d2334347225a88538a42da83cc0f5509e048d143360ced42155c7b4",
-      "paper/circuit.py": "63cb16e4c1506978377db74cc74d670e0040212f1e96c6c9ebfb385b9406a470",
+      "paper/circuit.py": "9a47036cbb708dfd5fd93d1ee1d87fa87262e4e6872427932d5387ccf5b56d03",
       "paper/metrics.py": "dbc2d6f328190006df64056469b48d641b5a94aad88934588bf444aefa0f36b4"
     },
     "git_dirty": true,
     "torch_version": "2.15.0+cu132",
     "transformer_lens_version": "4.3.0",
-    "timestamp_utc": "2026-11-10T07:40:02.760751Z"
+    "timestamp_utc": "2026-11-10T08:38:49.261413Z"
   },
   "logit_difference": {
     "baseline": {

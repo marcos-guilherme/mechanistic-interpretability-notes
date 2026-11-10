@@ -23,7 +23,16 @@
     "greedy_steps": 10,
     "greedy_candidate_limit": 10,
     "target_dataset_sha256": "716e2c278f567c853436c29309e535803b03728b92a1d092a144d05b4d9a14e2",
-    "reference_dataset_sha256": "3f98abae7d056fd626f5567c0dfd0ddee7936fc746e98fa45b87cf490ab3c3d4"
+    "reference_dataset_sha256": "3f98abae7d056fd626f5567c0dfd0ddee7936fc746e98fa45b87cf490ab3c3d4",
+    "transformer_lens_compatibility_mode": {
+      "disable_warnings": false,
+      "no_processing": false,
+      "fold_ln": true,
+      "center_writing_weights": true,
+      "center_unembed": true,
+      "fold_value_biases": true,
+      "refactor_factored_attn_matrices": false
+    }
   },
   "reference": {
     "kind": "balanced_pABC",
@@ -5265,6 +5274,12 @@
       }
     ]
   },
+  "minimality_summary": {
+    "point_above_threshold": 26,
+    "ci95_above_threshold": 24,
+    "total": 26,
+    "threshold_fraction": 0.01
+  },
   "minimality": [
     {
       "node": "9.9@END",
@@ -6113,19 +6128,19 @@
     }
   ],
   "traceability": {
-    "source_commit": "2a0f42054f78bf49b20284846dc3083e7226dd6b",
+    "source_commit": "e88048c460f27992ba221fdaceb7052c219e2911",
     "git_dirty": true,
     "hash_method": "git rev-parse <source_commit>:<path> (normalized Git blob IDs)",
     "source_blobs": {
       "validation": "7173739fcdbad20c5fd3efca39565b4d51c438c2",
       "ablation": "7f8fb87b05935f2823eec2030c61fb9241e9d03e",
-      "circuit": "5130b1c11af01e135f7cbaf7ba7556f53c076e58",
-      "runtime": "6815d71ebca30bd9d324d1e527306bcb653c0d05",
-      "notebook": "f6646f220fd346d586e60a3bb37950b54c59abde"
+      "circuit": "3a47ecb64b9e2bc80988028d1ca66e1ff39c2256",
+      "runtime": "b02f607d784e2986a80b98027e2b54f55469ba06",
+      "notebook": "e807758a3ddfb02cdadc0b37454b934019f47226"
     },
     "torch_version": "2.15.0+cu132",
     "transformer_lens_version": "4.3.0",
-    "timestamp_utc": "2026-11-10T07:53:17.057543Z",
+    "timestamp_utc": "2026-11-10T08:52:07.094281Z",
     "cached_unique_evaluations": 1562,
     "primary_sources": {
       "paper": "https://arxiv.org/abs/2211.00593",

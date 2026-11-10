@@ -77,14 +77,14 @@ Times below are from the fresh CUDA execution recorded in the manifest.
 Peak VRAM was not instrumented, so the table states the tested capacity rather
 than inventing a peak measurement.
 
-| Notebook | Seeds | Target / reference N | Batches | Prior time | Tested VRAM |
+| Notebook | Seeds | Target / reference N | Batches | Fresh time | Tested VRAM |
 |---|---|---:|---:|---:|---:|
 | 05 baseline | 42 | 256 / — | 32 | 0:26 | 6 GiB |
-| 06 diagnostic validation | 106 | 64 / matched ABC | full batch | pending fresh run | 6 GiB |
-| 07 published path grid | 107 | 64 / matched ABC | full batch | pending fresh run | 6 GiB |
-| 08 backups | 308 / 309 | 16 / 300 (10×30 groups) | target full / ref 16 | 0:32 | 6 GiB |
-| 09 validation | 409 / 410 / 411 | 100 / 300 (10×30 groups) | target 50 / ref 16 | 13:17 | 6 GiB |
-| 10 adversarial | base 510; IO 511; double IO 512; S 513 | 500 / — | 16 | 0:35 | 6 GiB |
+| 06 diagnostic validation | 106 | 64 / matched ABC | full batch | 13:47 | 6 GiB |
+| 07 published path grid | 107 | 64 / matched ABC | full batch | 9:22 | 6 GiB |
+| 08 backups | 308 / 309 | 16 / 300 (10×30 groups) | target full / ref 16 | 0:35 | 6 GiB |
+| 09 validation | 409 / 410 / 411 | 100 / 300 (10×30 groups) | target 50 / ref 16 | 13:20 | 6 GiB |
+| 10 adversarial | base 510; IO 511; double IO 512; S 513 | 500 / — | 16 | 0:37 | 6 GiB |
 
 Notebook 09 keeps all **10 random subsets, 10 greedy runs, 10 greedy steps, and
 10 candidates per step**. The reference in 08–09 is independently sampled,
