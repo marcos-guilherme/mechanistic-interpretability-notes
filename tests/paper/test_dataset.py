@@ -236,6 +236,33 @@ def test_balanced_dataset_rejects_nonpositive_group_size() -> None:
         )
 
 
+def test_dataset_can_restrict_the_historical_mixed_template_population() -> None:
+    dataset = build_paired_dataset(
+        WhitespaceTokenizer(),
+        n=500,
+        seed=37,
+        pattern="mixed",
+        allowed_template_ids=range(7),
+    )
+
+    assert set(dataset.template_ids.tolist()) == set(range(7))
+    assert {item.pattern for item in dataset.metadata} == {"ABBA", "BABA"}
+    assert set(dataset.groups) == {
+        (pattern, template_id)
+        for pattern in ("ABBA", "BABA")
+        for template_id in range(7)
+    }
+
+
+def test_dataset_rejects_invalid_allowed_template_population() -> None:
+    tokenizer = WhitespaceTokenizer()
+
+    with pytest.raises(ValueError, match="allowed_template_ids"):
+        build_paired_dataset(tokenizer, n=2, allowed_template_ids=[])
+    with pytest.raises(ValueError, match="allowed_template_ids"):
+        build_paired_dataset(tokenizer, n=2, allowed_template_ids=[0, 15])
+
+
 @pytest.mark.parametrize("pattern", ["BABA", "ABBA", "mixed"])
 def test_semantic_positions_point_to_the_expected_tokens(pattern: str) -> None:
     dataset = build_paired_dataset(

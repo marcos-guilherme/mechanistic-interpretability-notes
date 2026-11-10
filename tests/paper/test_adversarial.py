@@ -12,6 +12,7 @@ from ioi_replication.paper.adversarial import (
     DOUBLE_ADVERSARIAL_TEMPLATES,
     EASY_TRANSFORMER_SOURCE_COMMIT,
     PAPER_ADVERSARIAL_TARGETS,
+    PAPER_FIGURE_8_TARGETS,
     build_adversarial_dataset,
     insert_adversarial_clauses,
     paired_adversarial_metrics,
@@ -84,6 +85,7 @@ def test_adversarial_api_is_exported_from_paper_package() -> None:
     assert paper.build_adversarial_dataset is build_adversarial_dataset
     assert paper.paired_adversarial_metrics is paired_adversarial_metrics
     assert paper.PAPER_ADVERSARIAL_TARGETS is PAPER_ADVERSARIAL_TARGETS
+    assert paper.PAPER_FIGURE_8_TARGETS is PAPER_FIGURE_8_TARGETS
 
 
 def test_historical_adversarial_templates_and_source_are_literal() -> None:
@@ -106,6 +108,23 @@ def test_historical_adversarial_templates_and_source_are_literal() -> None:
     assert PAPER_ADVERSARIAL_TARGETS == {
         "adversarial_logit_difference": 1.23,
         "adversarial_s_wins_error_rate": 0.234,
+    }
+    assert PAPER_FIGURE_8_TARGETS == {
+        "baseline": {
+            "logit_difference": 3.55,
+            "io_probability": 0.49,
+            "s_wins_error_rate": 0.007,
+        },
+        "paper_s_single": {
+            "logit_difference": 3.64,
+            "io_probability": 0.59,
+            "s_wins_error_rate": 0.004,
+        },
+        "paper_io_single": {
+            "logit_difference": 1.23,
+            "io_probability": 0.36,
+            "s_wins_error_rate": 0.234,
+        },
     }
 
 
@@ -142,9 +161,27 @@ def test_insertion_matches_advex_middle_punctuation_semantics() -> None:
 
 def test_dataset_is_deterministic_and_uses_historical_double_choice_order() -> None:
     tokenizer = WhitespaceTokenizer()
-    first = build_adversarial_dataset(tokenizer, n=12, seed=17)
-    repeated = build_adversarial_dataset(tokenizer, n=12, seed=17)
-    different = build_adversarial_dataset(tokenizer, n=12, seed=18)
+    first = build_adversarial_dataset(
+        tokenizer,
+        n=12,
+        base_seed=7,
+        attack_seed=17,
+        clause_count="double",
+    )
+    repeated = build_adversarial_dataset(
+        tokenizer,
+        n=12,
+        base_seed=7,
+        attack_seed=17,
+        clause_count="double",
+    )
+    different = build_adversarial_dataset(
+        tokenizer,
+        n=12,
+        base_seed=7,
+        attack_seed=18,
+        clause_count="double",
+    )
 
     assert first.base_prompts == repeated.base_prompts
     assert first.adversarial_prompts == repeated.adversarial_prompts
@@ -155,13 +192,116 @@ def test_dataset_is_deterministic_and_uses_historical_double_choice_order() -> N
     )
     assert first.metadata[0].adversarial_template == expected_first_template
     assert first.prepend_bos is False
+    assert first.base_seed == 7
+    assert first.attack_seed == 17
+
+
+def test_base_and_attack_seeds_control_only_their_own_sampling() -> None:
+    tokenizer = WhitespaceTokenizer()
+    first = build_adversarial_dataset(
+        tokenizer,
+        n=40,
+        base_seed=101,
+        attack_seed=201,
+        role="IO",
+        clause_count="single",
+        allowed_template_ids=range(7),
+    )
+    changed_attack = build_adversarial_dataset(
+        tokenizer,
+        n=40,
+        base_seed=101,
+        attack_seed=202,
+        role="IO",
+        clause_count="single",
+        allowed_template_ids=range(7),
+    )
+    changed_base = build_adversarial_dataset(
+        tokenizer,
+        n=40,
+        base_seed=102,
+        attack_seed=201,
+        role="IO",
+        clause_count="single",
+        allowed_template_ids=range(7),
+    )
+
+    assert first.base_prompts == changed_attack.base_prompts
+    assert first.adversarial_prompts != changed_attack.adversarial_prompts
+    assert [
+        item.adversarial_template for item in first.metadata
+    ] == [
+        item.adversarial_template for item in changed_base.metadata
+    ]
+    assert first.base_prompts != changed_base.base_prompts
+
+
+@pytest.mark.parametrize(
+    ("role", "role_occurrences", "other_occurrences"),
+    [("IO", 3, 2), ("S", 3, 2)],
+)
+def test_single_clause_attack_tracks_inserted_role_occurrence(
+    role: str,
+    role_occurrences: int,
+    other_occurrences: int,
+) -> None:
+    dataset = build_adversarial_dataset(
+        WhitespaceTokenizer(),
+        n=80,
+        base_seed=9,
+        attack_seed=19,
+        role=role,
+        clause_count="single",
+        allowed_template_ids=range(7),
+    )
+
+    assert dataset.attack_role == role
+    assert dataset.clause_count == "single"
+    assert dataset.inserted_positions.shape == (len(dataset), 1)
+    assert set(dataset.template_ids.tolist()) == set(range(7))
+    assert {item.pattern for item in dataset.metadata} == {"ABBA", "BABA"}
+    assert dataset.metadata[0].adversarial_template == random.Random(
+        19
+    ).choice(ADVERSARIAL_CLAUSE_TEMPLATES)
+    assert torch.equal(
+        dataset.adversarial_positions["END"],
+        dataset.adversarial_attention_mask.sum(dim=1) - 2,
+    )
+    assert not torch.equal(
+        dataset.base_positions["S2"],
+        dataset.adversarial_positions["S2"],
+    )
+    for row in range(len(dataset)):
+        length = int(dataset.adversarial_attention_mask[row].sum())
+        io_matches = (
+            dataset.adversarial_tokens[row, :length]
+            == dataset.io_token_ids[row]
+        ).nonzero().flatten()
+        s_matches = (
+            dataset.adversarial_tokens[row, :length]
+            == dataset.s_token_ids[row]
+        ).nonzero().flatten()
+        attacked_matches = io_matches if role == "IO" else s_matches
+        other_matches = s_matches if role == "IO" else io_matches
+        assert len(attacked_matches) == role_occurrences
+        assert len(other_matches) == other_occurrences
+        assert dataset.inserted_positions[row, 0] in attacked_matches
+        assert dataset.inserted_positions[row, 0] not in {
+            int(dataset.adversarial_positions["IO"][row]),
+            int(dataset.adversarial_positions["S1"][row]),
+            int(dataset.adversarial_positions["S2"][row]),
+        }
 
 
 def test_names_positions_and_inserted_occurrences_are_distinct() -> None:
     dataset = build_adversarial_dataset(
         WhitespaceTokenizer(),
         n=40,
-        seed=9,
+        base_seed=9,
+        attack_seed=10,
+        role="IO",
+        clause_count="double",
+        allowed_template_ids=range(7),
     )
     rows = torch.arange(len(dataset))
 
@@ -195,13 +335,14 @@ def test_names_positions_and_inserted_occurrences_are_distinct() -> None:
         ],
         dataset.s_token_ids,
     )
-    assert dataset.extra_io_positions.shape == (len(dataset), 2)
+    assert dataset.inserted_positions.shape == (len(dataset), 2)
+    assert torch.equal(dataset.extra_io_positions, dataset.inserted_positions)
     assert torch.all(
         dataset.adversarial_positions["IO"][:, None]
-        < dataset.extra_io_positions
+        < dataset.inserted_positions
     )
     assert torch.all(
-        dataset.extra_io_positions
+        dataset.inserted_positions
         < dataset.adversarial_positions["S2"][:, None]
     )
     assert not torch.equal(
@@ -215,7 +356,7 @@ def test_names_positions_and_inserted_occurrences_are_distinct() -> None:
             == dataset.io_token_ids[row]
         ).nonzero().flatten()
         assert len(matches) == 4
-        assert torch.equal(matches[1:3], dataset.extra_io_positions[row])
+        assert torch.equal(matches[1:3], dataset.inserted_positions[row])
 
 
 def test_end_positions_follow_each_prompts_own_unpadded_length() -> None:
@@ -246,6 +387,18 @@ def test_dataset_validates_configuration() -> None:
         build_adversarial_dataset(
             WhitespaceTokenizer(padding_side="left"),
             n=2,
+        )
+    with pytest.raises(ValueError, match="role"):
+        build_adversarial_dataset(
+            WhitespaceTokenizer(),
+            n=2,
+            role="invalid",
+        )
+    with pytest.raises(ValueError, match="clause_count"):
+        build_adversarial_dataset(
+            WhitespaceTokenizer(),
+            n=2,
+            clause_count="invalid",
         )
 
 
@@ -301,6 +454,15 @@ def test_paired_metrics_use_per_example_deltas_and_strict_s_wins() -> None:
         1.0,
         0.0,
     ]
+    assert result.s_wins_error_rate.baseline.ci_method == "wilson"
+    assert result.s_wins_error_rate.adversarial.ci_method == "wilson"
+    assert result.s_wins_error_rate.delta.ci_method == (
+        "normal_paired_1.96_se"
+    )
+    assert 0 <= result.s_wins_error_rate.baseline.ci95[0]
+    assert result.s_wins_error_rate.baseline.ci95[1] <= 1
+    assert 0 <= result.s_wins_error_rate.adversarial.ci95[0]
+    assert result.s_wins_error_rate.adversarial.ci95[1] <= 1
     expected_se = torch.tensor([-2.0, -3.0, 1.0]).std(
         unbiased=True
     ).item() / 3**0.5

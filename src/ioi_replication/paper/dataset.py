@@ -356,6 +356,7 @@ def build_paired_dataset(
     n: int = 500,
     seed: int = 0,
     pattern: Literal["BABA", "ABBA", "mixed"] = "mixed",
+    allowed_template_ids: Sequence[int] | None = None,
     _group_schedule: Sequence[tuple[str, int]] | None = None,
 ) -> PairedIOIDataset:
     """Generate deterministic, token-aligned pIOI/pABC examples.
@@ -369,12 +370,30 @@ def build_paired_dataset(
         raise ValueError("n must be positive")
     if pattern not in {"BABA", "ABBA", "mixed"}:
         raise ValueError("pattern must be 'BABA', 'ABBA', or 'mixed'")
+    selected_template_ids = (
+        tuple(range(len(BABA_TEMPLATES)))
+        if allowed_template_ids is None
+        else tuple(allowed_template_ids)
+    )
+    if (
+        not selected_template_ids
+        or len(set(selected_template_ids)) != len(selected_template_ids)
+        or any(
+            isinstance(template_id, bool)
+            or not isinstance(template_id, int)
+            or not 0 <= template_id < len(BABA_TEMPLATES)
+            for template_id in selected_template_ids
+        )
+    ):
+        raise ValueError(
+            "allowed_template_ids must be unique valid template indices"
+        )
     if _group_schedule is not None:
         if len(_group_schedule) != n:
             raise ValueError("group schedule must have one entry per example")
         if any(
             scheduled_pattern not in {"ABBA", "BABA"}
-            or not 0 <= template_id < len(BABA_TEMPLATES)
+            or template_id not in selected_template_ids
             for scheduled_pattern, template_id in _group_schedule
         ):
             raise ValueError("group schedule entries must be valid pattern/template pairs")
@@ -394,7 +413,7 @@ def build_paired_dataset(
 
     for example_index in range(n):
         if _group_schedule is None:
-            template_id = rng.randrange(len(BABA_TEMPLATES))
+            template_id = rng.choice(selected_template_ids)
             selected_pattern = (
                 rng.choice(("BABA", "ABBA")) if pattern == "mixed" else pattern
             )

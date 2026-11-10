@@ -1,10 +1,10 @@
-"""Matched adversarial IOI examples from the historical ``advex.py``.
+"""Matched Figure 8 and historical ``advex.py`` IOI examples.
 
-The literal templates and insertion algorithm are ported from
+The literal templates are shared by Appendix L and
 ``Easy-Transformer/easy_transformer/advex.py`` at commit
-``ea15315dd24481e9e2ac5c3ef335d82907a1dc34``.  The historical experiment
-sampled one of all 25 ordered pairs of natural clauses for every prompt and
-inserted it immediately after the template's middle punctuation.
+``ea15315dd24481e9e2ac5c3ef335d82907a1dc34``. Figure 8 inserts one of five
+clauses; ``advex.py`` samples one of their 25 ordered pairs. Both insert at
+the template's middle punctuation.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import hashlib
 import json
 import math
 import random
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 import torch
 
@@ -45,6 +45,24 @@ DOUBLE_ADVERSARIAL_TEMPLATES = tuple(
     for first in ADVERSARIAL_CLAUSE_TEMPLATES
     for second in ADVERSARIAL_CLAUSE_TEMPLATES
 )
+PAPER_FIGURE_8_TARGETS = {
+    "baseline": {
+        "logit_difference": 3.55,
+        "io_probability": 0.49,
+        "s_wins_error_rate": 0.007,
+    },
+    "paper_s_single": {
+        "logit_difference": 3.64,
+        "io_probability": 0.59,
+        "s_wins_error_rate": 0.004,
+    },
+    "paper_io_single": {
+        "logit_difference": 1.23,
+        "io_probability": 0.36,
+        "s_wins_error_rate": 0.234,
+    },
+}
+# Backward-compatible projection of the Figure 8 paper-IO-single row.
 PAPER_ADVERSARIAL_TARGETS = {
     "adversarial_logit_difference": 1.23,
     "adversarial_s_wins_error_rate": 0.234,
@@ -56,6 +74,8 @@ CI95_Z = 1.959963984540054
 class AdversarialPromptMetadata:
     base: PromptMetadata
     adversarial_template: str
+    attack_role: Literal["IO", "S"]
+    clause_count: Literal["single", "double"]
 
     @property
     def io_name(self) -> str:
@@ -86,11 +106,16 @@ class MatchedAdversarialDataset:
     adversarial_attention_mask: torch.Tensor
     base_positions: dict[str, torch.Tensor]
     adversarial_positions: dict[str, torch.Tensor]
-    extra_io_positions: torch.Tensor
+    inserted_positions: torch.Tensor
     io_token_ids: torch.Tensor
     s_token_ids: torch.Tensor
+    template_ids: torch.Tensor
     metadata: list[AdversarialPromptMetadata]
-    seed: int
+    base_seed: int
+    attack_seed: int
+    attack_role: Literal["IO", "S"]
+    clause_count: Literal["single", "double"]
+    allowed_template_ids: tuple[int, ...]
     prepend_bos: bool = False
 
     def __len__(self) -> int:
@@ -101,6 +126,24 @@ class MatchedAdversarialDataset:
         return len(self)
 
     @property
+    def seed(self) -> int:
+        """Backward-compatible alias for the base generation seed."""
+        return self.base_seed
+
+    @property
+    def extra_io_positions(self) -> torch.Tensor:
+        """Backward-compatible IO insertion positions."""
+        if self.attack_role == "IO":
+            return self.inserted_positions
+        return torch.empty((len(self), 0), dtype=torch.long)
+
+    @property
+    def extra_s_positions(self) -> torch.Tensor:
+        if self.attack_role == "S":
+            return self.inserted_positions
+        return torch.empty((len(self), 0), dtype=torch.long)
+
+    @property
     def dataset_sha256(self) -> str:
         payload = {
             "base_prompts": self.base_prompts,
@@ -108,7 +151,11 @@ class MatchedAdversarialDataset:
             "templates": [
                 item.adversarial_template for item in self.metadata
             ],
-            "seed": self.seed,
+            "base_seed": self.base_seed,
+            "attack_seed": self.attack_seed,
+            "attack_role": self.attack_role,
+            "clause_count": self.clause_count,
+            "allowed_template_ids": self.allowed_template_ids,
             "prepend_bos": self.prepend_bos,
         }
         canonical = json.dumps(
@@ -126,6 +173,7 @@ class MeanEstimate:
     mean: float
     standard_error: float
     ci95: tuple[float, float]
+    ci_method: str
 
 
 @dataclass(frozen=True)
@@ -145,18 +193,26 @@ class PairedAdversarialMetrics:
 def insert_adversarial_clauses(
     prompt: str,
     *,
-    io_name: str,
+    io_name: str | None = None,
+    role_name: str | None = None,
     template: str,
 ) -> str:
-    """Insert a filled double clause at the historical middle punctuation."""
-    if template.count("[A]") != 2:
-        raise ValueError("adversarial template must contain exactly two [A] slots")
+    """Insert one or two filled clauses at the historical middle punctuation."""
+    if (io_name is None) == (role_name is None):
+        raise ValueError("provide exactly one of io_name or role_name")
+    if template.count("[A]") not in {1, 2}:
+        raise ValueError(
+            "adversarial template must contain one or two [A] slots"
+        )
     punctuation_index = (
         prompt.rfind(".") if "." in prompt else prompt.rfind(",")
     )
     if punctuation_index < 0:
         raise ValueError("base prompt must contain middle punctuation")
-    clauses = template.replace("[A]", io_name)
+    clauses = template.replace(
+        "[A]",
+        io_name if io_name is not None else role_name,
+    )
     return (
         prompt[: punctuation_index + 1]
         + clauses
@@ -169,6 +225,9 @@ def _find_adversarial_positions(
     attention_mask: torch.Tensor,
     io_token_ids: torch.Tensor,
     s_token_ids: torch.Tensor,
+    *,
+    attack_role: Literal["IO", "S"],
+    inserted_count: int,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     positions = {"IO": [], "S1": [], "S2": [], "S1+1": [], "END": []}
     extras: list[list[int]] = []
@@ -177,28 +236,35 @@ def _find_adversarial_positions(
         row_tokens = tokens[row, :length]
         io_matches = (row_tokens == io_token_ids[row]).nonzero().flatten()
         s_matches = (row_tokens == s_token_ids[row]).nonzero().flatten()
-        if len(io_matches) != 4:
+        expected_io_count = 2 + (
+            inserted_count if attack_role == "IO" else 0
+        )
+        expected_s_count = 2 + (
+            inserted_count if attack_role == "S" else 0
+        )
+        if len(io_matches) != expected_io_count:
             raise ValueError(
-                "the IO name must occur twice in the base prompt and twice "
-                "in the inserted clauses"
+                f"the IO name must occur exactly {expected_io_count} times"
             )
-        if len(s_matches) != 2:
+        if len(s_matches) != expected_s_count:
             raise ValueError(
-                "the subject name must occur exactly twice in every prompt"
+                f"the subject name must occur exactly {expected_s_count} times"
             )
         if row_tokens[-1] != io_token_ids[row]:
             raise ValueError("the final token must be the IO answer")
         io = int(io_matches[0].item())
         s1 = int(s_matches[0].item())
-        s2 = int(s_matches[1].item())
+        s2 = int(s_matches[-1].item())
+        attacked_matches = io_matches if attack_role == "IO" else s_matches
         row_extras = [
-            int(io_matches[1].item()),
-            int(io_matches[2].item()),
+            int(position.item()) for position in attacked_matches[1:-1]
         ]
-        if not (io < row_extras[0] < row_extras[1] < s2):
+        if len(row_extras) != inserted_count or not all(
+            max(io, s1) < position < s2 for position in row_extras
+        ):
             raise ValueError(
-                "inserted IO occurrences must be between the introductory "
-                "IO and S2"
+                "inserted role occurrences must be distinct from IO/S1/S2 "
+                "and lie before S2"
             )
         positions["IO"].append(io)
         positions["S1"].append(s1)
@@ -219,33 +285,66 @@ def build_adversarial_dataset(
     tokenizer: Any,
     *,
     n: int = 500,
-    seed: int = 0,
+    seed: int | None = None,
+    base_seed: int = 0,
+    attack_seed: int = 0,
+    role: Literal["IO", "S"] = "IO",
+    clause_count: Literal["single", "double"] = "double",
     pattern: Literal["BABA", "ABBA", "mixed"] = "mixed",
+    allowed_template_ids: Sequence[int] | None = None,
 ) -> MatchedAdversarialDataset:
-    """Build deterministic matched IOI and historical adversarial prompts.
+    """Build deterministic matched base and role-duplication prompts.
 
-    The base IOI examples use the project's paper-faithful generator.  A
-    dedicated seeded RNG then reproduces ``rd.choice(DOUBLE_ADX_TEMPLATE)`` for
-    each row.  This makes the originally unseeded attack sampling reproducible
-    without changing its uniform distribution or ordered-pair support.
+    ``single`` samples one of the five Figure 8 clauses. ``double`` samples one
+    of the 25 ordered pairs from historical ``advex.py``. Base prompt sampling
+    and clause sampling use independent RNGs. ``seed`` remains as a legacy
+    alias which sets both seeds when the new arguments retain their defaults.
     """
     if n <= 0:
         raise ValueError("n must be positive")
+    if role not in {"IO", "S"}:
+        raise ValueError("role must be 'IO' or 'S'")
+    if clause_count not in {"single", "double"}:
+        raise ValueError("clause_count must be 'single' or 'double'")
+    if seed is not None:
+        if base_seed != 0 or attack_seed != 0:
+            raise ValueError(
+                "seed cannot be combined with base_seed or attack_seed"
+            )
+        base_seed = seed
+        attack_seed = seed
+    selected_template_ids = (
+        tuple(range(15))
+        if allowed_template_ids is None
+        else tuple(allowed_template_ids)
+    )
     base = build_paired_dataset(
         tokenizer,
         n=n,
-        seed=seed,
+        seed=base_seed,
         pattern=pattern,
+        allowed_template_ids=selected_template_ids,
     )
-    rng = random.Random(seed)
+    attack_templates = (
+        ADVERSARIAL_CLAUSE_TEMPLATES
+        if clause_count == "single"
+        else DOUBLE_ADVERSARIAL_TEMPLATES
+    )
+    inserted_count = 1 if clause_count == "single" else 2
+    rng = random.Random(attack_seed)
     metadata: list[AdversarialPromptMetadata] = []
     adversarial_prompts: list[str] = []
     for prompt, base_metadata in zip(base.ioi_prompts, base.metadata):
-        adversarial_template = rng.choice(DOUBLE_ADVERSARIAL_TEMPLATES)
+        adversarial_template = rng.choice(attack_templates)
+        role_name = (
+            base_metadata.io_name
+            if role == "IO"
+            else base_metadata.subject_name
+        )
         adversarial_prompts.append(
             insert_adversarial_clauses(
                 prompt,
-                io_name=base_metadata.io_name,
+                role_name=role_name,
                 template=adversarial_template,
             )
         )
@@ -253,6 +352,8 @@ def build_adversarial_dataset(
             AdversarialPromptMetadata(
                 base=base_metadata,
                 adversarial_template=adversarial_template,
+                attack_role=role,
+                clause_count=clause_count,
             )
         )
 
@@ -266,6 +367,8 @@ def build_adversarial_dataset(
             adversarial_attention_mask,
             base.io_token_ids,
             base.s_token_ids,
+            attack_role=role,
+            inserted_count=inserted_count,
         )
     )
     rows = torch.arange(n)
@@ -287,15 +390,24 @@ def build_adversarial_dataset(
         adversarial_attention_mask=adversarial_attention_mask,
         base_positions=base.positions,
         adversarial_positions=adversarial_positions,
-        extra_io_positions=extra_io_positions,
+        inserted_positions=extra_io_positions,
         io_token_ids=base.io_token_ids,
         s_token_ids=base.s_token_ids,
+        template_ids=base.template_ids,
         metadata=metadata,
-        seed=seed,
+        base_seed=base_seed,
+        attack_seed=attack_seed,
+        attack_role=role,
+        clause_count=clause_count,
+        allowed_template_ids=selected_template_ids,
     )
 
 
-def _estimate(values: torch.Tensor) -> MeanEstimate:
+def _estimate(
+    values: torch.Tensor,
+    *,
+    ci_method: str = "normal_1.96_se",
+) -> MeanEstimate:
     values = torch.as_tensor(values).detach().float().cpu()
     if values.ndim != 1 or values.numel() == 0:
         raise ValueError("metric values must be a non-empty vector")
@@ -315,21 +427,53 @@ def _estimate(values: torch.Tensor) -> MeanEstimate:
             mean - CI95_Z * standard_error,
             mean + CI95_Z * standard_error,
         ),
+        ci_method=ci_method,
+    )
+
+
+def _proportion_estimate(values: torch.Tensor) -> MeanEstimate:
+    estimate = _estimate(values, ci_method="wilson")
+    n = estimate.values.numel()
+    successes = float(estimate.values.sum().item())
+    denominator = 1 + CI95_Z**2 / n
+    center = (
+        successes / n + CI95_Z**2 / (2 * n)
+    ) / denominator
+    half_width = (
+        CI95_Z
+        * math.sqrt(
+            (successes / n) * (1 - successes / n) / n
+            + CI95_Z**2 / (4 * n**2)
+        )
+        / denominator
+    )
+    return MeanEstimate(
+        values=estimate.values,
+        mean=estimate.mean,
+        standard_error=estimate.standard_error,
+        ci95=(center - half_width, center + half_width),
+        ci_method="wilson",
     )
 
 
 def _paired(
     baseline: torch.Tensor,
     adversarial: torch.Tensor,
+    *,
+    proportion: bool = False,
 ) -> PairedEstimate:
     baseline = torch.as_tensor(baseline).detach().float().cpu()
     adversarial = torch.as_tensor(adversarial).detach().float().cpu()
     if baseline.shape != adversarial.shape:
         raise ValueError("paired metric vectors must have equal shapes")
+    arm_estimate = _proportion_estimate if proportion else _estimate
     return PairedEstimate(
-        baseline=_estimate(baseline),
-        adversarial=_estimate(adversarial),
-        delta=_estimate(adversarial - baseline),
+        baseline=arm_estimate(baseline),
+        adversarial=arm_estimate(adversarial),
+        delta=_estimate(
+            adversarial - baseline,
+            ci_method="normal_paired_1.96_se",
+        ),
     )
 
 
@@ -355,6 +499,7 @@ def summarize_adversarial_values(
         s_wins_error_rate=_paired(
             (baseline_logit_difference < 0).float(),
             (adversarial_logit_difference < 0).float(),
+            proportion=True,
         ),
         io_probability=_paired(
             baseline_io_probability,
