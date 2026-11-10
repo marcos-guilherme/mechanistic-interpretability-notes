@@ -8,6 +8,7 @@ projects/refusal_direction/artifacts/
 projects/refusal_direction/notebooks/*_output.ipynb
 projects/refusal_direction/.venv/
 .colab-staging/
+.worktrees/
 
 # J-space Llama: retain only source and compact aggregate JSON results.
 projects/jspace_llama/.cache/
