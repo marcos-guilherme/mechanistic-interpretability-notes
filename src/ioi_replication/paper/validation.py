@@ -430,13 +430,21 @@ def evaluate_completeness_study(
         for step_index, step in enumerate(run.steps, start=1)
         if step.accepted
     ]
-    top_greedy = tuple(
-        sorted(
-            accepted_intermediates,
-            key=lambda item: item.result.incompleteness,
-            reverse=True,
-        )[:5]
+    ranked_intermediates = sorted(
+        accepted_intermediates,
+        key=lambda item: item.result.incompleteness,
+        reverse=True,
     )
+    top_greedy_list: list[RankedGreedyResult] = []
+    seen_sets: set[tuple[HeadPositionNode, ...]] = set()
+    for item in ranked_intermediates:
+        if item.result.removed in seen_sets:
+            continue
+        seen_sets.add(item.result.removed)
+        top_greedy_list.append(item)
+        if len(top_greedy_list) == 5:
+            break
+    top_greedy = tuple(top_greedy_list)
     return CompletenessStudy(
         empty=evaluate_completeness(evaluator, ()),
         by_class=class_results,

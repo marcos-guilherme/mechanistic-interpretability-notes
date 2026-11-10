@@ -359,11 +359,21 @@ def test_ten_greedy_runs_record_top_five_accepted_intermediate_sets() -> None:
         accepted,
         key=lambda item: item[2].incompleteness,
         reverse=True,
-    )[:5]
+    )
+    unique_expected = []
+    seen_sets = set()
+    for item in expected:
+        if item[2].removed in seen_sets:
+            continue
+        seen_sets.add(item[2].removed)
+        unique_expected.append(item)
+        if len(unique_expected) == 5:
+            break
     assert [
         (item.run_index, item.step_index, item.result)
         for item in study.top_greedy
-    ] == expected
+    ] == unique_expected
+    assert len({item.result.removed for item in study.top_greedy}) == 5
 
 
 def test_minimality_context_validation_rejects_non_circuit_nodes() -> None:
