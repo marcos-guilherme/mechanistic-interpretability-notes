@@ -1,0 +1,12 @@
+{
+  "model_name": "google/gemma-2b-it",
+  "model_revision": "main",
+  "seed": 42,
+  "train_per_class": 128,
+  "validation_per_class": 32,
+  "dtype": "bfloat16",
+  "max_new_tokens": 128,
+  "batch_size": 4,
+  "ce_tolerance": 0.1,
+  "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3"
+}
