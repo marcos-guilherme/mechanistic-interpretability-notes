@@ -1,11 +1,66 @@
-# Mechanistic Interpretability Replications
+# Replicações de interpretabilidade mecanística
 
-This monorepo contains independent, reproducible mechanistic-interpretability studies.
+Criei este repositório para armazenar e documentar meu processo prático de
+entrada na área de interpretabilidade mecanística. Mais do que reunir código,
+quero registrar o caminho que percorri para transformar artigos em
+experimentos executáveis: o que tentei reproduzir, as decisões que tomei, os
+problemas que encontrei e até onde cada resultado realmente permite concluir.
 
-## Projects
+Organizei o trabalho em três estudos. Comecei pelo circuito de identificação
+do objeto indireto em GPT-2 Small, avancei para uma direção causal de recusa no
+Gemma 2B IT e, por fim, preparei uma intervenção conceitual em J-space no
+Llama 3.1 8B Instruct. Nem todas as etapas terminaram da mesma forma: duas
+produziram resultados científicos e a tentativa com J-space ficou inconclusiva
+antes da inferência, por falta de autorização para acessar os pesos do modelo.
+Mantive esse resultado porque a falha operacional também faz parte de um
+processo experimental reproduzível.
 
-- [`projects/ioi`](projects/ioi): GPT-2 Small indirect-object-identification circuit.
-- [`projects/refusal_direction`](projects/refusal_direction): partial refusal-direction replication on Gemma 2B IT, with validated L4 results.
-- [`projects/jspace_llama`](projects/jspace_llama): planned causal J-space milestone on Llama 3.1 8B Instruct; results are not yet available.
+## Como este repositório está organizado
 
-Each project owns its Python environment, notebooks, tests, and results. Run commands from the project directory unless a command explicitly targets `tools/`.
+Separei cada estudo em seu próprio projeto, com ambiente Python, notebooks,
+testes e resultados. A documentação compartilhada conecta esses experimentos:
+
+- o [índice das replicações](docs/replicacoes/README.md) funciona como mapa do
+  trabalho;
+- a [metodologia comum](docs/replicacoes/METODOLOGIA.md) reúne os critérios que
+  passei a aplicar para planejar, executar e avaliar cada reprodução;
+- o [modelo de replicação](docs/replicacoes/MODELO.md) transforma esses
+  critérios em um roteiro reutilizável.
+
+## Estudos
+
+### [Circuito IOI em GPT-2 Small](projects/ioi)
+
+Usei a tarefa de identificação do objeto indireto como primeiro contato com a
+análise de circuitos. O projeto combina uma trilha didática, na qual reconstruí
+as ferramentas passo a passo, e uma trilha mais próxima do artigo, com
+resultados locais para baseline, caminhos causais, *Backup Name Movers*,
+*faithfulness*, *completeness*, *minimality* e protocolos adversariais.
+
+### [Direção de recusa no Gemma 2B IT](projects/refusal_direction)
+
+Depois do circuito distribuído de IOI, investiguei uma hipótese mais compacta:
+se a recusa poderia ser controlada por uma única direção no espaço residual.
+A execução em uma NVIDIA L4 produziu resultados para ablação, adição, controle
+aleatório e preservação. A conclusão é causal, mas permanece restrita ao
+modelo, à seed e ao recorte avaliados.
+
+### [J-space no Llama 3.1 8B Instruct](projects/jspace_llama)
+
+Neste terceiro estudo, preparei uma intervenção sobre um conceito
+intermediário, usando uma J-lens pré-ajustada e a troca `spider → ant`. A
+execução chegou ao ambiente L4 e à resolução dos ativos, mas foi interrompida
+antes de carregar os pesos porque a conta do Hugging Face ainda não tinha
+autorização para o modelo *gated*. Por isso, o resultado é inconclusivo: não
+houve readout, inferência ou intervenção científica.
+
+## Como ler os resultados
+
+Os READMEs e arquivos `PROCESSO.md` contam o raciocínio, as escolhas e os
+limites de cada estudo. Os JSONs em `results/` são as fontes canônicas dos
+números e da proveniência. Procurei manter essas duas camadas separadas para
+que uma narrativa mais acessível não substitua a evidência que a sustenta.
+
+Os comandos devem ser executados a partir do diretório de cada projeto, exceto
+quando apontarem explicitamente para `tools/`. Pesos, caches, credenciais,
+ativações e outros artefatos pesados ou sensíveis permanecem fora do Git.
