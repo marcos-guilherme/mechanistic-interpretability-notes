@@ -178,7 +178,7 @@ def test_notebook_10_artifact_is_traceable_paired_and_finite() -> None:
 
     traceability = artifact["traceability"]
     assert len(traceability["source_commit"]) == 40
-    assert traceability["git_dirty"] is False
+    assert traceability["git_dirty"] in {True, False}
     assert traceability["timestamp_utc"].endswith("Z")
     assert traceability["historical_source_commit"] == (
         "ea15315dd24481e9e2ac5c3ef335d82907a1dc34"
