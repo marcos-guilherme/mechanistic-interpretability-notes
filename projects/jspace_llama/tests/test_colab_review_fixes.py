@@ -435,6 +435,43 @@ def test_bootstrap_replaces_old_project_tree(tmp_path: Path) -> None:
     assert (project / "src" / "fresh.py").read_bytes() == b"fresh"
 
 
+def test_remote_checkout_basename_does_not_shadow_import_package(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "live_namespace_bootstrap")
+    pack = load_module(PACK_PATH, "live_namespace_pack")
+    package_name = "jspace_llama"
+    checkout_basename = bootstrap.PROJECT.name
+    content = tmp_path / "content"
+    source_package = content / checkout_basename / "src" / package_name
+    source_package.mkdir(parents=True)
+    (source_package / "config.py").write_text("VALUE = 1\n", encoding="utf-8")
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            (
+                "import importlib.util; "
+                f"print(importlib.util.find_spec({package_name!r}))"
+            ),
+        ],
+        cwd=content,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "None"
+    assert checkout_basename != package_name
+    assert pack.ROOT.name == checkout_basename
+
+
 def test_pack_rejects_invalid_json(tmp_path: Path) -> None:
     pack = load_module(PACK_PATH, "review_pack_json")
     root = tmp_path / "jspace_llama"
@@ -656,6 +693,7 @@ def test_docs_pin_colab_cli_version() -> None:
         documentation = path.read_text(encoding="utf-8")
         assert "google-colab-cli==0.7.5" in documentation
         assert "uv==0.12.1" in documentation
+        assert "/content/jspace_llama_project" in documentation
 
 
 @pytest.mark.parametrize(

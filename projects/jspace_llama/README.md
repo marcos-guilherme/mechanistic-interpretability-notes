@@ -47,9 +47,12 @@ python tools/colab/run_jspace.py stop
 
 The runner uses ADC authentication and the `jspace-llama` session by default.
 The archive contains only the project inputs needed remotely, and bootstrap
-installs `uv==0.12.1` before exporting the locked environment. `fetch` accepts
-only `results/execution_manifest.json` and `results/final_evaluation.json`;
-both must exist. Notebook execution validates the fresh ignored
+installs `uv==0.12.1` before exporting the locked environment. Bootstrap
+atomically replaces `/content/jspace_llama_project`; this non-package
+basename prevents the `/content` checkout from shadowing the editable
+`jspace_llama` installation as a namespace package. `fetch` accepts only
+`results/execution_manifest.json` and `results/final_evaluation.json`; both
+must exist. Notebook execution validates the fresh ignored
 `_output.ipynb` written by colab-cli and retains it for diagnosis. Execution
 failures leave the Colab session available for diagnosis, so stop it
 explicitly. If L4 allocation is unavailable, stop the partial session and

@@ -10,7 +10,7 @@ import tarfile
 from jspace_llama.jsonio import StrictJSONError, strict_json_loads
 
 
-ROOT = Path("/content/jspace_llama")
+ROOT = Path("/content/jspace_llama_project")
 ARCHIVE = Path("/content/jspace_results.tar.gz")
 SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"

@@ -62,8 +62,11 @@ python tools/colab/run_jspace.py stop
 remote Hugging Face cache without displaying it. `execute` requires both the
 notebook and timeout. It validates the fresh local `_output.ipynb` produced by
 colab-cli and keeps that ignored file for diagnosis. Remote bootstrap installs
-the pinned `uv==0.12.1` before exporting the locked environment. `fetch` fails
-unless both compact aggregate artifacts,
+the pinned `uv==0.12.1` before exporting the locked environment. It replaces
+the remote checkout at `/content/jspace_llama_project`; that basename
+intentionally differs from the import package `jspace_llama`, preventing the
+checkout from shadowing the editable installation when the runtime cwd is
+`/content`. `fetch` fails unless both compact aggregate artifacts,
 `results/execution_manifest.json` and `results/final_evaluation.json`, exist.
 It never downloads raw generations, tensors, model or lens files, caches, or
 credentials. A failed execution intentionally leaves the session running for

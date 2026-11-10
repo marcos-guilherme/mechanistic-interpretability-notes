@@ -15,7 +15,8 @@ from typing import Any
 
 ARCHIVE = Path("/content/jspace_llama.tar.gz")
 DESTINATION = Path("/content")
-PROJECT = DESTINATION / "jspace_llama"
+ARCHIVE_ROOT = "jspace_llama"
+PROJECT = DESTINATION / "jspace_llama_project"
 LOCKED_REQUIREMENTS = Path("/tmp/jspace-locked-requirements.txt")
 SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
@@ -87,7 +88,7 @@ def _validated_member_path(
     if member_path.is_absolute():
         raise ValueError(f"unsafe archive member: {member.name}")
     parts = member_path.parts
-    if len(parts) < 2 or parts[0] != "jspace_llama":
+    if len(parts) < 2 or parts[0] != ARCHIVE_ROOT:
         raise ValueError(f"unsafe archive member: {member.name}")
     if any(part in {"", ".", ".."} for part in parts):
         raise ValueError(f"unsafe archive member: {member.name}")
@@ -128,7 +129,7 @@ def safe_extract(archive: Path, destination: Path) -> Path:
                 with target.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 target.chmod(stat.S_IMODE(member.mode))
-    return destination / "jspace_llama"
+    return destination / ARCHIVE_ROOT
 
 
 def _remove_old_project(project: Path) -> None:
@@ -159,7 +160,9 @@ def replace_project_tree(
     try:
         extracted_project = safe_extract(archive, temporary)
         if not extracted_project.is_dir():
-            raise ValueError("project archive did not create jspace_llama")
+            raise ValueError(
+                f"project archive did not create {ARCHIVE_ROOT}"
+            )
         _remove_old_project(project)
         extracted_project.replace(project)
         return project
