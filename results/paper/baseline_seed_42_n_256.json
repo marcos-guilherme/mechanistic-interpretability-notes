@@ -1,0 +1,29 @@
+{
+  "config": {
+    "batch_size": 32,
+    "device": "cuda",
+    "n_examples": 256,
+    "paper_n_examples": 100000,
+    "pattern": "mixed",
+    "prepend_bos": false,
+    "torch_version": "2.15.0+cu132",
+    "transformer_lens_version": "4.3.0"
+  },
+  "deviation_from_paper": {
+    "io_accuracy": 0.0030937500000000062,
+    "mean_io_probability": 0.04077876567840577,
+    "mean_logit_difference": 0.0694949054718017
+  },
+  "observed": {
+    "io_accuracy": 0.99609375,
+    "mean_io_probability": 0.5307787656784058,
+    "mean_logit_difference": 3.6294949054718018
+  },
+  "paper": "arXiv:2211.00593",
+  "paper_targets": {
+    "io_accuracy": 0.993,
+    "mean_io_probability": 0.49,
+    "mean_logit_difference": 3.56
+  },
+  "seed": 42
+}
