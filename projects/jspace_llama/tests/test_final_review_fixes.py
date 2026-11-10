@@ -128,13 +128,13 @@ def test_success_requires_evaluated_lens_and_readout() -> None:
     ("continuation", "status", "value", "incoherent"),
     [
         ("The answer is eight.", "unique", "eight", False),
-        ("No, eight.", "unique", "eight", False),
+        ("No, eight.", "negated", None, False),
         ("Six.", "unique", "six", False),
         ("not six", "negated", None, False),
         ("six or eight", "conflicting", None, False),
         ("I cannot determine a number.", "no_answer", None, False),
         ("", "no_answer", None, False),
-        ("eight x q z p v", "unique", "eight", True),
+        ("eight x q z p v", "no_answer", None, True),
     ],
 )
 def test_constrained_first_answer_parser_is_adversarial(
@@ -153,6 +153,56 @@ def test_constrained_first_answer_parser_is_adversarial(
 
 
 @pytest.mark.parametrize(
+    ("continuation", "value"),
+    [
+        ("6", "six"),
+        ("six", "six"),
+        ("Six legs.", "six"),
+        ("The answer is six.", "six"),
+        ("A spider has eight legs.", "eight"),
+        ("8.", "eight"),
+        ("Eight legs!", "eight"),
+    ],
+)
+def test_positive_answer_grammar_accepts_only_short_assertions(
+    continuation: str,
+    value: str,
+) -> None:
+    assert classify_continuation(continuation)["answer_parse"] == {
+        "status": "unique",
+        "value": value,
+    }
+
+
+@pytest.mark.parametrize(
+    "continuation",
+    [
+        "Six is not the answer.",
+        "not exactly six",
+        "Six is incorrect.",
+        "Six is wrong.",
+        "I cannot confirm six.",
+        "I can't confirm six.",
+        "I am unable to confirm six.",
+        "I am unsure: six.",
+        "Maybe six.",
+        "Six, but I am uncertain.",
+        "Six; however, I am uncertain.",
+        "Six, rather tentatively.",
+        "Six instead.",
+        "Actually, six.",
+    ],
+)
+def test_candidate_is_rejected_when_any_disqualifying_cue_appears(
+    continuation: str,
+) -> None:
+    parsed = classify_continuation(continuation)["answer_parse"]
+
+    assert parsed["status"] != "unique"
+    assert parsed["value"] is None
+
+
+@pytest.mark.parametrize(
     ("condition", "continuation", "failed_gate"),
     [
         ("baseline", "not eight", "baseline_unique_eight"),
@@ -166,6 +216,66 @@ def test_constrained_first_answer_parser_is_adversarial(
     ],
 )
 def test_answer_gates_reject_invalid_or_degraded_continuations(
+    condition: str,
+    continuation: str,
+    failed_gate: str,
+) -> None:
+    from jspace_llama.evaluation import evaluate_conditions
+
+    conditions = {
+        "baseline": classify_continuation("eight"),
+        "noop": classify_continuation("eight"),
+        "random": classify_continuation("eight"),
+        "target": classify_continuation("six"),
+    }
+    conditions[condition] = classify_continuation(continuation)
+
+    gates, _ = evaluate_conditions(conditions, spider_present=True)
+
+    assert gates[failed_gate] is False
+
+
+@pytest.mark.parametrize(
+    ("condition", "continuation", "failed_gate"),
+    [
+        (
+            "baseline",
+            "Eight, but that may be wrong.",
+            "baseline_unique_eight",
+        ),
+        (
+            "baseline",
+            "The answer is eight. However, I am unsure.",
+            "baseline_unique_eight",
+        ),
+        (
+            "noop",
+            "I cannot confirm eight.",
+            "noop_unique_eight",
+        ),
+        (
+            "noop",
+            "Eight, actually.",
+            "noop_unique_eight",
+        ),
+        (
+            "target",
+            "Six is not the answer.",
+            "target_unique_six",
+        ),
+        (
+            "target",
+            "not exactly six",
+            "target_unique_six",
+        ),
+        (
+            "target",
+            "The answer is six, maybe.",
+            "target_unique_six",
+        ),
+    ],
+)
+def test_scientific_gates_reject_qualified_candidate_answers(
     condition: str,
     continuation: str,
     failed_gate: str,

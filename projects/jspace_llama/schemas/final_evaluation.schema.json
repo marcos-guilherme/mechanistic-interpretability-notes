@@ -228,7 +228,13 @@
           "required": ["status", "value"],
           "properties": {
             "status": {
-              "enum": ["unique", "negated", "conflicting", "no_answer"]
+              "enum": [
+                "unique",
+                "negated",
+                "qualified",
+                "conflicting",
+                "no_answer"
+              ]
             },
             "value": {
               "type": ["string", "null"],

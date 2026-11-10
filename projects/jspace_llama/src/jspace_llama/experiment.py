@@ -108,10 +108,11 @@ def _is_excessively_incoherent(text: str) -> bool:
 
 
 def _parse_first_answer(text: str) -> dict[str, str | None]:
+    normalized_text = text.replace("\u2019", "'").casefold()
     matches = list(
         re.finditer(
             r"(?<!\w)(?P<answer>8|eight|6|six)(?!\w)",
-            text,
+            normalized_text,
             flags=re.IGNORECASE,
         )
     )
@@ -125,10 +126,33 @@ def _parse_first_answer(text: str) -> dict[str, str | None]:
         return {"status": "no_answer", "value": None}
     if len(set(normalized)) > 1:
         return {"status": "conflicting", "value": None}
-    for match in matches:
-        prefix = text[max(0, match.start() - 16) : match.start()]
-        if re.search(r"\b(?:not|never|no)\s+$", prefix, flags=re.IGNORECASE):
-            return {"status": "negated", "value": None}
+    negation = re.search(
+        r"\b(?:no|not|never|neither|nor|cannot)\b"
+        r"|\b(?:can't|won't|isn't|aren't|wasn't|weren't|"
+        r"don't|doesn't|didn't)\b",
+        normalized_text,
+    )
+    if negation is not None:
+        return {"status": "negated", "value": None}
+    qualification = re.search(
+        r"\b(?:incorrect|wrong|unable|unsure|uncertain|maybe|perhaps|"
+        r"possibly|probably|might|may|guess|doubt|but|however|rather|"
+        r"instead|actually|although|though|yet|correction|corrected|"
+        r"otherwise)\b",
+        normalized_text,
+    )
+    if qualification is not None:
+        return {"status": "qualified", "value": None}
+    positive = re.fullmatch(
+        r"\s*(?:"
+        r"(?:6|six|8|eight)(?:\s+legs?)?"
+        r"|the\s+answer\s+is\s+(?:6|six|8|eight)"
+        r"|a\s+spider\s+has\s+(?:6|six|8|eight)\s+legs"
+        r")\s*[.!]?\s*",
+        normalized_text,
+    )
+    if positive is None:
+        return {"status": "no_answer", "value": None}
     return {"status": "unique", "value": normalized[0]}
 
 
