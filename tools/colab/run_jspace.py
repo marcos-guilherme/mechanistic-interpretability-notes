@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from pathlib import Path, PurePosixPath
+import stat
 import subprocess
+import sys
 import tarfile
 from typing import Sequence
 
@@ -13,6 +17,10 @@ STAGING = ROOT / ".colab-staging"
 AUTH = ["colab", "--auth=adc"]
 REMOTE_ARCHIVE = "/content/jspace_llama.tar.gz"
 REMOTE_RESULTS_ARCHIVE = "/content/jspace_results.tar.gz"
+BOOTSTRAP_SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
+AUTH_SUCCESS_MARKER = "JSPACE_HF_AUTH_SUCCESS"
+PACK_SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
+MAX_RESULT_BYTES = 1_048_576
 RESULT_ALLOWLIST = frozenset(
     {
         "results/execution_manifest.json",
@@ -20,7 +28,12 @@ RESULT_ALLOWLIST = frozenset(
     }
 )
 ARCHIVE_ROOT_FILES = frozenset({"README.md", "pyproject.toml", "uv.lock"})
-ARCHIVE_ROOT_DIRECTORIES = frozenset({"notebooks", "scripts", "src", "tests"})
+ARCHIVE_SUFFIXES = {
+    "notebooks": frozenset({".ipynb"}),
+    "scripts": frozenset({".py"}),
+    "src": frozenset({".py"}),
+    "tests": frozenset({".py"}),
+}
 EXCLUDED_PARTS = frozenset(
     {
         ".cache",
@@ -86,6 +99,33 @@ def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
+def run_captured(command: list[str]) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    completed.check_returncode()
+    return completed
+
+
+def run_remote_script(command: list[str], success_marker: str) -> None:
+    completed = run_captured(command)
+    output = f"{completed.stdout}\n{completed.stderr}"
+    output_lines = {line.strip() for line in output.splitlines()}
+    if success_marker not in output_lines:
+        raise RuntimeError(
+            "remote script did not emit expected success marker: "
+            f"{success_marker}"
+        )
+
+
 def _is_sensitive_filename(name: str) -> bool:
     lower_name = name.lower()
     stem = PurePosixPath(lower_name).stem
@@ -99,35 +139,110 @@ def _is_sensitive_filename(name: str) -> bool:
     )
 
 
-def _archive_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    if info.issym() or info.islnk():
-        return None
+def _is_reparse_point(metadata: object) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & flag)
 
-    parts = PurePosixPath(info.name.replace("\\", "/")).parts
-    relative_parts = parts[1:]
-    if not relative_parts:
-        return info
-    if any(part in EXCLUDED_PARTS for part in relative_parts):
-        return None
 
-    root_name = relative_parts[0]
-    if len(relative_parts) == 1:
-        if info.isdir() and root_name in ARCHIVE_ROOT_DIRECTORIES:
-            return info
-        if info.isfile() and root_name in ARCHIVE_ROOT_FILES:
-            return info
-        return None
-    if root_name not in ARCHIVE_ROOT_DIRECTORIES:
-        return None
+def validate_archive_file(
+    path: Path,
+    project: Path,
+    *,
+    metadata: object | None = None,
+) -> object:
+    file_metadata = metadata if metadata is not None else os.lstat(path)
+    mode = file_metadata.st_mode
+    if stat.S_ISLNK(mode):
+        raise ValueError(f"archive source is a symlink: {path}")
+    if _is_reparse_point(file_metadata):
+        raise ValueError(f"archive source is a reparse point: {path}")
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"archive source is not a regular file: {path}")
 
-    name = relative_parts[-1]
-    if _is_sensitive_filename(name):
-        return None
-    if name.endswith("_output.ipynb"):
-        return None
-    if PurePosixPath(name).suffix.lower() in EXCLUDED_SUFFIXES:
-        return None
-    return info
+    resolved_project = project.resolve(strict=True)
+    resolved_path = path.resolve(strict=True)
+    try:
+        resolved_path.relative_to(resolved_project)
+    except ValueError as error:
+        raise ValueError(f"archive source resolves outside project: {path}") from error
+    return file_metadata
+
+
+def validate_archive_directory(
+    path: Path,
+    *,
+    metadata: object | None = None,
+) -> object:
+    directory_metadata = metadata if metadata is not None else os.lstat(path)
+    mode = directory_metadata.st_mode
+    if stat.S_ISLNK(mode):
+        raise ValueError(f"archive source is a symlink: {path}")
+    if _is_reparse_point(directory_metadata):
+        raise ValueError(f"archive source is a reparse point: {path}")
+    if not stat.S_ISDIR(mode):
+        raise ValueError(f"archive source is not a directory: {path}")
+    return directory_metadata
+
+
+def _archive_candidates(project: Path) -> list[Path]:
+    validate_archive_directory(project)
+    candidates: list[Path] = []
+    for root_name, suffixes in ARCHIVE_SUFFIXES.items():
+        root = project / root_name
+        if not os.path.lexists(root):
+            continue
+        validate_archive_directory(root)
+
+        for current, directories, filenames in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            retained_directories: list[str] = []
+            for directory_name in sorted(directories):
+                directory = current_path / directory_name
+                if directory_name in EXCLUDED_PARTS:
+                    continue
+                validate_archive_directory(directory)
+                retained_directories.append(directory_name)
+            directories[:] = retained_directories
+
+            for filename in sorted(filenames):
+                path = current_path / filename
+                if filename == ".gitkeep":
+                    continue
+                if _is_sensitive_filename(filename):
+                    continue
+                if filename.endswith("_output.ipynb"):
+                    continue
+                suffix = path.suffix.lower()
+                if suffix in EXCLUDED_SUFFIXES:
+                    continue
+                if suffix not in suffixes:
+                    raise ValueError(f"archive source has unapproved suffix: {path}")
+                validate_archive_file(path, project)
+                candidates.append(path)
+
+    for filename in sorted(ARCHIVE_ROOT_FILES):
+        path = project / filename
+        if not path.exists():
+            raise FileNotFoundError(f"required archive input is missing: {path}")
+        validate_archive_file(path, project)
+        candidates.append(path)
+    return sorted(candidates, key=lambda path: path.relative_to(project).as_posix())
+
+
+def _add_regular_file(
+    handle: tarfile.TarFile,
+    path: Path,
+    project: Path,
+) -> None:
+    metadata = validate_archive_file(path, project)
+    relative = path.relative_to(project).as_posix()
+    info = tarfile.TarInfo(f"jspace_llama/{relative}")
+    info.size = metadata.st_size
+    info.mode = stat.S_IMODE(metadata.st_mode)
+    info.mtime = int(getattr(metadata, "st_mtime", 0))
+    with path.open("rb") as source:
+        handle.addfile(info, source)
 
 
 def build_archive(
@@ -138,14 +253,74 @@ def build_archive(
     staging.mkdir(parents=True, exist_ok=True)
     archive = staging / "jspace_llama.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:
-        handle.add(project, arcname="jspace_llama", filter=_archive_filter)
+        for path in _archive_candidates(project):
+            _add_regular_file(handle, path, project)
     return archive
 
 
+def _validate_regular_metadata(
+    path: Path,
+    metadata: object,
+    *,
+    context: str,
+) -> None:
+    mode = metadata.st_mode
+    if stat.S_ISLNK(mode):
+        raise ValueError(f"{context} is a symlink: {path}")
+    if _is_reparse_point(metadata):
+        raise ValueError(f"{context} is a reparse point: {path}")
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"{context} is not a regular file: {path}")
+
+
+def validate_result_destination(
+    path: Path,
+    root: Path,
+    *,
+    metadata: object | None = None,
+) -> None:
+    resolved_root = root.resolve(strict=False)
+    resolved_path = path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as error:
+        raise ValueError(f"result destination is outside project: {path}") from error
+    if metadata is not None:
+        _validate_regular_metadata(
+            path,
+            metadata,
+            context="result destination",
+        )
+
+
+def validate_result_archive(
+    archive: Path,
+    *,
+    metadata: object | None = None,
+) -> None:
+    archive_metadata = metadata if metadata is not None else os.lstat(archive)
+    _validate_regular_metadata(
+        archive,
+        archive_metadata,
+        context="result archive",
+    )
+
+
+def _validate_json_bytes(name: str, payload: bytes) -> None:
+    try:
+        json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"result artifact is not valid JSON: {name}") from error
+
+
 def extract_results_archive(archive: Path, project: Path = PROJECT) -> None:
+    validate_result_archive(archive)
     with tarfile.open(archive, "r:gz") as handle:
         members = handle.getmembers()
-        names = {member.name for member in members}
+        member_names = [member.name for member in members]
+        if len(member_names) != len(set(member_names)):
+            raise ValueError("duplicate result archive member")
+        names = set(member_names)
         unexpected = names - RESULT_ALLOWLIST
         if unexpected:
             joined = ", ".join(sorted(unexpected))
@@ -154,12 +329,77 @@ def extract_results_archive(archive: Path, project: Path = PROJECT) -> None:
         if missing:
             joined = ", ".join(sorted(missing))
             raise FileNotFoundError(f"missing result archive member: {joined}")
-        if any(
-            not member.isfile() or member.issym() or member.islnk()
-            for member in members
-        ):
-            raise ValueError("result archive must contain regular files only")
-        handle.extractall(project)
+
+        payloads: dict[str, bytes] = {}
+        for member in members:
+            if not member.isfile() or member.issym() or member.islnk():
+                raise ValueError("result archive must contain regular files only")
+            if member.size < 0 or member.size > MAX_RESULT_BYTES:
+                raise ValueError(f"result artifact is too large: {member.name}")
+            source = handle.extractfile(member)
+            if source is None:
+                raise ValueError(f"cannot read result artifact: {member.name}")
+            payload = source.read(MAX_RESULT_BYTES + 1)
+            if len(payload) > MAX_RESULT_BYTES:
+                raise ValueError(f"result artifact is too large: {member.name}")
+            _validate_json_bytes(member.name, payload)
+            payloads[member.name] = payload
+
+    results = project / "results"
+    for directory in (project, results):
+        if os.path.lexists(directory):
+            metadata = os.lstat(directory)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(f"result destination is a symlink: {directory}")
+            if _is_reparse_point(metadata):
+                raise ValueError(
+                    f"result destination is a reparse point: {directory}"
+                )
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(
+                    f"result destination is not a directory: {directory}"
+                )
+    results.mkdir(parents=True, exist_ok=True)
+    for name, payload in payloads.items():
+        destination = project / PurePosixPath(name)
+        validate_result_destination(destination, project)
+        if os.path.lexists(destination):
+            validate_result_destination(
+                destination,
+                project,
+                metadata=os.lstat(destination),
+            )
+        destination.write_bytes(payload)
+
+
+def notebook_output_path(notebook: Path) -> Path:
+    return notebook.with_name(f"{notebook.stem}_output{notebook.suffix}")
+
+
+def execute_notebook(session: str, notebook: Path, *, timeout: int) -> Path:
+    output_notebook = notebook_output_path(notebook)
+    output_notebook.unlink(missing_ok=True)
+    run(exec_command(session, notebook, timeout=timeout))
+    if not output_notebook.is_file():
+        raise FileNotFoundError(
+            f"Colab did not create fresh output notebook: {output_notebook}"
+        )
+
+    try:
+        payload = json.loads(output_notebook.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"Colab output notebook is invalid JSON: {output_notebook}"
+        ) from error
+    for cell_index, cell in enumerate(payload.get("cells", [])):
+        for output in cell.get("outputs", []):
+            if output.get("output_type") == "error":
+                name = output.get("ename", "RemoteError")
+                value = output.get("evalue", "")
+                raise RuntimeError(
+                    f"notebook cell {cell_index} failed: {name}: {value}"
+                )
+    return output_notebook
 
 
 def positive_timeout(value: str) -> int:
@@ -171,35 +411,26 @@ def positive_timeout(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "action",
-        choices=(
-            "probe",
-            "start",
-            "sync",
-            "bootstrap",
-            "auth-hf",
-            "execute",
-            "fetch",
-            "stop",
-        ),
-    )
-    parser.add_argument("--session", default="jspace-llama")
-    parser.add_argument("--gpu", choices=("T4", "L4", "A100"), default="L4")
-    parser.add_argument("--notebook", type=Path)
-    parser.add_argument("--timeout", type=positive_timeout)
+    actions = parser.add_subparsers(dest="action", required=True)
+    actions.add_parser("probe")
+
+    start = actions.add_parser("start")
+    start.add_argument("--session", default="jspace-llama")
+    start.add_argument("--gpu", choices=("T4", "L4", "A100"), default="L4")
+
+    for action in ("sync", "bootstrap", "auth-hf", "fetch", "stop"):
+        action_parser = actions.add_parser(action)
+        action_parser.add_argument("--session", default="jspace-llama")
+
+    execute = actions.add_parser("execute")
+    execute.add_argument("--session", default="jspace-llama")
+    execute.add_argument("--notebook", type=Path, required=True)
+    execute.add_argument("--timeout", type=positive_timeout, required=True)
     return parser
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.action == "execute":
-        if args.notebook is None:
-            parser.error("--notebook is required for execute")
-        if args.timeout is None:
-            parser.error("--timeout is required for execute")
-    return args
+    return build_parser().parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -212,12 +443,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         archive = build_archive()
         run(upload_command(args.session, archive, REMOTE_ARCHIVE))
     elif args.action == "bootstrap":
-        run(
+        run_remote_script(
             exec_command(
                 args.session,
                 PROJECT / "scripts" / "colab_bootstrap.py",
                 timeout=900,
-            )
+            ),
+            BOOTSTRAP_SUCCESS_MARKER,
         )
     elif args.action == "auth-hf":
         token = huggingface_token_path()
@@ -226,25 +458,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Hugging Face token not found; run `uv run hf auth login`"
             )
         run(upload_command(args.session, token, "/content/hf_token"))
-        run(
+        run_remote_script(
             exec_command(
                 args.session,
                 PROJECT / "scripts" / "colab_prepare_hf_auth.py",
                 timeout=60,
-            )
+            ),
+            AUTH_SUCCESS_MARKER,
         )
     elif args.action == "execute":
         notebook = args.notebook.resolve()
         if not notebook.is_file():
             build_parser().error(f"notebook does not exist: {notebook}")
-        run(exec_command(args.session, notebook, timeout=args.timeout))
+        execute_notebook(args.session, notebook, timeout=args.timeout)
     elif args.action == "fetch":
-        run(
+        run_remote_script(
             exec_command(
                 args.session,
                 PROJECT / "scripts" / "colab_pack_results.py",
                 timeout=300,
-            )
+            ),
+            PACK_SUCCESS_MARKER,
         )
         STAGING.mkdir(parents=True, exist_ok=True)
         local = STAGING / "jspace_results.tar.gz"

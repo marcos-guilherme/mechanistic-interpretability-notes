@@ -18,6 +18,12 @@ intentionally not executed in the repository test suite.
 
 ## Colab L4 workflow
 
+Install the verified CLI version:
+
+```powershell
+uv tool install google-colab-cli==0.7.5
+```
+
 First obtain access to the gated `meta-llama/Llama-3.1-8B-Instruct`
 repository with your Hugging Face account, then save its token at the standard
 local cache path:
@@ -40,8 +46,11 @@ python tools/colab/run_jspace.py stop
 ```
 
 The runner uses ADC authentication and the `jspace-llama` session by default.
-The archive contains only the project inputs needed remotely. `fetch` accepts
+The archive contains only the project inputs needed remotely, and bootstrap
+installs `uv==0.12.1` before exporting the locked environment. `fetch` accepts
 only `results/execution_manifest.json` and `results/final_evaluation.json`;
-both must exist. Execution failures leave the Colab session available for
-diagnosis, so stop it explicitly. If L4 allocation is unavailable, stop the
-partial session and explicitly retry with `--gpu T4` or `--gpu A100`.
+both must exist. Notebook execution validates the fresh ignored
+`_output.ipynb` written by colab-cli and retains it for diagnosis. Execution
+failures leave the Colab session available for diagnosis, so stop it
+explicitly. If L4 allocation is unavailable, stop the partial session and
+explicitly retry with `--gpu T4` or `--gpu A100`.

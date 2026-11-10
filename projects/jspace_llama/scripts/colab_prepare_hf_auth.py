@@ -5,6 +5,7 @@ from pathlib import Path
 
 SOURCE = Path("/content/hf_token")
 DESTINATION = Path.home() / ".cache" / "huggingface" / "token"
+SUCCESS_MARKER = "JSPACE_HF_AUTH_SUCCESS"
 
 
 def prepare_token(source: Path, destination: Path) -> Path:
@@ -18,6 +19,7 @@ def prepare_token(source: Path, destination: Path) -> Path:
 
 def main() -> int:
     prepare_token(SOURCE, DESTINATION)
+    print(SUCCESS_MARKER)
     return 0
 
 

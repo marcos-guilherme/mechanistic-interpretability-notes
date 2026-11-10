@@ -3,7 +3,7 @@
 Install:
 
 ```powershell
-uv tool install google-colab-cli
+uv tool install google-colab-cli==0.7.5
 ```
 
 Authenticate once, manually:
@@ -60,7 +60,10 @@ python tools/colab/run_jspace.py stop
 
 `auth-hf` temporarily uploads the cached token and moves it to the standard
 remote Hugging Face cache without displaying it. `execute` requires both the
-notebook and timeout. `fetch` fails unless both compact aggregate artifacts,
+notebook and timeout. It validates the fresh local `_output.ipynb` produced by
+colab-cli and keeps that ignored file for diagnosis. Remote bootstrap installs
+the pinned `uv==0.12.1` before exporting the locked environment. `fetch` fails
+unless both compact aggregate artifacts,
 `results/execution_manifest.json` and `results/final_evaluation.json`, exist.
 It never downloads raw generations, tensors, model or lens files, caches, or
 credentials. A failed execution intentionally leaves the session running for
