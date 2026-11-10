@@ -9,7 +9,9 @@ from ioi_replication.paper import (
     SemanticPosition,
     activation_patch_node,
     build_paired_dataset,
+    cache_grouped_mean_activations,
     logit_difference,
+    measure_backup_name_movers,
     paper_path_patch,
 )
 from ioi_replication.runtime import load_gpt2_small, select_device
@@ -97,4 +99,35 @@ def test_real_gpt2_paper_path_patch_has_finite_nonzero_effect(
     assert torch.isfinite(result.baseline)
     assert torch.isfinite(result.patched)
     assert result.effect.abs().item() > 1e-8
+    assert model.cfg.use_attn_result is False
+
+
+def test_real_gpt2_backup_knockout_has_finite_structured_signals(
+    real_model_and_dataset,
+) -> None:
+    model, dataset = real_model_and_dataset
+    device = torch.device(model.cfg.device)
+    means = cache_grouped_mean_activations(
+        model,
+        dataset.abc_tokens.to(device),
+        dataset.groups,
+        activation="result",
+    )
+
+    result = measure_backup_name_movers(
+        model=model,
+        dataset=dataset,
+        group_means=means,
+    )
+
+    assert len(result.heads) == 8
+    assert torch.isfinite(result.baseline_logit_difference.values).all()
+    assert torch.isfinite(result.knockout_logit_difference.values).all()
+    for metrics in result.heads.values():
+        assert torch.isfinite(metrics.baseline_dla.values).all()
+        assert torch.isfinite(metrics.knockout_dla.values).all()
+        assert torch.isfinite(metrics.baseline_attention_io.values).all()
+        assert torch.isfinite(metrics.knockout_attention_io.values).all()
+        assert torch.isfinite(metrics.baseline_attention_s.values).all()
+        assert torch.isfinite(metrics.knockout_attention_s.values).all()
     assert model.cfg.use_attn_result is False

@@ -1,5 +1,20 @@
 """Paper-faithful data and metrics for the IOI replication track."""
 
+from ioi_replication.paper.ablation import (
+    GroupedActivationMeans,
+    cache_grouped_mean_activations,
+    compute_grouped_mean_activations,
+    knockout_nodes,
+    run_circuit,
+)
+from ioi_replication.paper.backup import (
+    BackupExperimentResult,
+    BackupHeadMetrics,
+    Estimate,
+    measure_backup_heads_from_cache,
+    measure_backup_name_movers,
+    scaled_head_logit_attribution,
+)
 from ioi_replication.paper.circuit import (
     PUBLISHED_CIRCUIT,
     PUBLISHED_CLASS_EDGES,
@@ -43,6 +58,8 @@ from ioi_replication.paper.patching import (
 __all__ = [
     "ABBA_TEMPLATES",
     "ActivationPatchMatrix",
+    "BackupExperimentResult",
+    "BackupHeadMetrics",
     "BABA_TEMPLATES",
     "CircuitClass",
     "CircuitClassEdge",
@@ -50,6 +67,7 @@ __all__ = [
     "HISTORICAL_OBJECTS",
     "HISTORICAL_PLACES",
     "FilteredVocabulary",
+    "GroupedActivationMeans",
     "HeadPositionNode",
     "PUBLISHED_CIRCUIT",
     "PUBLISHED_CLASS_EDGES",
@@ -59,17 +77,25 @@ __all__ = [
     "PromptMetadata",
     "ReceiverComponent",
     "SemanticPosition",
+    "Estimate",
     "activation_patch_matrix",
     "activation_patch_node",
     "build_paired_dataset",
+    "cache_grouped_mean_activations",
+    "compute_grouped_mean_activations",
     "filter_single_token_vocabulary",
     "io_accuracy",
     "io_probability",
     "logit_difference",
     "logits_at_end",
+    "knockout_nodes",
+    "measure_backup_heads_from_cache",
+    "measure_backup_name_movers",
     "paper_path_patch",
     "patch_semantic_positions",
     "published_nodes",
+    "run_circuit",
+    "scaled_head_logit_attribution",
     "standard_error",
     "validate_circuit",
 ]
