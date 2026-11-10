@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -17,6 +18,8 @@ ARCHIVE = Path("/content/jspace_llama.tar.gz")
 DESTINATION = Path("/content")
 ARCHIVE_ROOT = "jspace_llama"
 PROJECT = DESTINATION / "jspace_llama_project"
+LEGACY_PROJECT = DESTINATION / "jspace_llama"
+IMPORT_PACKAGE = "jspace_llama"
 LOCKED_REQUIREMENTS = Path("/tmp/jspace-locked-requirements.txt")
 SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
@@ -148,6 +151,18 @@ def _remove_old_project(project: Path) -> None:
         project.unlink()
 
 
+def migrate_same_session(
+    legacy_project: Path,
+    package_name: str = IMPORT_PACKAGE,
+) -> None:
+    _remove_old_project(legacy_project)
+    package_prefix = f"{package_name}."
+    for name in tuple(sys.modules):
+        if name == package_name or name.startswith(package_prefix):
+            sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+
+
 def replace_project_tree(
     archive: Path,
     destination: Path,
@@ -230,6 +245,7 @@ def main() -> int:
     import torch
 
     print_runtime_diagnostics(torch)
+    migrate_same_session(LEGACY_PROJECT)
     print(f"{SUCCESS_MARKER}:{nonce}")
     return 0
 

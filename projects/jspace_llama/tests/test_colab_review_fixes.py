@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import io
 import json
@@ -9,7 +10,7 @@ import stat
 import subprocess
 import sys
 import tarfile
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -145,6 +146,7 @@ def test_bootstrap_marker_is_emitted_only_after_success(
 ) -> None:
     bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_main_marker")
     project = tmp_path / "jspace_llama"
+    migration_calls: list[Path] = []
     monkeypatch.setattr(
         bootstrap,
         "replace_project_tree",
@@ -156,12 +158,19 @@ def test_bootstrap_marker_is_emitted_only_after_success(
         "dependency_commands",
         lambda project, requirements: [],
     )
+    monkeypatch.setattr(
+        bootstrap,
+        "migrate_same_session",
+        lambda legacy: migration_calls.append(legacy),
+        raising=False,
+    )
     monkeypatch.setattr(bootstrap, "print_runtime_diagnostics", lambda torch: None)
     monkeypatch.setitem(sys.modules, "torch", object())
     nonce = "c" * 64
     monkeypatch.setenv(bootstrap.SUCCESS_NONCE_ENV, nonce)
 
     assert bootstrap.main() == 0
+    assert migration_calls == [bootstrap.LEGACY_PROJECT]
     assert (
         capsys.readouterr().out.strip()
         == f"{bootstrap.SUCCESS_MARKER}:{nonce}"
@@ -470,6 +479,140 @@ def test_remote_checkout_basename_does_not_shadow_import_package(
     assert completed.stdout.strip() == "None"
     assert checkout_basename != package_name
     assert pack.ROOT.name == checkout_basename
+
+
+def test_bootstrap_migrates_legacy_checkout_and_cached_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "same_session_migration")
+    package_name = "jspace_llama"
+    content = tmp_path / "content"
+    legacy = content / package_name
+    legacy.mkdir(parents=True)
+    (legacy / "stale.py").write_text("STALE = True\n", encoding="utf-8")
+    archive = content / "jspace_llama.tar.gz"
+    archive.write_bytes(b"archive remains")
+
+    source_root = content / "jspace_llama_project" / "src"
+    source_package = source_root / package_name
+    source_package.mkdir(parents=True)
+    (source_package / "__init__.py").write_text("", encoding="utf-8")
+    config = source_package / "config.py"
+    config.write_text("SOURCE = 'new-project'\n", encoding="utf-8")
+
+    cached_package = ModuleType(package_name)
+    cached_package.__path__ = [str(legacy)]  # type: ignore[attr-defined]
+    cached_config = ModuleType(f"{package_name}.config")
+    unrelated_name = f"{package_name}_tools"
+    unrelated = ModuleType(unrelated_name)
+    prior_package_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == package_name or name.startswith(f"{package_name}.")
+    }
+    prior_unrelated = sys.modules.get(unrelated_name)
+    invalidations = 0
+    real_invalidate_caches = importlib.invalidate_caches
+
+    def track_invalidation() -> None:
+        nonlocal invalidations
+        invalidations += 1
+        real_invalidate_caches()
+
+    monkeypatch.setattr(
+        importlib,
+        "invalidate_caches",
+        track_invalidation,
+    )
+    sys.path.insert(0, str(source_root))
+    try:
+        sys.modules[package_name] = cached_package
+        sys.modules[f"{package_name}.config"] = cached_config
+        sys.modules[unrelated_name] = unrelated
+
+        bootstrap.migrate_same_session(legacy)
+
+        assert not os.path.lexists(legacy)
+        assert archive.read_bytes() == b"archive remains"
+        assert package_name not in sys.modules
+        assert f"{package_name}.config" not in sys.modules
+        assert sys.modules[unrelated_name] is unrelated
+        assert invalidations == 1
+
+        resolved = importlib.import_module(f"{package_name}.config")
+        assert resolved.SOURCE == "new-project"
+        assert Path(resolved.__file__).resolve() == config.resolve()
+    finally:
+        sys.path.remove(str(source_root))
+        for name in tuple(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                sys.modules.pop(name, None)
+        sys.modules.update(prior_package_modules)
+        if prior_unrelated is None:
+            sys.modules.pop(unrelated_name, None)
+        else:
+            sys.modules[unrelated_name] = prior_unrelated
+        real_invalidate_caches()
+
+
+def test_legacy_reparse_directory_uses_non_recursive_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "legacy_reparse_removal")
+    legacy = tmp_path / "jspace_llama"
+    legacy.mkdir()
+    actual = os.lstat(legacy)
+    metadata = SimpleNamespace(
+        st_mode=actual.st_mode,
+        st_file_attributes=0x400,
+    )
+    removed: list[Path] = []
+    monkeypatch.setattr(bootstrap.os, "lstat", lambda path: metadata)
+    monkeypatch.setattr(
+        bootstrap.os,
+        "rmdir",
+        lambda path: removed.append(Path(path)),
+    )
+    monkeypatch.setattr(
+        bootstrap.shutil,
+        "rmtree",
+        lambda path: pytest.fail(f"recursive removal used for {path}"),
+    )
+
+    bootstrap._remove_old_project(legacy)
+
+    assert removed == [legacy]
+
+
+def test_legacy_symlink_uses_non_recursive_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "legacy_symlink_removal")
+    legacy = tmp_path / "jspace_llama"
+    legacy.mkdir()
+    metadata = SimpleNamespace(
+        st_mode=stat.S_IFLNK,
+        st_file_attributes=0,
+    )
+    unlinked: list[Path] = []
+    monkeypatch.setattr(bootstrap.os, "lstat", lambda path: metadata)
+    monkeypatch.setattr(
+        bootstrap.Path,
+        "unlink",
+        lambda path: unlinked.append(path),
+    )
+    monkeypatch.setattr(
+        bootstrap.shutil,
+        "rmtree",
+        lambda path: pytest.fail(f"recursive removal used for {path}"),
+    )
+
+    bootstrap._remove_old_project(legacy)
+
+    assert unlinked == [legacy]
 
 
 def test_pack_rejects_invalid_json(tmp_path: Path) -> None:
