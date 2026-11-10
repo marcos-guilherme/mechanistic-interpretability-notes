@@ -84,26 +84,54 @@ def test_node_rejects_invalid_head_coordinates_or_position() -> None:
 
 
 def test_class_edges_cover_the_published_information_flow() -> None:
-    edge_triples = {
-        (edge.sender, edge.receiver, edge.component)
+    edge_specs = {
+        (
+            edge.sender,
+            edge.receiver,
+            edge.component,
+            edge.receiver_position,
+        )
         for edge in PUBLISHED_CLASS_EDGES
     }
 
-    assert (
-        CircuitClass.DUPLICATE_TOKEN,
-        CircuitClass.S_INHIBITION,
-        ReceiverComponent.V,
-    ) in edge_triples
-    assert (
-        CircuitClass.INDUCTION,
-        CircuitClass.S_INHIBITION,
-        ReceiverComponent.V,
-    ) in edge_triples
-    assert (
-        CircuitClass.S_INHIBITION,
-        CircuitClass.NAME_MOVERS,
-        ReceiverComponent.Q,
-    ) in edge_triples
+    assert edge_specs == {
+        (
+            CircuitClass.PREVIOUS_TOKEN,
+            CircuitClass.INDUCTION,
+            ReceiverComponent.K,
+            SemanticPosition.S1_PLUS_1,
+        ),
+        (
+            CircuitClass.DUPLICATE_TOKEN,
+            CircuitClass.S_INHIBITION,
+            ReceiverComponent.V,
+            SemanticPosition.S2,
+        ),
+        (
+            CircuitClass.INDUCTION,
+            CircuitClass.S_INHIBITION,
+            ReceiverComponent.V,
+            SemanticPosition.S2,
+        ),
+        (
+            CircuitClass.S_INHIBITION,
+            CircuitClass.NAME_MOVERS,
+            ReceiverComponent.Q,
+            SemanticPosition.END,
+        ),
+        (
+            CircuitClass.S_INHIBITION,
+            CircuitClass.BACKUP_NAME_MOVERS,
+            ReceiverComponent.Q,
+            SemanticPosition.END,
+        ),
+        (
+            CircuitClass.S_INHIBITION,
+            CircuitClass.NEGATIVE_NAME_MOVERS,
+            ReceiverComponent.Q,
+            SemanticPosition.END,
+        ),
+    }
 
 
 def test_paper_namespace_exports_circuit_and_patching_apis() -> None:

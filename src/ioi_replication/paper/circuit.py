@@ -65,11 +65,17 @@ class CircuitClassEdge:
     sender: CircuitClass
     receiver: CircuitClass
     component: ReceiverComponent
+    receiver_position: SemanticPosition
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sender", CircuitClass(self.sender))
         object.__setattr__(self, "receiver", CircuitClass(self.receiver))
         object.__setattr__(self, "component", ReceiverComponent(self.component))
+        object.__setattr__(
+            self,
+            "receiver_position",
+            SemanticPosition(self.receiver_position),
+        )
         if self.sender == self.receiver:
             raise ValueError("a circuit class edge cannot be a self-edge")
 
@@ -130,31 +136,37 @@ PUBLISHED_CLASS_EDGES = (
         CircuitClass.PREVIOUS_TOKEN,
         CircuitClass.INDUCTION,
         ReceiverComponent.K,
+        SemanticPosition.S1_PLUS_1,
     ),
     CircuitClassEdge(
         CircuitClass.DUPLICATE_TOKEN,
         CircuitClass.S_INHIBITION,
         ReceiverComponent.V,
+        SemanticPosition.S2,
     ),
     CircuitClassEdge(
         CircuitClass.INDUCTION,
         CircuitClass.S_INHIBITION,
         ReceiverComponent.V,
+        SemanticPosition.S2,
     ),
     CircuitClassEdge(
         CircuitClass.S_INHIBITION,
         CircuitClass.NAME_MOVERS,
         ReceiverComponent.Q,
+        SemanticPosition.END,
     ),
     CircuitClassEdge(
         CircuitClass.S_INHIBITION,
         CircuitClass.BACKUP_NAME_MOVERS,
         ReceiverComponent.Q,
+        SemanticPosition.END,
     ),
     CircuitClassEdge(
         CircuitClass.S_INHIBITION,
         CircuitClass.NEGATIVE_NAME_MOVERS,
         ReceiverComponent.Q,
+        SemanticPosition.END,
     ),
 )
 

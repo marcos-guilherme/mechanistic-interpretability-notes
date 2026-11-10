@@ -12,9 +12,10 @@ Easy-Transformer ``ioi_utils.path_patching``:
 This is intentionally different from TransformerLens 4.3
 ``get_act_patch_direct_path``.  The modern helper adds a source head's
 clean-minus-corrupted residual write to one pre-Q/K/V fork at *all* token
-positions.  The paper algorithm recomputes the historical multi-pass
-intervention, can leave MLPs as the Appendix B confounder, and patches each
-example at its own semantic position.
+positions while every other reader keeps the original source write, thereby
+isolating that direct edge.  The paper algorithm recomputes the historical
+multi-pass intervention, can leave MLPs as the Appendix B confounder, and
+patches each example at its own semantic position.
 """
 
 from __future__ import annotations
@@ -412,6 +413,11 @@ def paper_path_patch(
     ``allow_internal_interactions=True`` reproduces the historical
     ``have_internal_interactions`` option by not freezing receiver hook names
     during pass C.
+
+    This implementation accepts attention-head senders only.  Every receiver
+    must be in a layer later than every sender, which keeps the four-pass
+    causal ordering unambiguous; MLP senders and interleaved sender/receiver
+    layers are intentionally unsupported.
     """
     senders = tuple(senders)
     receivers = tuple(receivers)

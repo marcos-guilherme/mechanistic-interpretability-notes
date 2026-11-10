@@ -6,32 +6,198 @@
     "n_examples": 2,
     "dataset_sha256": "a9c668d845ab9fef7630428c87155240aef93f5033462576923204d5cb6dec8d",
     "metric": "mean IO-minus-S logit difference at semantic END",
-    "freeze_mlps": false
+    "freeze_mlps_modes": [
+      false,
+      true
+    ],
+    "allow_internal_interactions": false
   },
   "historical_four_pass_semantic": {
-    "duplicate_3.0_to_s_inhibition_7.3_v": {
-      "baseline": 3.0995378494262695,
-      "patched": 3.0106773376464844,
-      "effect": -0.08886051177978516,
-      "sender_position": "S2",
-      "receiver_position": "S2",
-      "receiver_component": "v"
+    "freeze_mlps_false": {
+      "duplicate_3.0_to_s_inhibition_7.3_v": {
+        "baseline": 3.0995378494262695,
+        "patched": 3.0106773376464844,
+        "effect": -0.08886051177978516,
+        "senders": [
+          {
+            "layer": 3,
+            "head": 0,
+            "position": "S2"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "S2",
+            "component": "v"
+          }
+        ]
+      },
+      "induction_5.5_to_s_inhibition_7.3_v": {
+        "baseline": 3.0995378494262695,
+        "patched": 2.981776714324951,
+        "effect": -0.11776113510131836,
+        "senders": [
+          {
+            "layer": 5,
+            "head": 5,
+            "position": "S2"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "S2",
+            "component": "v"
+          }
+        ]
+      },
+      "s_inhibition_7.3_to_name_mover_9.9_q": {
+        "baseline": 3.0995378494262695,
+        "patched": 2.997884750366211,
+        "effect": -0.1016530990600586,
+        "senders": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "END"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 9,
+            "head": 9,
+            "position": "END",
+            "component": "q"
+          }
+        ]
+      },
+      "multi_duplicate_induction_to_s_inhibition_v": {
+        "baseline": 3.0995378494262695,
+        "patched": 2.549734115600586,
+        "effect": -0.5498037338256836,
+        "senders": [
+          {
+            "layer": 0,
+            "head": 1,
+            "position": "S2"
+          },
+          {
+            "layer": 5,
+            "head": 5,
+            "position": "S2"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "S2",
+            "component": "v"
+          },
+          {
+            "layer": 7,
+            "head": 9,
+            "position": "S2",
+            "component": "v"
+          }
+        ]
+      }
     },
-    "induction_5.5_to_s_inhibition_7.3_v": {
-      "baseline": 3.0995378494262695,
-      "patched": 2.981776714324951,
-      "effect": -0.11776113510131836,
-      "sender_position": "S2",
-      "receiver_position": "S2",
-      "receiver_component": "v"
-    },
-    "s_inhibition_7.3_to_name_mover_9.9_q": {
-      "baseline": 3.0995378494262695,
-      "patched": 2.997884750366211,
-      "effect": -0.1016530990600586,
-      "sender_position": "END",
-      "receiver_position": "END",
-      "receiver_component": "q"
+    "freeze_mlps_true": {
+      "duplicate_3.0_to_s_inhibition_7.3_v": {
+        "baseline": 3.0995378494262695,
+        "patched": 3.0008316040039062,
+        "effect": -0.09870624542236328,
+        "senders": [
+          {
+            "layer": 3,
+            "head": 0,
+            "position": "S2"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "S2",
+            "component": "v"
+          }
+        ]
+      },
+      "induction_5.5_to_s_inhibition_7.3_v": {
+        "baseline": 3.0995378494262695,
+        "patched": 2.9402804374694824,
+        "effect": -0.1592574119567871,
+        "senders": [
+          {
+            "layer": 5,
+            "head": 5,
+            "position": "S2"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "S2",
+            "component": "v"
+          }
+        ]
+      },
+      "s_inhibition_7.3_to_name_mover_9.9_q": {
+        "baseline": 3.0995378494262695,
+        "patched": 2.9869866371154785,
+        "effect": -0.11255121231079102,
+        "senders": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "END"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 9,
+            "head": 9,
+            "position": "END",
+            "component": "q"
+          }
+        ]
+      },
+      "multi_duplicate_induction_to_s_inhibition_v": {
+        "baseline": 3.0995378494262695,
+        "patched": 2.5890188217163086,
+        "effect": -0.5105190277099609,
+        "senders": [
+          {
+            "layer": 0,
+            "head": 1,
+            "position": "S2"
+          },
+          {
+            "layer": 5,
+            "head": 5,
+            "position": "S2"
+          }
+        ],
+        "receivers": [
+          {
+            "layer": 7,
+            "head": 3,
+            "position": "S2",
+            "component": "v"
+          },
+          {
+            "layer": 7,
+            "head": 9,
+            "position": "S2",
+            "component": "v"
+          }
+        ]
+      }
     }
   },
   "transformerlens_direct_path_all_positions": {
@@ -39,20 +205,23 @@
       "baseline": 3.0995378494262695,
       "patched": 3.002220630645752,
       "effect": -0.09731721878051758,
-      "position_scope": "all_positions"
+      "position_scope": "all_positions",
+      "other_readers": "original source write"
     },
     "induction_5.5_to_s_inhibition_7.3_v": {
       "baseline": 3.0995378494262695,
       "patched": 2.9342880249023438,
       "effect": -0.16524982452392578,
-      "position_scope": "all_positions"
+      "position_scope": "all_positions",
+      "other_readers": "original source write"
     },
     "s_inhibition_7.3_to_name_mover_9.9_q": {
       "baseline": 3.0995378494262695,
       "patched": 2.986328125,
       "effect": -0.11320972442626953,
-      "position_scope": "all_positions"
+      "position_scope": "all_positions",
+      "other_readers": "original source write"
     }
   },
-  "comparison_warning": "Both sections use raw IO-S logit difference, but the interventions are not semantically interchangeable."
+  "comparison_warning": "All sections use raw IO-S logit difference. The modern helper isolates a direct edge at all positions; historical four-pass results patch semantic positions and separately report MLP modes."
 }
