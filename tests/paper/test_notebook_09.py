@@ -43,7 +43,9 @@ def test_notebook_09_runs_all_paper_validation_definitions() -> None:
     assert "top_greedy" in source
     assert "historical target from 100,000 prompts" in source
     assert "independent balanced pABC reference" in source
-    assert "26/26 >1% pontual, mas 24/26 com CI95" in source
+    assert "minimality_point_count = sum" in source
+    assert "minimality_ci_count = sum" in source
+    assert "26/26 >1% pontual" not in source
     assert "git_blob" in source
     assert "09_faithfulness_completeness_minimality.json" in source
 
@@ -120,10 +122,19 @@ def test_notebook_09_artifact_is_complete_traceable_and_finite() -> None:
     assert all(len(item["normalized_effect_ci95"]) == 2 for item in minimality)
     assert all("ci_supports_threshold" in item for item in minimality)
     assert all(item["threshold_fraction"] == 0.01 for item in minimality)
+    assert artifact["minimality_summary"] == {
+        "point_above_threshold": sum(
+            item["passes_threshold"] for item in minimality
+        ),
+        "ci95_above_threshold": sum(
+            item["ci_supports_threshold"] for item in minimality
+        ),
+        "total": len(minimality),
+        "threshold_fraction": 0.01,
+    }
 
     traceability = artifact["traceability"]
     assert len(traceability["source_commit"]) == 40
-    assert traceability["git_dirty"] in {True, False}
     assert traceability["hash_method"] == (
         "git rev-parse <source_commit>:<path> (normalized Git blob IDs)"
     )

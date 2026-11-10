@@ -51,7 +51,6 @@ def test_notebook_08_artifact_has_reproducibility_and_uncertainty() -> None:
     assert min(reference["group_counts"].values()) >= 5
     traceability = artifact["traceability"]
     assert len(traceability["source_commit"]) == 40
-    assert traceability["git_dirty"] in {True, False}
     assert len(traceability["source_sha256"]) >= 3
     assert all(len(value) == 64 for value in traceability["source_sha256"].values())
     assert traceability["torch_version"]

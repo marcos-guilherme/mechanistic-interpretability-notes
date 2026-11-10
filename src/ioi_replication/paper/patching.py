@@ -115,8 +115,8 @@ def patch_semantic_positions(
     )
 
     if head is not None:
-        if target.ndim < 3:
-            raise ValueError("head patching requires a head axis at dimension 2")
+        if target.ndim != 4:
+            raise ValueError("head patching requires rank four activations")
         if not 0 <= head < target.shape[2]:
             raise ValueError("head must be within the activation head dimension")
 
@@ -184,10 +184,11 @@ def activation_patch_node(
         )
 
     with _temporary_attn_result(model, enabled=activation == "result"):
-        logits = model.run_with_hooks(
-            target_tokens,
-            fwd_hooks=[(hook_name, patch_hook)],
-        )
+        with torch.inference_mode():
+            logits = model.run_with_hooks(
+                target_tokens,
+                fwd_hooks=[(hook_name, patch_hook)],
+            )
     return torch.as_tensor(metric(logits))
 
 

@@ -21,6 +21,14 @@ ARTIFACTS = {
     "validation": "09_faithfulness_completeness_minimality.json",
     "adversarial": "10_adversarial_examples.json",
 }
+SOURCE_CLASSIFICATIONS = {
+    "baseline": "baseline",
+    "circuit": "diagnostic-validation",
+    "path_patching": "path-grid",
+    "backup": "backup-compensation",
+    "validation": "faithfulness-completeness-minimality",
+    "adversarial": "adversarial-evaluation",
+}
 
 
 def _read(name: str) -> dict[str, Any]:
@@ -75,6 +83,10 @@ def build_summary() -> dict[str, Any]:
                     fallback_commit,
                 ),
                 "config": artifacts[name].get("config", {}),
+                "classification": artifacts[name].get(
+                    "classification",
+                    SOURCE_CLASSIFICATIONS[name],
+                ),
             }
             for name, path in ARTIFACTS.items()
         },
@@ -90,10 +102,25 @@ def build_summary() -> dict[str, Any]:
                 },
             },
             "path_patching": {
-                name: values["effect"]
-                for name, values in path_patching[
-                    "transformerlens_direct_path_all_positions"
-                ].items()
+                "primary_method": "historical_four_pass_semantic",
+                "historical_four_pass_semantic": {
+                    mode: {
+                        name: values["effect"]
+                        for name, values in mode_values.items()
+                    }
+                    for mode, mode_values in path_patching[
+                        "historical_four_pass_semantic"
+                    ].items()
+                },
+                "transformerlens_direct_path_all_positions": {
+                    name: values["effect"]
+                    for name, values in path_patching[
+                        "transformerlens_direct_path_all_positions"
+                    ].items()
+                },
+                "published_path_grid": {
+                    "n_edges": path_patching["published_path_grid"]["n_edges"],
+                },
             },
             "backup_compensation_fraction": backup[
                 "compensation_fraction"

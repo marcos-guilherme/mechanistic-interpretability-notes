@@ -80,6 +80,31 @@ class CircuitClassEdge:
             raise ValueError("a circuit class edge cannot be a self-edge")
 
 
+@dataclass(frozen=True)
+class PublishedPathGridEdge:
+    """One concrete sender/receiver pair from a published class edge."""
+
+    class_edge: CircuitClassEdge
+    sender: HeadPositionNode
+    receiver: HeadPositionNode
+
+    @property
+    def sender_class(self) -> CircuitClass:
+        return self.class_edge.sender
+
+    @property
+    def receiver_class(self) -> CircuitClass:
+        return self.class_edge.receiver
+
+    @property
+    def receiver_component(self) -> ReceiverComponent:
+        return self.class_edge.component
+
+    @property
+    def receiver_position(self) -> SemanticPosition:
+        return self.class_edge.receiver_position
+
+
 def _nodes(
     heads: Sequence[tuple[int, int]],
     position: SemanticPosition,
@@ -177,6 +202,29 @@ def published_nodes() -> tuple[HeadPositionNode, ...]:
         node
         for circuit_class in CircuitClass
         for node in PUBLISHED_CIRCUIT[circuit_class]
+    )
+
+
+def published_path_grid_edges() -> tuple[PublishedPathGridEdge, ...]:
+    """Expand all six published class edges into their 88 head pairs.
+
+    Receiver positions come from ``PUBLISHED_CLASS_EDGES`` rather than the
+    receiver class's default node position. This preserves the historical
+    semantic intervention site for each edge family.
+    """
+    return tuple(
+        PublishedPathGridEdge(
+            class_edge=class_edge,
+            sender=sender,
+            receiver=HeadPositionNode(
+                receiver.layer,
+                receiver.head,
+                class_edge.receiver_position,
+            ),
+        )
+        for class_edge in PUBLISHED_CLASS_EDGES
+        for sender in PUBLISHED_CIRCUIT[class_edge.sender]
+        for receiver in PUBLISHED_CIRCUIT[class_edge.receiver]
     )
 
 

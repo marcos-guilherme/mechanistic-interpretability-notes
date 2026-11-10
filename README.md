@@ -16,11 +16,14 @@ The notebooks are intentionally split into two tracks:
    Deviations from historical code are recorded in each artifact.
 
 The paper-faithful track uses TransformerLens **4.3.0** in GPT-2 compatibility
-mode (`fold_ln=False`, `center_writing_weights=False`,
-`center_unembed=False`, `refactor_factored_attn_matrices=False`). CUDA is used
-when available; ordinary notebook loading falls back to CPU. The full runner
+mode with the explicit TL4.3 contract `fold_ln=True`,
+`center_writing_weights=True`, `center_unembed=True`,
+`fold_value_biases=True`, `refactor_factored_attn_matrices=False`,
+`no_processing=False`, and `disable_warnings=False`. CUDA is used when
+available; ordinary notebook loading falls back to CPU. The full runner
 requires CUDA by default so an accidental slow CPU refresh fails early; pass
-`--allow-cpu` only for an intentional fallback.
+`--allow-cpu` only for an intentional fallback. Every paper artifact records
+this exact configuration from the runtime helper rather than a copied label.
 
 ## Environment
 
@@ -77,8 +80,8 @@ than inventing a peak measurement.
 | Notebook | Seeds | Target / reference N | Batches | Prior time | Tested VRAM |
 |---|---|---:|---:|---:|---:|
 | 05 baseline | 42 | 256 / — | 32 | 0:26 | 6 GiB |
-| 06 circuit discovery | 106 | 4 / matched ABC | full batch | 1:09 | 6 GiB |
-| 07 path patching | 107 | 2 / matched ABC | full batch | 0:44 | 6 GiB |
+| 06 diagnostic validation | 106 | 64 / matched ABC | full batch | pending fresh run | 6 GiB |
+| 07 published path grid | 107 | 64 / matched ABC | full batch | pending fresh run | 6 GiB |
 | 08 backups | 308 / 309 | 16 / 300 (10×30 groups) | target full / ref 16 | 0:32 | 6 GiB |
 | 09 validation | 409 / 410 / 411 | 100 / 300 (10×30 groups) | target 50 / ref 16 | 13:17 | 6 GiB |
 | 10 adversarial | base 510; IO 511; double IO 512; S 513 | 500 / — | 16 | 0:35 | 6 GiB |
@@ -105,13 +108,17 @@ semantic alignment, and finite-sample uncertainty can all shift values.
 | Adversarial IO single | IO−S 0.946, P(IO) 32.24%, S>IO 31.0% | 1.23, 36%, 23.4% | Absolute outcomes diverge, while the observed IO−S delta −2.324 matches the paper target delta −2.32 closely. |
 | Adversarial S control | IO−S 3.411, P(IO) 56.17%, S>IO 0.2% | 3.64, 59%, 0.4% | Direction agrees; absolute levels and the small error estimate differ. |
 
-Notebook 06 has only four prompts and notebook 07 has two. Their unexpected
-signs or rankings are diagnostics, not evidence that overturns the published
-circuit. Notebook 08 uses 16 target prompts; its corrected compensation
-denominator is the primary baseline DLA minus the pABC substitution DLA, both
-at baseline scale. Notebook 10 retokenizes after insertion without BOS to avoid
-the historical `advex.py` coordinate inconsistency and keeps single- and
-double-clause protocols separate.
+Notebook 06 is a diagnostic validation of the published 26-node list at N=64,
+not blind circuit discovery. Notebook 07 evaluates all 88 concrete
+sender/receiver pairs induced by the six published class edges at N=64; its
+selected examples also retain both historical MLP-freeze modes and the modern
+all-position helper comparison. Unexpected signs or rankings in these
+finite-sample diagnostics do not overturn the published circuit. Notebook 08
+uses 16 target prompts; its corrected compensation denominator is the primary
+baseline DLA minus the pABC substitution DLA, both at baseline scale. Notebook
+10 retokenizes after insertion without BOS to avoid the historical `advex.py`
+coordinate inconsistency and keeps one-clause (`single`) and two-clause
+(`double`) protocols explicitly separate, with independent base/attack seeds.
 
 Machine-readable provenance, configs, and consolidated key results live in
 `results/paper/summary.json`; tests derive and compare those values against the

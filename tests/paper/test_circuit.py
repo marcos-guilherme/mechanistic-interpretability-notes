@@ -8,6 +8,7 @@ from ioi_replication.paper.circuit import (
     HeadPositionNode,
     ReceiverComponent,
     SemanticPosition,
+    published_path_grid_edges,
     published_nodes,
     validate_circuit,
 )
@@ -134,8 +135,31 @@ def test_class_edges_cover_the_published_information_flow() -> None:
     }
 
 
+def test_published_path_grid_expands_every_class_edge_pair() -> None:
+    grid = published_path_grid_edges()
+    counts = {
+        (edge.sender_class, edge.receiver_class): 0
+        for edge in grid
+    }
+    for edge in grid:
+        counts[(edge.sender_class, edge.receiver_class)] += 1
+        assert edge.receiver_position == edge.class_edge.receiver_position
+        assert edge.sender.layer < edge.receiver.layer
+
+    assert len(grid) == 88
+    assert counts == {
+        (CircuitClass.PREVIOUS_TOKEN, CircuitClass.INDUCTION): 8,
+        (CircuitClass.DUPLICATE_TOKEN, CircuitClass.S_INHIBITION): 12,
+        (CircuitClass.INDUCTION, CircuitClass.S_INHIBITION): 16,
+        (CircuitClass.S_INHIBITION, CircuitClass.NAME_MOVERS): 12,
+        (CircuitClass.S_INHIBITION, CircuitClass.BACKUP_NAME_MOVERS): 32,
+        (CircuitClass.S_INHIBITION, CircuitClass.NEGATIVE_NAME_MOVERS): 8,
+    }
+
+
 def test_paper_namespace_exports_circuit_and_patching_apis() -> None:
     assert paper.PUBLISHED_CIRCUIT is PUBLISHED_CIRCUIT
     assert paper.HeadPositionNode is HeadPositionNode
+    assert paper.published_path_grid_edges is published_path_grid_edges
     assert callable(paper.activation_patch_node)
     assert callable(paper.paper_path_patch)

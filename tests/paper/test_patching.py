@@ -51,6 +51,16 @@ def test_patch_semantic_positions_can_patch_all_heads_at_variable_positions() ->
     assert patched.sum().item() == 8
 
 
+def test_patch_semantic_positions_requires_rank_four_when_head_is_given() -> None:
+    with pytest.raises(ValueError, match="rank four"):
+        patch_semantic_positions(
+            torch.zeros(2, 3, 2),
+            torch.ones(2, 3, 2),
+            target_positions=torch.tensor([0, 1]),
+            head=1,
+        )
+
+
 @pytest.mark.parametrize(
     ("target_positions", "source_positions", "head", "message"),
     [
@@ -86,7 +96,11 @@ class _Cfg:
 class _ActivationModel:
     cfg = _Cfg()
 
+    def __init__(self) -> None:
+        self.inference_modes: list[bool] = []
+
     def run_with_hooks(self, tokens, fwd_hooks):
+        self.inference_modes.append(torch.is_inference_mode_enabled())
         activation = torch.zeros(tokens.shape[0], tokens.shape[1], 2, 1)
         for _, hook_fn in fwd_hooks:
             activation = hook_fn(activation, None)
@@ -119,6 +133,7 @@ def test_activation_patch_node_patches_only_the_nodes_semantic_position() -> Non
     )
 
     assert value.item() == pytest.approx(208.0)
+    assert model.inference_modes == [True]
 
 
 def test_activation_patch_matrix_has_layer_head_position_axes() -> None:

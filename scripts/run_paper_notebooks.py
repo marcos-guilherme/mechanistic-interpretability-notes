@@ -55,6 +55,26 @@ def _write_manifest(manifest: dict[str, object]) -> None:
     temporary.replace(MANIFEST)
 
 
+def finalize_manifest(
+    manifest: dict[str, object],
+    *,
+    summary_return_code: int,
+    finished_at_utc: str,
+) -> int:
+    """Record summary status and only then mark the full run successful."""
+    manifest["finished_at_utc"] = finished_at_utc
+    manifest["summary"] = {
+        "exit_status": (
+            "success" if summary_return_code == 0 else "failed"
+        ),
+        "return_code": summary_return_code,
+    }
+    manifest["status"] = (
+        "success" if summary_return_code == 0 else "failed"
+    )
+    return summary_return_code
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=int, default=7200)
@@ -115,6 +135,7 @@ def main() -> int:
         "device": device,
         "kernel": args.kernel,
         "timeout_seconds": args.timeout,
+        "status": "running",
         "notebooks": [],
     }
     _write_manifest(manifest)
@@ -177,16 +198,27 @@ def main() -> int:
                 )
             break
 
-    manifest["finished_at_utc"] = _utc_now()
-    manifest["status"] = "failed" if failed else "success"
-    _write_manifest(manifest)
     if failed:
+        manifest["finished_at_utc"] = _utc_now()
+        manifest["status"] = "failed"
+        manifest["summary"] = {
+            "exit_status": "not_run_after_failure",
+            "return_code": None,
+        }
+        _write_manifest(manifest)
         return 1
-    return subprocess.run(
+    summary_return_code = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "build_paper_summary.py")],
         cwd=ROOT,
         check=False,
     ).returncode
+    result = finalize_manifest(
+        manifest,
+        summary_return_code=summary_return_code,
+        finished_at_utc=_utc_now(),
+    )
+    _write_manifest(manifest)
+    return result
 
 
 if __name__ == "__main__":
