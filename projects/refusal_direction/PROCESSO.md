@@ -2,6 +2,74 @@
 
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
 
+> **Estado:** concluído, com reprodução causal parcial
+>
+> **Última atualização:** 10 de novembro de 2026
+
+## Síntese acadêmica
+
+### Contexto
+
+Modelos ajustados para seguir instruções frequentemente recusam pedidos
+considerados nocivos. Arditi et al.,
+[*Refusal in Language Models Is Mediated by a Single
+Direction*](https://arxiv.org/abs/2406.11717), apresentam evidências de que
+esse comportamento é mediado por uma direção aproximadamente unidimensional no
+espaço residual. Se essa direção tiver papel causal, removê-la deve reduzir a
+recusa e adicioná-la deve induzir recusa mesmo em instruções inofensivas.
+
+Depois de estudar um circuito distribuído no experimento de IOI, escolhi esta
+replicação para explorar uma hipótese quase oposta em forma: um comportamento
+complexo mediado por uma única direção contínua. Isso me permitiu comparar duas
+maneiras de formular uma explicação mecanística — como conjunto de componentes
+discretos e como orientação no espaço residual.
+
+### Problema de pesquisa
+
+Esta replicação pergunta: **uma direção de recusa extraída das ativações de
+`google/gemma-2b-it` é necessária e suficiente para controlar o comportamento
+de recusa em um recorte local?** Necessidade é testada por ablação; suficiência,
+por adição. Um controle aleatório ortogonal e medidas de preservação ajudam a
+distinguir um efeito específico de uma perturbação indiscriminada do modelo.
+A conclusão pretendida é local: não se testa se a direção representa toda a
+nocividade, todo o alinhamento ou todos os mecanismos de recusa.
+
+### Métodos
+
+Foram amostrados 128 pedidos nocivos e 128 inofensivos para treino e 32 de cada
+classe para validação. Um filtro comportamental manteve exemplos cujo sinal
+basal era compatível com a classe, resultando em 121/127 exemplos efetivos no
+treino e 28/32 na validação. Em cada uma das 18 camadas e cinco posições finais
+do template, calculou-se a diferença entre as médias das ativações nocivas e
+inofensivas, produzindo 90 direções candidatas. A seleção combinou redução da
+recusa por ablação, indução de recusa por adição, KL inofensiva máxima de 0,1 e
+exclusão das camadas finais. A candidata escolhida foi comparada com uma
+orientação aleatória ortogonal. A execução usou seed 42, `bfloat16` e uma
+NVIDIA L4.
+
+### Resultados
+
+A direção selecionada veio da camada 12, posição `-1` do template, com norma
+17,1552. Nos 28 pedidos nocivos pós-filtro, a taxa de recusa caiu de 100% para
+0% após ablação; nos 32 pedidos inofensivos, a adição elevou a falsa recusa de
+0% para 93,75%. A ablação com a orientação aleatória manteve 100% de recusa
+nociva e, portanto, não reproduziu o efeito da direção selecionada. A KL média
+inofensiva após ablação foi 0,03057, abaixo do limite de 0,1. A variação de
+entropia cruzada foi −0,4664 na ablação e −0,4652 no controle, valores muito
+próximos; por isso, essa métrica isolada oferece evidência fraca de
+especificidade. O conjunto sustenta o padrão causal neste modelo e amostra,
+mas não sua universalidade.
+
+### Contribuição para o TCC
+
+Para o meu TCC, este experimento oferece uma análise causal mais compacta que
+a replicação IOI: em vez de um circuito distribuído, testei uma direção
+contínua no espaço residual. A comparação entre ablação, adição e controle me
+deu uma forma concreta de discutir necessidade, suficiência e preservação. Ao
+mesmo tempo, o filtro comportamental e o reuso da validação para seleção me
+mostraram como uma execução tecnicamente bem-sucedida ainda pode carregar
+ameaças importantes à validade externa e à estimativa de generalização.
+
 Este projeto é uma reprodução parcial e defensiva de Arditi et al.,
 [*Refusal in Language Models Is Mediated by a Single
 Direction*](https://arxiv.org/abs/2406.11717). A pergunta central do trabalho é
@@ -185,8 +253,10 @@ segurança global ou uma representação completa de nocividade.
 
 ## Incidentes reais e o que ensinaram
 
-A execução também produziu lições operacionais que fazem parte da
-reprodutibilidade:
+Durante a execução, encontrei problemas que não apareciam na formulação
+abstrata do experimento, mas que mudavam diretamente a capacidade de
+reproduzi-lo. Mantive esses incidentes porque eles mostram o trabalho prático
+necessário entre o método descrito no artigo e uma execução verificável:
 
 - O runtime atual do Colab veio com Python 3.13, que exigiu
   Transformers 4.48.3. Para Python anterior a 3.13, o lock mantém
@@ -318,10 +388,10 @@ enfraquecem seu valor como evidência de especificidade. A KL baixa é mais
 direta para a preservação da ablação, mas não há KL do controle. Nenhuma dessas
 medidas prova ausência de degradação fora dessa amostra.
 
-Próximos passos proporcionais seriam repetir com várias seeds, reservar um
-teste final independente, ampliar as métricas de qualidade e avaliar outros
-modelos e distribuições permitidos. Antes de expandir a conclusão, também
-seria necessário verificar sensibilidade ao filtro, à posição, ao coeficiente
-de adição e à definição de recusa. Até lá, a conclusão adequada é restrita: o
-padrão causal de uma direção de recusa foi reproduzido neste recorte do Gemma
-2B IT.
+Como próximos passos, eu repetiria o experimento com várias seeds, reservaria
+um teste final independente, ampliaria as métricas de qualidade e avaliaria
+outros modelos e distribuições permitidos. Antes de expandir a conclusão,
+também precisaria verificar a sensibilidade ao filtro, à posição, ao
+coeficiente de adição e à definição de recusa. Até lá, mantenho a conclusão
+deliberadamente restrita: reproduzi o padrão causal de uma direção de recusa
+neste recorte do Gemma 2B IT.
