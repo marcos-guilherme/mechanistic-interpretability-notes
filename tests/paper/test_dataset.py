@@ -5,6 +5,7 @@ import re
 
 import pytest
 import torch
+from transformers import AutoTokenizer
 
 from ioi_replication.paper.dataset import (
     ABBA_TEMPLATES,
@@ -26,9 +27,15 @@ class _Batch:
 class WhitespaceTokenizer:
     eos_token_id = 0
     pad_token_id = 0
+    padding_side = "right"
 
-    def __init__(self, split_words: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        split_words: set[str] | None = None,
+        padding_side: str = "right",
+    ) -> None:
         self.split_words = split_words or set()
+        self.padding_side = padding_side
         self._ids: dict[str, int] = {}
 
     def encode(
@@ -64,8 +71,12 @@ class WhitespaceTokenizer:
         input_ids = torch.full((len(rows), width), self.pad_token_id)
         attention_mask = torch.zeros((len(rows), width), dtype=torch.long)
         for row_index, row in enumerate(rows):
-            input_ids[row_index, : len(row)] = torch.tensor(row)
-            attention_mask[row_index, : len(row)] = 1
+            if self.padding_side == "right":
+                input_ids[row_index, : len(row)] = torch.tensor(row)
+                attention_mask[row_index, : len(row)] = 1
+            else:
+                input_ids[row_index, -len(row) :] = torch.tensor(row)
+                attention_mask[row_index, -len(row) :] = 1
         return _Batch(input_ids=input_ids, attention_mask=attention_mask)
 
     def _token_id(self, piece: str) -> int:
@@ -127,9 +138,11 @@ def test_dataset_is_deterministic_and_supports_small_n() -> None:
     assert first.ioi_prompts != different.ioi_prompts
     assert len(first) == 4
     assert first.prepend_bos is False
+    assert first.dataset_sha256 == second.dataset_sha256
+    assert first.dataset_sha256 != different.dataset_sha256
 
 
-def test_pioi_pabc_pairs_are_matched_and_grouped_by_template() -> None:
+def test_pabc_replaces_all_three_roles_with_unrelated_names() -> None:
     dataset = build_paired_dataset(
         WhitespaceTokenizer(),
         n=31,
@@ -137,19 +150,58 @@ def test_pioi_pabc_pairs_are_matched_and_grouped_by_template() -> None:
         pattern="mixed",
     )
 
-    covered_rows = torch.cat(tuple(dataset.groups.values())).sort().values
-    assert torch.equal(covered_rows, torch.arange(len(dataset)))
-    assert set(dataset.groups) == set(dataset.template_ids.tolist())
     assert torch.equal(dataset.ioi_attention_mask, dataset.abc_attention_mask)
     assert dataset.ioi_tokens.shape == dataset.abc_tokens.shape
 
     for index, metadata in enumerate(dataset.metadata):
-        assert len(
-            {metadata.io_name, metadata.subject_name, metadata.abc_name}
-        ) == 3
-        assert metadata.template_id in dataset.groups
-        assert index in dataset.groups[metadata.template_id].tolist()
-        assert dataset.ioi_prompts[index] != dataset.abc_prompts[index]
+        original_names = {metadata.io_name, metadata.subject_name}
+        abc_names = {
+            metadata.abc_io_name,
+            metadata.abc_s1_name,
+            metadata.abc_s2_name,
+        }
+        assert len(abc_names) == 3
+        assert original_names.isdisjoint(abc_names)
+
+        positions = dataset.positions
+        assert (
+            dataset.abc_tokens[index, positions["IO"][index]]
+            == dataset.abc_io_token_ids[index]
+        )
+        assert (
+            dataset.abc_tokens[index, positions["S1"][index]]
+            == dataset.abc_s1_token_ids[index]
+        )
+        assert (
+            dataset.abc_tokens[index, positions["S2"][index]]
+            == dataset.abc_s2_token_ids[index]
+        )
+        assert (
+            dataset.abc_tokens[index, positions["END"][index] + 1]
+            == dataset.abc_io_token_ids[index]
+        )
+
+
+def test_groups_distinguish_pattern_and_template() -> None:
+    dataset = build_paired_dataset(
+        WhitespaceTokenizer(),
+        n=200,
+        seed=5,
+        pattern="mixed",
+    )
+
+    covered_rows = torch.cat(tuple(dataset.groups.values())).sort().values
+    assert torch.equal(covered_rows, torch.arange(len(dataset)))
+    assert len(dataset.groups) <= 30
+    for key, indices in dataset.groups.items():
+        pattern, template_id = key
+        assert pattern in {"ABBA", "BABA"}
+        assert 0 <= template_id < 15
+        assert all(
+            dataset.metadata[index].pattern == pattern
+            and dataset.metadata[index].template_id == template_id
+            for index in indices.tolist()
+        )
 
 
 @pytest.mark.parametrize("pattern", ["BABA", "ABBA", "mixed"])
@@ -184,7 +236,83 @@ def test_semantic_positions_point_to_the_expected_tokens(pattern: str) -> None:
     )
     assert torch.equal(
         dataset.abc_tokens[rows, dataset.positions["S2"]],
-        dataset.abc_token_ids,
+        dataset.abc_s2_token_ids,
+    )
+
+
+def test_abba_and_baba_preserve_expected_io_subject_order() -> None:
+    tokenizer = WhitespaceTokenizer()
+    abba = build_paired_dataset(tokenizer, n=8, seed=4, pattern="ABBA")
+    baba = build_paired_dataset(tokenizer, n=8, seed=4, pattern="BABA")
+
+    assert all(
+        io < s1 < s2 < end
+        for io, s1, s2, end in zip(
+            abba.positions["IO"],
+            abba.positions["S1"],
+            abba.positions["S2"],
+            abba.positions["END"],
+        )
+    )
+    assert all(
+        s1 < io < s2 < end
+        for io, s1, s2, end in zip(
+            baba.positions["IO"],
+            baba.positions["S1"],
+            baba.positions["S2"],
+            baba.positions["END"],
+        )
+    )
+    assert ABBA_TEMPLATES[0].startswith(
+        "Then, [A] and [B] went to the [PLACE]. [B]"
+    )
+
+
+def test_end_positions_follow_each_unpadded_length() -> None:
+    dataset = build_paired_dataset(
+        WhitespaceTokenizer(),
+        n=40,
+        seed=12,
+    )
+    lengths = dataset.ioi_attention_mask.sum(dim=1)
+
+    assert len(lengths.unique()) > 1
+    assert torch.equal(dataset.positions["END"], lengths - 2)
+
+
+def test_dataset_rejects_left_padding() -> None:
+    with pytest.raises(ValueError, match="right padding"):
+        build_paired_dataset(
+            WhitespaceTokenizer(padding_side="left"),
+            n=2,
+        )
+
+
+def test_dataset_requires_explicit_pad_token_without_mutating_tokenizer() -> None:
+    tokenizer = WhitespaceTokenizer()
+    tokenizer.pad_token_id = None
+
+    with pytest.raises(ValueError, match="pad token explicitly"):
+        build_paired_dataset(tokenizer, n=2)
+    assert tokenizer.pad_token_id is None
+
+
+def test_real_gpt2_tokenizer_smoke() -> None:
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "gpt2",
+            local_files_only=True,
+        )
+    except OSError:
+        pytest.skip("GPT-2 tokenizer is not available in the local cache")
+    tokenizer.pad_token = tokenizer.eos_token
+
+    dataset = build_paired_dataset(tokenizer, n=4, seed=3)
+
+    assert dataset.ioi_tokens.shape == dataset.abc_tokens.shape
+    assert torch.equal(
+        dataset.positions["END"],
+        dataset.ioi_attention_mask.sum(dim=1) - 2,
     )
 
 

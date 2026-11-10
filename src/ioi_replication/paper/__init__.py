@@ -17,6 +17,7 @@ from ioi_replication.paper.metrics import (
     io_probability,
     logit_difference,
     logits_at_end,
+    standard_error,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "io_probability",
     "logit_difference",
     "logits_at_end",
+    "standard_error",
 ]

@@ -6,6 +6,7 @@ from ioi_replication.paper.metrics import (
     io_probability,
     logit_difference,
     logits_at_end,
+    standard_error,
 )
 
 
@@ -82,6 +83,21 @@ def test_io_probability_uses_full_vocabulary_softmax_at_end() -> None:
         io_tokens,
         end_positions,
     ).item() == pytest.approx(expected.mean().item())
+
+
+def test_standard_error_uses_sample_standard_deviation() -> None:
+    values = torch.tensor([1.0, 2.0, 3.0, 4.0])
+
+    assert standard_error(values).item() == pytest.approx(
+        values.std(unbiased=True).item() / 2
+    )
+
+
+def test_standard_error_requires_multiple_scalar_observations() -> None:
+    with pytest.raises(ValueError, match="at least two"):
+        standard_error(torch.tensor([1.0]))
+    with pytest.raises(ValueError, match="one-dimensional"):
+        standard_error(torch.ones(2, 2))
 
 
 @pytest.mark.parametrize(

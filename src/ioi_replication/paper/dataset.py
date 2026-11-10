@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import random
 from typing import Any, Literal, Sequence
 
@@ -179,7 +181,9 @@ class PromptMetadata:
     pattern: Literal["BABA", "ABBA"]
     io_name: str
     subject_name: str
-    abc_name: str
+    abc_io_name: str
+    abc_s1_name: str
+    abc_s2_name: str
     place: str
     object_name: str
 
@@ -197,9 +201,11 @@ class PairedIOIDataset:
     positions: dict[str, torch.Tensor]
     io_token_ids: torch.Tensor
     s_token_ids: torch.Tensor
-    abc_token_ids: torch.Tensor
+    abc_io_token_ids: torch.Tensor
+    abc_s1_token_ids: torch.Tensor
+    abc_s2_token_ids: torch.Tensor
     template_ids: torch.Tensor
-    groups: dict[int, torch.Tensor]
+    groups: dict[tuple[str, int], torch.Tensor]
     metadata: list[PromptMetadata]
     seed: int
     prepend_bos: bool = False
@@ -210,6 +216,25 @@ class PairedIOIDataset:
     @property
     def n(self) -> int:
         return len(self)
+
+    @property
+    def dataset_sha256(self) -> str:
+        """Hash prompt content and grouping metadata for result provenance."""
+        payload = {
+            "ioi_prompts": self.ioi_prompts,
+            "abc_prompts": self.abc_prompts,
+            "groups": [
+                [item.pattern, item.template_id] for item in self.metadata
+            ],
+            "prepend_bos": self.prepend_bos,
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
 
 def _single_token_items(
@@ -244,13 +269,6 @@ def filter_single_token_vocabulary(
     )
 
 
-def _replace_last(text: str, old: str, new: str) -> str:
-    prefix, separator, suffix = text.rpartition(old)
-    if not separator:
-        raise ValueError(f"{old!r} is missing from template")
-    return prefix + new + suffix
-
-
 def _fill_template(
     template: str,
     *,
@@ -267,11 +285,32 @@ def _fill_template(
     )
 
 
+def _fill_abc_template(
+    template: str,
+    *,
+    abc_io_name: str,
+    abc_s1_name: str,
+    abc_s2_name: str,
+    place: str,
+    object_name: str,
+) -> str:
+    """Apply historical IO→RAND, S→RAND, S1→RAND role replacements."""
+    return (
+        template.replace("[A]", abc_io_name)
+        .replace("[B]", abc_s1_name, 1)
+        .replace("[B]", abc_s2_name, 1)
+        .replace("[PLACE]", place)
+        .replace("[OBJECT]", object_name)
+    )
+
+
 def _tokenize(tokenizer: Any, prompts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+    if getattr(tokenizer, "padding_side", "right") != "right":
+        raise ValueError("paper datasets require right padding")
     if getattr(tokenizer, "pad_token_id", None) is None:
-        if getattr(tokenizer, "eos_token", None) is None:
-            raise ValueError("tokenizer needs a pad token or EOS token")
-        tokenizer.pad_token = tokenizer.eos_token
+        raise ValueError(
+            "configure a pad token explicitly before building the dataset"
+        )
     encoded = tokenizer(
         prompts,
         padding=True,
@@ -320,8 +359,10 @@ def build_paired_dataset(
 ) -> PairedIOIDataset:
     """Generate deterministic, token-aligned pIOI/pABC examples.
 
-    pABC replaces S2 with a third name while retaining every other token.
-    Consequently each pair has identical sequence length and template group.
+    pABC applies the historical IO→RAND, S→RAND, S1→RAND chain, yielding
+    unrelated names at the IO, S1 and S2 roles while retaining all positions.
+    The tokenizer must be explicitly configured for right padding with a pad
+    token; this function never mutates tokenizer configuration.
     """
     if n <= 0:
         raise ValueError("n must be positive")
@@ -329,8 +370,8 @@ def build_paired_dataset(
         raise ValueError("pattern must be 'BABA', 'ABBA', or 'mixed'")
 
     vocabulary = filter_single_token_vocabulary(tokenizer)
-    if len(vocabulary.names) < 3:
-        raise ValueError("at least three single-token names are required")
+    if len(vocabulary.names) < 5:
+        raise ValueError("at least five single-token names are required")
     if not vocabulary.places:
         raise ValueError("at least one single-token place is required")
     if not vocabulary.objects:
@@ -350,7 +391,13 @@ def build_paired_dataset(
             BABA_TEMPLATES if selected_pattern == "BABA" else ABBA_TEMPLATES
         )
         template = templates[template_id]
-        io_name, subject_name, abc_name = rng.sample(vocabulary.names, 3)
+        (
+            io_name,
+            subject_name,
+            abc_io_name,
+            abc_s1_name,
+            abc_s2_name,
+        ) = rng.sample(vocabulary.names, 5)
         place = rng.choice(vocabulary.places)
         object_name = rng.choice(vocabulary.objects)
 
@@ -363,12 +410,12 @@ def build_paired_dataset(
                 object_name=object_name,
             )
         )
-        abc_template = _replace_last(template, "[B]", "[C]")
         abc_prompts.append(
-            _fill_template(
-                abc_template.replace("[C]", abc_name),
-                io_name=io_name,
-                subject_name=subject_name,
+            _fill_abc_template(
+                template,
+                abc_io_name=abc_io_name,
+                abc_s1_name=abc_s1_name,
+                abc_s2_name=abc_s2_name,
                 place=place,
                 object_name=object_name,
             )
@@ -379,7 +426,9 @@ def build_paired_dataset(
                 pattern=selected_pattern,
                 io_name=io_name,
                 subject_name=subject_name,
-                abc_name=abc_name,
+                abc_io_name=abc_io_name,
+                abc_s1_name=abc_s1_name,
+                abc_s2_name=abc_s2_name,
                 place=place,
                 object_name=object_name,
             )
@@ -407,9 +456,32 @@ def build_paired_dataset(
         ],
         dtype=torch.long,
     )
-    abc_token_ids = torch.tensor(
+    abc_io_token_ids = torch.tensor(
         [
-            tokenizer.encode(" " + item.abc_name, add_special_tokens=False)[0]
+            tokenizer.encode(
+                " " + item.abc_io_name,
+                add_special_tokens=False,
+            )[0]
+            for item in metadata
+        ],
+        dtype=torch.long,
+    )
+    abc_s1_token_ids = torch.tensor(
+        [
+            tokenizer.encode(
+                " " + item.abc_s1_name,
+                add_special_tokens=False,
+            )[0]
+            for item in metadata
+        ],
+        dtype=torch.long,
+    )
+    abc_s2_token_ids = torch.tensor(
+        [
+            tokenizer.encode(
+                " " + item.abc_s2_name,
+                add_special_tokens=False,
+            )[0]
             for item in metadata
         ],
         dtype=torch.long,
@@ -421,19 +493,31 @@ def build_paired_dataset(
         s_token_ids,
     )
     rows = torch.arange(n)
+    expected_abc_roles = {
+        "IO": abc_io_token_ids,
+        "S1": abc_s1_token_ids,
+        "S2": abc_s2_token_ids,
+    }
+    for role, token_ids in expected_abc_roles.items():
+        if not torch.equal(abc_tokens[rows, positions[role]], token_ids):
+            raise ValueError(f"pABC {role} role must align with pIOI")
     if not torch.equal(
-        abc_tokens[rows, positions["S2"]],
-        abc_token_ids,
+        abc_tokens[rows, positions["END"] + 1],
+        abc_io_token_ids,
     ):
-        raise ValueError("pABC replacement must be aligned with IOI S2")
+        raise ValueError("pABC final answer must repeat its IO role")
 
     template_ids = torch.tensor(
         [item.template_id for item in metadata],
         dtype=torch.long,
     )
+    group_keys = [(item.pattern, item.template_id) for item in metadata]
     groups = {
-        template_id: (template_ids == template_id).nonzero().flatten()
-        for template_id in sorted(template_ids.unique().tolist())
+        key: torch.tensor(
+            [index for index, item_key in enumerate(group_keys) if item_key == key],
+            dtype=torch.long,
+        )
+        for key in sorted(set(group_keys))
     }
     return PairedIOIDataset(
         ioi_prompts=ioi_prompts,
@@ -445,7 +529,9 @@ def build_paired_dataset(
         positions=positions,
         io_token_ids=io_token_ids,
         s_token_ids=s_token_ids,
-        abc_token_ids=abc_token_ids,
+        abc_io_token_ids=abc_io_token_ids,
+        abc_s1_token_ids=abc_s1_token_ids,
+        abc_s2_token_ids=abc_s2_token_ids,
         template_ids=template_ids,
         groups=groups,
         metadata=metadata,

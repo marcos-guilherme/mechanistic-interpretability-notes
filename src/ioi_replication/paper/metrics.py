@@ -8,6 +8,15 @@ import torch
 Reduction = Literal["mean", "none"]
 
 
+def standard_error(values: torch.Tensor) -> torch.Tensor:
+    """Estimate the standard error of a mean from per-example values."""
+    if values.ndim != 1:
+        raise ValueError("values must be one-dimensional")
+    if values.numel() < 2:
+        raise ValueError("at least two observations are required")
+    return values.float().std(unbiased=True) / values.numel() ** 0.5
+
+
 def logits_at_end(
     logits: torch.Tensor,
     end_positions: torch.Tensor,
