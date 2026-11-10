@@ -1248,3 +1248,30 @@ def test_fetch_rejects_staging_replacement_before_download(
 
     assert not download_called
     assert (original / "sentinel.txt").read_text(encoding="utf-8") == "untouched"
+
+
+def test_run_captured_decodes_utf8_ansi_and_preserves_marker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = load_module(RUNNER_PATH, "live_utf8_capture")
+    marker = f"JSPACE_BOOTSTRAP_SUCCESS:{'a' * 64}"
+    stdout_prefix = b"\x1b[32mremote: "
+    stdout_suffix = b"\x1b[0m\n" + marker.encode("ascii") + b"\n"
+    stderr_prefix = b"\x1b[33mwarning: "
+    stderr_suffix = b"\x1b[0m\n"
+    child_code = (
+        "import os\n"
+        f"os.write(1, {stdout_prefix!r} + b'\\xc2\\x81' + {stdout_suffix!r})\n"
+        f"os.write(2, {stderr_prefix!r} + b'\\x81' + {stderr_suffix!r})\n"
+    )
+
+    completed = runner.run_captured([sys.executable, "-c", child_code])
+
+    assert isinstance(completed.stdout, str)
+    assert isinstance(completed.stderr, str)
+    assert marker in completed.stdout.splitlines()
+    assert "\x81" in completed.stdout
+    assert "\ufffd" in completed.stderr
+    captured = capsys.readouterr()
+    assert marker in captured.out
+    assert "warning:" in captured.err

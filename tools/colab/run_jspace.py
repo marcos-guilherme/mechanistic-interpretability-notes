@@ -120,6 +120,8 @@ def run_captured(command: list[str]) -> subprocess.CompletedProcess[str]:
         command,
         cwd=ROOT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
