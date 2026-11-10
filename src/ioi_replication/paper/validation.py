@@ -29,23 +29,50 @@ PAPER_MODEL_PERFORMANCE = 3.56
 PAPER_FAITHFULNESS_GAP = 0.46
 PAPER_RETAINED_FRACTION = 0.87
 PAPER_MINIMALITY_THRESHOLD = 0.01
+CI95_Z = 1.959963984540054
 
 
 @dataclass(frozen=True)
 class PerformanceEstimate:
-    """Mean IO-S logit difference and its standard error."""
+    """Per-example IO-S values with derived mean and standard error."""
 
-    mean: float
-    standard_error: float
-    n: int
+    values: tuple[float, ...]
 
     def __post_init__(self) -> None:
-        if self.n <= 0:
-            raise ValueError("n must be positive")
-        if not math.isfinite(self.mean) or not math.isfinite(self.standard_error):
-            raise ValueError("performance estimates must be finite")
-        if self.standard_error < 0:
-            raise ValueError("standard_error must be non-negative")
+        values = tuple(float(value) for value in self.values)
+        if not values:
+            raise ValueError("values must not be empty")
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("performance values must be finite")
+        object.__setattr__(self, "values", values)
+
+    @property
+    def n(self) -> int:
+        return len(self.values)
+
+    @property
+    def mean(self) -> float:
+        return sum(self.values) / self.n
+
+    @property
+    def standard_error(self) -> float:
+        if self.n < 2:
+            return 0.0
+        centered = sum((value - self.mean) ** 2 for value in self.values)
+        sample_variance = centered / (self.n - 1)
+        return math.sqrt(sample_variance / self.n)
+
+
+@dataclass(frozen=True)
+class ConfidenceInterval:
+    low: float
+    high: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.low) or not math.isfinite(self.high):
+            raise ValueError("confidence interval bounds must be finite")
+        if self.low < 0 or self.high < self.low:
+            raise ValueError("confidence interval bounds are invalid")
 
 
 class PerformanceEvaluator(Protocol):
@@ -72,6 +99,7 @@ class FaithfulnessResult:
     absolute_gap: float
     retained_fraction: float
     absolute_gap_standard_error: float
+    absolute_gap_ci95: ConfidenceInterval
     paper: PaperFaithfulnessTargets = field(
         default_factory=PaperFaithfulnessTargets
     )
@@ -84,11 +112,12 @@ class CompletenessResult:
     circuit_without: PerformanceEstimate
     incompleteness: float
     incompleteness_standard_error: float
+    incompleteness_ci95: ConfidenceInterval
 
 
 @dataclass(frozen=True)
 class ClassCompletenessResult:
-    circuit_class: CircuitClass
+    class_name: str
     result: CompletenessResult
 
 
@@ -109,11 +138,19 @@ class GreedyCompletenessRun:
 
 
 @dataclass(frozen=True)
+class RankedGreedyResult:
+    run_index: int
+    step_index: int
+    result: CompletenessResult
+
+
+@dataclass(frozen=True)
 class CompletenessStudy:
     empty: CompletenessResult
     by_class: tuple[ClassCompletenessResult, ...]
     random: tuple[CompletenessResult, ...]
     greedy: tuple[GreedyCompletenessRun, ...]
+    top_greedy: tuple[RankedGreedyResult, ...]
 
 
 @dataclass(frozen=True)
@@ -124,13 +161,67 @@ class MinimalityResult:
     with_node: PerformanceEstimate
     raw_effect: float
     raw_effect_standard_error: float
+    raw_effect_ci95: ConfidenceInterval
     normalized_effect: float
+    normalized_effect_ci95: ConfidenceInterval
     threshold_fraction: float
     passes_threshold: bool
+    ci_supports_threshold: bool
 
 
 def _ordered(nodes: Iterable[HeadPositionNode]) -> tuple[HeadPositionNode, ...]:
     return tuple(sorted(set(nodes)))
+
+
+def _paired_absolute_effect(
+    first: PerformanceEstimate,
+    second: PerformanceEstimate,
+) -> tuple[float, float, ConfidenceInterval]:
+    if first.n != second.n:
+        raise ValueError("paired estimates must contain the same number of prompts")
+    differences = tuple(
+        first_value - second_value
+        for first_value, second_value in zip(first.values, second.values)
+    )
+    signed_mean = sum(differences) / len(differences)
+    effect = abs(signed_mean)
+    if len(differences) < 2:
+        standard_error = 0.0
+    else:
+        centered = sum(
+            (difference - signed_mean) ** 2
+            for difference in differences
+        )
+        standard_error = math.sqrt(
+            centered / (len(differences) - 1) / len(differences)
+        )
+    margin = CI95_Z * standard_error
+    return (
+        effect,
+        standard_error,
+        ConfidenceInterval(
+            low=max(0.0, effect - margin),
+            high=effect + margin,
+        ),
+    )
+
+
+HISTORICAL_COMPLETENESS_CLASSES: dict[
+    str,
+    tuple[HeadPositionNode, ...],
+] = {
+    "name_movers": (
+        PUBLISHED_CIRCUIT[CircuitClass.NAME_MOVERS]
+        + PUBLISHED_CIRCUIT[CircuitClass.BACKUP_NAME_MOVERS]
+    ),
+    "negative_name_movers": PUBLISHED_CIRCUIT[
+        CircuitClass.NEGATIVE_NAME_MOVERS
+    ],
+    "s_inhibition": PUBLISHED_CIRCUIT[CircuitClass.S_INHIBITION],
+    "induction": PUBLISHED_CIRCUIT[CircuitClass.INDUCTION],
+    "duplicate_token": PUBLISHED_CIRCUIT[CircuitClass.DUPLICATE_TOKEN],
+    "previous_token": PUBLISHED_CIRCUIT[CircuitClass.PREVIOUS_TOKEN],
+}
 
 
 def f_model(evaluator: PerformanceEvaluator) -> PerformanceEstimate:
@@ -166,15 +257,17 @@ def evaluate_faithfulness(
     circuit = f_circuit(evaluator)
     if model.mean == 0:
         raise ZeroDivisionError("F(M) must be non-zero to compute retained fraction")
+    gap, gap_standard_error, gap_ci95 = _paired_absolute_effect(
+        model,
+        circuit,
+    )
     return FaithfulnessResult(
         model=model,
         circuit=circuit,
-        absolute_gap=abs(model.mean - circuit.mean),
+        absolute_gap=gap,
         retained_fraction=circuit.mean / model.mean,
-        absolute_gap_standard_error=math.hypot(
-            model.standard_error,
-            circuit.standard_error,
-        ),
+        absolute_gap_standard_error=gap_standard_error,
+        absolute_gap_ci95=gap_ci95,
     )
 
 
@@ -185,15 +278,17 @@ def evaluate_completeness(
     removed_nodes = _ordered(removed)
     model = f_model_without(evaluator, removed_nodes)
     circuit = f_circuit_without(evaluator, removed_nodes)
+    incompleteness, standard_error, ci95 = _paired_absolute_effect(
+        model,
+        circuit,
+    )
     return CompletenessResult(
         removed=removed_nodes,
         model_without=model,
         circuit_without=circuit,
-        incompleteness=abs(model.mean - circuit.mean),
-        incompleteness_standard_error=math.hypot(
-            model.standard_error,
-            circuit.standard_error,
-        ),
+        incompleteness=incompleteness,
+        incompleteness_standard_error=standard_error,
+        incompleteness_ci95=ci95,
     )
 
 
@@ -228,7 +323,13 @@ def greedy_completeness(
     candidate_limit: int | None,
     seed: int,
 ) -> GreedyCompletenessRun:
-    """Greedily add the candidate maximizing incompleteness at each step."""
+    """Follow ``completeness.py`` greedy sampling and acceptance.
+
+    Each iteration samples up to ``candidate_limit`` remaining nodes and only
+    adds the best candidate when it improves incompleteness. This follows the
+    executable historical source, not Algorithm 3's literal line 4, whose
+    pseudocode compares two circuit scores instead of the completeness metric.
+    """
     nodes = tuple(nodes)
     if len(set(nodes)) != len(nodes):
         raise ValueError("nodes must be unique")
@@ -287,10 +388,10 @@ def greedy_completeness(
 def evaluate_completeness_study(
     evaluator: PerformanceEvaluator,
     *,
-    circuit: Mapping[
-        CircuitClass,
+    classes: Mapping[
+        str,
         Sequence[HeadPositionNode],
-    ] = PUBLISHED_CIRCUIT,
+    ] = HISTORICAL_COMPLETENESS_CLASSES,
     random_count: int,
     greedy_runs: int,
     greedy_steps: int,
@@ -299,32 +400,54 @@ def evaluate_completeness_study(
 ) -> CompletenessStudy:
     if greedy_runs < 0:
         raise ValueError("greedy_runs must be non-negative")
-    nodes = tuple(node for group in circuit.values() for node in group)
+    nodes = tuple(
+        getattr(evaluator, "circuit_nodes", published_nodes())
+    )
+    class_results = tuple(
+        ClassCompletenessResult(
+            class_name=class_name,
+            result=evaluate_completeness(evaluator, class_nodes),
+        )
+        for class_name, class_nodes in classes.items()
+    )
+    greedy_runs_results = tuple(
+        greedy_completeness(
+            evaluator,
+            nodes=nodes,
+            steps=greedy_steps,
+            candidate_limit=greedy_candidate_limit,
+            seed=seed + run,
+        )
+        for run in range(greedy_runs)
+    )
+    accepted_intermediates = [
+        RankedGreedyResult(
+            run_index=run_index,
+            step_index=step_index,
+            result=step.result,
+        )
+        for run_index, run in enumerate(greedy_runs_results)
+        for step_index, step in enumerate(run.steps, start=1)
+        if step.accepted
+    ]
+    top_greedy = tuple(
+        sorted(
+            accepted_intermediates,
+            key=lambda item: item.result.incompleteness,
+            reverse=True,
+        )[:5]
+    )
     return CompletenessStudy(
         empty=evaluate_completeness(evaluator, ()),
-        by_class=tuple(
-            ClassCompletenessResult(
-                circuit_class=circuit_class,
-                result=evaluate_completeness(evaluator, class_nodes),
-            )
-            for circuit_class, class_nodes in circuit.items()
-        ),
+        by_class=class_results,
         random=random_completeness(
             evaluator,
             nodes=nodes,
             count=random_count,
             seed=seed,
         ),
-        greedy=tuple(
-            greedy_completeness(
-                evaluator,
-                nodes=nodes,
-                steps=greedy_steps,
-                candidate_limit=greedy_candidate_limit,
-                seed=seed + run,
-            )
-            for run in range(greedy_runs)
-        ),
+        greedy=greedy_runs_results,
+        top_greedy=top_greedy,
     )
 
 
@@ -401,32 +524,44 @@ def evaluate_minimality(
 ) -> MinimalityResult:
     if threshold_fraction < 0:
         raise ValueError("threshold_fraction must be non-negative")
-    circuit = set(published_nodes())
+    circuit_nodes = tuple(
+        getattr(evaluator, "circuit_nodes", published_nodes())
+    )
+    circuit = set(circuit_nodes)
     if node not in circuit or not set(context) <= circuit:
-        raise ValueError("node and context nodes must belong to the circuit")
+        raise ValueError(
+            "node and context nodes must belong to the evaluator circuit"
+        )
     if node in context:
         raise ValueError("minimality context must exclude the evaluated node")
     context = _ordered(context)
     without_node = f_circuit_without(evaluator, (*context, node))
     with_node = f_circuit_without(evaluator, context)
-    raw_effect = abs(without_node.mean - with_node.mean)
+    raw_effect, raw_standard_error, raw_ci95 = _paired_absolute_effect(
+        with_node,
+        without_node,
+    )
     model = f_model(evaluator)
     if model.mean == 0:
         raise ZeroDivisionError("F(M) must be non-zero to normalize minimality")
     normalized = raw_effect / abs(model.mean)
+    normalized_ci95 = ConfidenceInterval(
+        low=raw_ci95.low / abs(model.mean),
+        high=raw_ci95.high / abs(model.mean),
+    )
     return MinimalityResult(
         node=node,
         context=context,
         without_node=without_node,
         with_node=with_node,
         raw_effect=raw_effect,
-        raw_effect_standard_error=math.hypot(
-            without_node.standard_error,
-            with_node.standard_error,
-        ),
+        raw_effect_standard_error=raw_standard_error,
+        raw_effect_ci95=raw_ci95,
         normalized_effect=normalized,
+        normalized_effect_ci95=normalized_ci95,
         threshold_fraction=threshold_fraction,
         passes_threshold=normalized >= threshold_fraction,
+        ci_supports_threshold=normalized_ci95.low > threshold_fraction,
     )
 
 
@@ -577,14 +712,7 @@ class MeanAblationEvaluator:
                     )
                 ]
             )
-            standard_error = (
-                float(values.std(unbiased=True) / math.sqrt(len(values)))
-                if len(values) > 1
-                else 0.0
-            )
             self._cache[key] = PerformanceEstimate(
-                mean=float(values.mean()),
-                standard_error=standard_error,
-                n=len(values),
+                values=tuple(float(value) for value in values),
             )
         return self._cache[key]
