@@ -73,6 +73,19 @@ REASON_MESSAGES = {
     "readout_failed": "observational readout failed",
     "unexpected_error": "unexpected programming error; see traceback",
 }
+FAILURE_ERROR_TYPES = {
+    "incomplete_observation": frozenset({"ObservationDataError"}),
+    "cuda_required": frozenset({"CudaRequiredError"}),
+    "asset_load_failed": frozenset({"AssetLoadError"}),
+    "resource_exhausted": frozenset(
+        {"ResourceExhaustionError", "OutOfMemoryError"}
+    ),
+    "tokenization_failed": frozenset({"TokenizationError"}),
+    "dimension_mismatch": frozenset({"DimensionMismatchError"}),
+    "layer_band_invalid": frozenset({"LayerBandError"}),
+    "lens_integrity_failed": frozenset({"LensIntegrityError"}),
+    "dataset_invalid": frozenset({"DatasetValidationError"}),
+}
 MAX_JSON_BYTES = 2_000_000
 AUDIT_ITEM_FIELDS = {"name", "intermediates"}
 AUDIT_INTERMEDIATE_FIELDS = {
@@ -617,6 +630,15 @@ def _validate_failure_raw(
         raise ObservationValidationError(
             "raw failure differs from compact result"
         )
+    expected_error_types = FAILURE_ERROR_TYPES.get(reason["code"])
+    if expected_error_types is None:
+        raise ObservationValidationError(
+            "failure raw is not allowed for this observation reason"
+        )
+    if failure["error_type"] not in expected_error_types:
+        raise ObservationValidationError(
+            "raw failure error type differs from the pipeline mapping"
+        )
 
 
 def validate_documents(
@@ -696,13 +718,17 @@ def validate_documents(
         raise ObservationValidationError(
             "inconclusive observation requires a reason"
         )
-    elif "failure" in raw:
-        _validate_failure_raw(raw, manifest, reason, result)
     elif reason["code"] == "incomplete_provenance":
+        if not complete or "failure" in raw:
+            raise ObservationValidationError(
+                "incomplete provenance requires measurement raw data"
+            )
         _reconcile_raw_checked(raw, manifest, result)
+    elif reason["code"] in FAILURE_ERROR_TYPES:
+        _validate_failure_raw(raw, manifest, reason, result)
     else:
         raise ObservationValidationError(
-            "raw failure is required for inconclusive observation"
+            "inconclusive reason is not produced by the observation pipeline"
         )
 
 

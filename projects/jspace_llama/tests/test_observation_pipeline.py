@@ -9,14 +9,24 @@ from types import SimpleNamespace
 
 import jsonschema
 import pytest
+import torch
 
 from jspace_llama.jsonio import document_sha256
 from jspace_llama.observation_data import (
     DATASET_SHA256,
+    DatasetValidationError,
     PANEL_NAMES,
     MultihopItem,
 )
-from jspace_llama.runtime import AssetLoadError, CudaRequiredError
+from jspace_llama.runtime import (
+    AssetLoadError,
+    CudaRequiredError,
+    DimensionMismatchError,
+    LayerBandError,
+    LensIntegrityError,
+    ResourceExhaustionError,
+    TokenizationError,
+)
 
 
 PROJECT = Path(__file__).parents[1]
@@ -383,6 +393,24 @@ def test_incomplete_run_is_inconclusive_and_validator_recomputes_claims(
             schema_dir=SCHEMAS,
             raw_path=incomplete_raw_path,
         )
+    contradictory_raw["failure"]["reason_code"] = "incomplete_observation"
+    contradictory_raw["failure"]["error_type"] = "WrongErrorType"
+    _rewrite_raw_and_hashes(
+        incomplete_raw_path,
+        contradictory_raw,
+        incomplete_manifest,
+        outcome,
+    )
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="error type|failure differs",
+    ):
+        validator.validate_documents(
+            incomplete_manifest,
+            outcome,
+            schema_dir=SCHEMAS,
+            raw_path=incomplete_raw_path,
+        )
 
     complete = run_observation_pipeline(
         project_root=tmp_path / "complete",
@@ -457,7 +485,7 @@ def test_incomplete_provenance_still_reconciles_complete_raw(
     )
     with pytest.raises(
         validator.ObservationValidationError,
-        match="raw failure.*measurements|raw failure differs",
+        match="incomplete provenance.*measurement|raw failure differs",
     ):
         validator.validate_documents(
             manifest,
@@ -473,6 +501,149 @@ def test_incomplete_provenance_still_reconciles_complete_raw(
     with pytest.raises(
         validator.ObservationValidationError,
         match="tokenization.*hash|hashes.*recompute",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("error", "reason_code", "error_type"),
+    [
+        (
+            CudaRequiredError("CUDA unavailable"),
+            "cuda_required",
+            "CudaRequiredError",
+        ),
+        (
+            AssetLoadError("asset unavailable"),
+            "asset_load_failed",
+            "AssetLoadError",
+        ),
+        (
+            ResourceExhaustionError("resource exhausted"),
+            "resource_exhausted",
+            "ResourceExhaustionError",
+        ),
+        (
+            torch.OutOfMemoryError("out of memory"),
+            "resource_exhausted",
+            "OutOfMemoryError",
+        ),
+        (
+            TokenizationError("invalid tokenization"),
+            "tokenization_failed",
+            "TokenizationError",
+        ),
+        (
+            DimensionMismatchError("dimension mismatch"),
+            "dimension_mismatch",
+            "DimensionMismatchError",
+        ),
+        (
+            LayerBandError("invalid layer band"),
+            "layer_band_invalid",
+            "LayerBandError",
+        ),
+        (
+            LensIntegrityError("invalid lens"),
+            "lens_integrity_failed",
+            "LensIntegrityError",
+        ),
+        (
+            DatasetValidationError("invalid dataset"),
+            "dataset_invalid",
+            "DatasetValidationError",
+        ),
+    ],
+    ids=[
+        "cuda",
+        "asset-load",
+        "resource-exhausted",
+        "torch-oom",
+        "tokenization",
+        "dimension",
+        "layer-band",
+        "lens-integrity",
+        "dataset",
+    ],
+)
+def test_validator_enforces_pipeline_failure_reason_to_type_mapping(
+    tmp_path: Path,
+    error: BaseException,
+    reason_code: str,
+    error_type: str,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(
+        tmp_path,
+        execute=lambda: (_ for _ in ()).throw(error),
+        base_provenance=_provenance(),
+    )
+    manifest = json.loads(
+        (
+            tmp_path / "results" / "jspace_observation_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    validator = _load_validator()
+
+    assert result["reason"]["code"] == reason_code
+    assert raw["failure"]["error_type"] == error_type
+    validator.validate_documents(
+        manifest,
+        result,
+        schema_dir=SCHEMAS,
+        raw_path=raw_path,
+    )
+
+    raw["failure"]["error_type"] = "WrongErrorType"
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="error type|failure differs",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
+def test_validator_rejects_empty_failure_form_incomplete_provenance(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_artifacts import build_observation_artifacts
+
+    manifest, result = build_observation_artifacts(
+        run_id="22222222-2222-4222-8222-222222222222",
+        started_at="2026-11-11T00:00:00Z",
+        ended_at="2026-11-11T00:00:01Z",
+        provenance=_provenance(),
+        raw_artifact_sha256="0" * 64,
+        payload=None,
+        reason_code="incomplete_provenance",
+    )
+    raw = {
+        "provenance": manifest["provenance"],
+        "failure": {
+            "reason_code": "incomplete_provenance",
+            "error_type": "ArbitraryFailure",
+        },
+    }
+    raw_path = tmp_path / "jspace_observation_raw.json"
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="incomplete provenance.*measurement|failure.*not allowed",
     ):
         validator.validate_documents(
             manifest,
