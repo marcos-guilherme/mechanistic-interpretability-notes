@@ -66,28 +66,38 @@ parcial antes de tentar `--gpu T4` ou `--gpu A100`.
 
 ## A execução que consegui realizar
 
-Na execução `a116c3da-bb8f-4a31-a39a-4fd09dd6fcad`, consegui exercitar o
-software, a L4 no Colab e o caminho de artefatos compactos até a resolução dos
-ativos no Hugging Face. O fluxo resolveu a revisão do modelo
-`0e9e39f249a16976918f6564b8830bc894c89659` e a revisão da lente
-`d2527c3cdbaa60dd4b65cbca1604921f044e989a`, mas terminou como `inconclusive`,
-com o código `asset_load_failed`, porque minha conta ainda não estava
-autorizada para o repositório *gated* do modelo.
+A primeira tentativa registrada, `a116c3da-bb8f-4a31-a39a-4fd09dd6fcad`,
+parou antes da inferência porque minha conta ainda não tinha autorização para
+o modelo. Depois que o acesso foi aprovado, encontrei uma segunda dificuldade:
+o TorchAudio pré-instalado no Colab usava CUDA 13.0, enquanto o PyTorch do
+ambiente usava CUDA 13.2. Como o experimento não usa áudio, removi essa
+dependência incompatível no bootstrap e registrei a correção com um teste.
 
-Os pesos não foram baixados. Portanto, não houve inferência, readout de
-J-space ou intervenção causal. Não interpreto essa execução como evidência
-positiva nem negativa sobre J-space no Llama. Registrei a integridade da lente
-e a presença de `spider` no readout como `evaluated: false`, com medições
-`null`, em vez de transformar ausência de medição em observação científica
-falsa. A revisão do código-fonte foi
-`bda81311ed758749598d9cd41fb7bbf0d5d3897a`; o campo `dirty` ficou `true`
-porque já havia alterações fora deste projeto no momento do envio.
+A execução canônica atual,
+`20eabeef-17f5-49dc-a4a1-fcafc20a9533`, completou o fluxo em uma NVIDIA L4. O
+modelo de 32 camadas e a lente de aproximadamente 1,04 GB foram carregados; o
+hash SHA-256 da lente foi verificado como
+`d5300a1575c0b5ad6e01b098c75adb072f3a6c246f184ce2fb35a3550fc8c68b`.
+O experimento avaliou as camadas 12–28, os três prompts, as quatro condições e
+`alpha=4.0`, com proveniência completa e código-fonte limpo.
 
-Mantive os dois artefatos compactos como registro dessa execução inconclusiva.
-Para repetir o experimento, preciso primeiro obter acesso oficial ao modelo e
-então refazer `auth-hf`, `execute`, `fetch` e a validação local. Uma execução
-futura substituirá esse registro com valores efetivamente medidos; não
-preencho retroativamente metadados que a tentativa original não produziu.
+O resultado continuou `inconclusive`, agora por razões científicas do próprio
+protocolo (`primary_gates_failed`), e não por falha de acesso. No prompt
+principal:
+
+- o parser não encontrou uma resposta única equivalente a oito no baseline ou
+  no no-op;
+- o readout foi executado, mas não encontrou `spider`;
+- o controle aleatório também não produziu uma resposta válida para o critério;
+- a troca `spider → ant` não produziu seis de forma válida, vazou a palavra
+  `ant` e apresentou repetição.
+
+As duas paráfrases também não passaram. Assim, esta execução não demonstrou o
+redirecionamento causal planejado, mas também não é uma refutação geral do
+J-space: o baseline necessário para interpretar a intervenção não foi
+estabelecido e o conceito-fonte não apareceu no readout. Os artefatos preservam
+essa distinção em vez de converter critérios não satisfeitos em evidência
+negativa mais ampla.
 
 ## Artefatos e validação
 

@@ -44,11 +44,13 @@ gerações.
 
 O núcleo reutilizável e a orquestração de uma intervenção causal mínima em
 J-space sobre Llama estão implementados, incluindo validação de runtime,
-intervenções, controles e o notebook de entrada. Uma execução em NVIDIA L4
-chegou à resolução dos ativos, mas a conta do Hugging Face não tinha
-autorização para baixar o modelo gated. Nenhum readout ou intervenção foi
-executado; portanto, o estado é inconclusivo e não constitui evidência
-científica positiva ou negativa.
+intervenções, controles e o notebook de entrada. Depois que o acesso ao modelo
+foi aprovado, uma execução em NVIDIA L4 carregou e verificou a lente, executou
+readout, baseline, no-op, controle aleatório e troca-alvo. Nenhum alpha passou
+pelos critérios do prompt principal: o baseline não forneceu uma resposta
+numérica válida, `spider` não apareceu no readout e a intervenção-alvo vazou
+`ant` e se degradou por repetição. O estado permanece inconclusivo e não
+constitui evidência contra o mecanismo mais amplo de J-space.
 
 - [Visão geral e fluxo implementado](../../projects/jspace_llama/README.md)
 - [Processo de estudo e reprodução](../../projects/jspace_llama/PROCESSO.md)

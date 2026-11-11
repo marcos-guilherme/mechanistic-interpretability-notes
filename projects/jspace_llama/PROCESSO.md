@@ -2,7 +2,7 @@
 
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
 
-> **Estado:** inconclusivo por falha de acesso ao ativo
+> **Estado:** inconclusivo após execução causal; critérios primários não satisfeitos
 >
 > **Última atualização:** 10 de novembro de 2026
 
@@ -75,33 +75,38 @@ diagnósticos detalhados permanecem fora do Git.
 
 ### Resultados
 
-A tentativa que registrei, identificada por
-`a116c3da-bb8f-4a31-a39a-4fd09dd6fcad`, iniciou em uma NVIDIA L4 e resolveu as
-revisões do modelo e da lente, mas terminou com estado `inconclusive` e código
-`asset_load_failed`. A conta do Hugging Face estava autenticada localmente,
-porém não autorizada a acessar o repositório restrito do Llama. Os pesos não
-foram baixados.
+A primeira tentativa, `a116c3da-bb8f-4a31-a39a-4fd09dd6fcad`, terminou antes
+da inferência por falta de autorização para acessar o modelo. Depois da
+aprovação, executei novamente o protocolo. A execução canônica atual,
+`20eabeef-17f5-49dc-a4a1-fcafc20a9533`, carregou o Llama e a J-lens, verificou
+a integridade da lente, realizou o readout e executou baseline, no-op, controle
+aleatório e intervenção-alvo nos três prompts.
 
-Consequentemente, não houve inferência do modelo, readout de `spider`, teste de
-integridade da lente nem intervenção `spider → ant`. Os campos científicos
-correspondentes estão registrados como não avaliados e `null`, e não como
-falhas da hipótese. O resultado disponível é operacional: o fluxo chegou até a
-resolução dos ativos, registrou ambiente e motivo terminal e falhou de forma
-segura. Não interpreto essa execução como evidência contra o J-space. O
-bloqueio aconteceu antes de qualquer inferência, readout ou intervenção;
-portanto, o resultado científico continua não medido. **Ainda não há resultado
-científico positivo ou negativo sobre J-space no Llama nesta replicação.**
+O estado final permaneceu `inconclusive`, com o código
+`primary_gates_failed`. No prompt principal, o parser restrito não identificou
+uma resposta única equivalente a oito no baseline nem no no-op. O readout foi
+avaliado, mas `spider` não apareceu. O controle aleatório também não forneceu
+uma resposta válida para o critério. Na condição-alvo, a troca não produziu
+seis de forma válida, revelou `ant` na continuação e apresentou repetição. As
+duas paráfrases igualmente não passaram pelos critérios.
+
+Portanto, o marco causal planejado não foi demonstrado por este protocolo.
+Também não interpreto a execução como uma refutação geral do J-space: a linha
+de base comportamental exigida não foi estabelecida e o conceito-fonte não
+apareceu no readout. O resultado científico adequado é que esta configuração
+de prompt, parser, lente, camadas e `alpha=4.0` permaneceu inconclusiva.
 
 ### Contribuição para o TCC
 
 Mesmo inconclusivo, este estudo tem uma função metodológica importante no meu
-TCC: ele me obrigou a separar falha de infraestrutura de resultado
-experimental. Em conjunto com IOI e Refusal Direction, representa o terceiro
-nível de análise causal que explorei — a intervenção sobre conceitos em um
-espaço de trabalho aprendido por uma lente. A tentativa também me mostrou, de
-forma concreta, que autenticação técnica não equivale a licença de acesso e
-que valores não medidos devem permanecer ausentes, em vez de serem
-interpretados como zeros ou resultados negativos.
+TCC. A primeira tentativa me obrigou a separar falha de infraestrutura de
+resultado experimental; a segunda mostrou outra distinção: executar a
+intervenção não significa que as precondições científicas tenham sido
+satisfeitas. Em conjunto com IOI e Refusal Direction, este estudo representa o
+terceiro nível de análise causal que explorei — a intervenção sobre conceitos
+em um espaço de trabalho aprendido por uma lente. Registrar o baseline
+inválido, o readout sem `spider` e a degradação da intervenção evita transformar
+uma execução completa em uma conclusão mais forte do que os dados permitem.
 
 ## Trabalho de referência e implementação
 
@@ -163,19 +168,23 @@ secundários de transparência, não uma afirmação de generalização.
 - Transformers: 5.22.2.
 - `huggingface_hub`: 2.4.0.
 - Seed: 42.
-- Commit local: `bda81311ed758749598d9cd41fb7bbf0d5d3897a`.
-- Estado do Git no envio: sujo por alterações externas ao projeto.
+- Commit local: `fd8a77ad7d93df76b5c499bb314a71ad1c75760c`.
+- Estado do código-fonte no envio: limpo no escopo do experimento.
+- Camadas avaliadas: 12–28 de um modelo com 32 camadas.
+- Lente: 1.040.197.778 bytes, SHA-256
+  `d5300a1575c0b5ad6e01b098c75adb072f3a6c246f184ce2fb35a3550fc8c68b`.
 
-O manifesto registra `provenance_complete=false`, pois o bloqueio ocorreu
-antes de medir camadas, hash e tamanho da lente. Esses campos não devem ser
-completados retrospectivamente.
+O manifesto registra `provenance_complete=true`: modelo, lente, software,
+hardware, prompts, camadas, intervenção e fonte foram medidos e vinculados à
+execução.
 
 ## Execução e reprodução
 
 O modelo é *gated*. Antes da execução, é necessário entrar no site do Hugging
 Face com a mesma conta usada no CLI e aceitar ou solicitar acesso na
 [página oficial do modelo](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct).
-O comando `hf auth login` confirma identidade, mas não concede a licença.
+O comando `hf auth login` confirma identidade, mas não concede a licença. Nesta
+execução, o acesso já estava aprovado e o download foi concluído.
 
 Na raiz do repositório:
 
@@ -210,23 +219,28 @@ A sessão de GPU deve ser encerrada mesmo após erro ou queda da conexão local.
 - [`notebooks/01_readout_and_causal_swap.ipynb`](notebooks/01_readout_and_causal_swap.ipynb):
   ponto de entrada da execução real.
 
-O artefato final registra zero prompts e zero alphas avaliados. Esses zeros são
-contagens operacionais de avaliações realizadas, não medidas do efeito causal.
+O artefato final registra um prompt principal, duas paráfrases e um valor de
+`alpha` efetivamente avaliados. Nenhuma combinação passou por todos os
+critérios primários.
 
 ## Desvios e limitações
 
 | Desvio ou limitação | Motivo | Impacto |
 |---|---|---|
-| Modelo e lente não carregados | Falta de autorização para o repositório gated | Nenhuma hipótese científica foi testada |
 | Apenas um marco causal planejado | Restrição deliberada de escopo | Não replica a abrangência do artigo |
 | Uma seed e um valor inicial de `alpha` | Experimento mínimo | Não permite estimar variabilidade ou sensibilidade |
-| Estado Git sujo no envio | Alterações do usuário fora do projeto | Proveniência registrada, mas não inteiramente limpa |
 | Lente pré-ajustada | Custo de ajuste e foco causal | Não valida o procedimento de treinamento da lente |
+| Baseline sem resposta numérica válida | O prompt e o parser restrito não estabeleceram a precondição comportamental | Impede interpretar causalmente a falha da troca |
+| `spider` ausente no readout | A lente não expôs o conceito-fonte nas camadas avaliadas | A intervenção não parte de uma representação-fonte validada |
+| Vazamento de `ant` e repetição | A condição-alvo degradou a continuação em `alpha=4.0` | A mudança não pode ser tratada como redirecionamento factual limpo |
+| TorchAudio incompatível no Colab | Pacote pré-instalado usava CUDA 13.0, enquanto PyTorch usava 13.2 | Exigiu remoção segura do pacote de áudio não utilizado antes da execução |
 
 ## Próximo passo científico
 
-Depois de obter a aprovação oficial de acesso ao Llama, repetirei `auth-hf`,
-`execute`, `fetch` e a validação local. Somente um novo artefato com readout,
-intervenções e controles efetivamente avaliados poderá substituir a conclusão
-inconclusiva. Se o baseline ou o readout falhar, manterei o protocolo como
-inconclusivo e o ajustarei antes de qualquer interpretação causal.
+O próximo passo deve começar pela linha de base, antes de ampliar o sweep da
+intervenção. Eu avaliaria prompts e regras de parsing pré-declarados capazes de
+obter uma resposta basal inequívoca e, em seguida, verificaria em quais camadas
+e formulações a J-lens expõe o conceito-fonte. Somente depois dessas duas
+precondições repetiria a troca com múltiplos valores de `alpha` e controles.
+Essas mudanças devem constituir uma nova execução registrada, não uma seleção
+retrospectiva dos casos desta rodada.

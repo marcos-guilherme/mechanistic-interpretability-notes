@@ -1,31 +1,290 @@
 {
   "artifact": "final_evaluation",
   "integrity": {
-    "lens_integrity_evaluated": false,
-    "lens_integrity_verified": null,
-    "lens_sha256": null
+    "lens_integrity_evaluated": true,
+    "lens_integrity_verified": true,
+    "lens_sha256": "d5300a1575c0b5ad6e01b098c75adb072f3a6c246f184ce2fb35a3550fc8c68b"
   },
-  "manifest_sha256": "5b447660baee0f538e0c0dbfde88671d3f7e3d4ac7b5da5971c12f362eab72e3",
+  "manifest_sha256": "6b03b5bb63bfa7c00487f41c596fb2b95b27a02cefb141f2510a9c01d1f8e808",
   "paraphrases": {
     "passing_prompt_alpha_count": 0,
-    "prompt_alphas": [],
-    "prompt_count": 0
+    "prompt_alphas": [
+      {
+        "alpha": 4.0,
+        "conditions": {
+          "baseline": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "noop": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "random": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "target": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": true
+            },
+            "target_entity_leakage": true
+          }
+        },
+        "gates": {
+          "baseline_not_degraded": true,
+          "baseline_unique_eight": false,
+          "noop_not_degraded": true,
+          "noop_unique_eight": false,
+          "random_not_degraded": true,
+          "random_unique_non_six": false,
+          "readout_spider_present": false,
+          "target_no_ant": false,
+          "target_not_degraded": false,
+          "target_unique_six": false
+        },
+        "passed": false,
+        "prompt_name": "paraphrase_animal"
+      },
+      {
+        "alpha": 4.0,
+        "conditions": {
+          "baseline": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "noop": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "random": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": true
+            },
+            "target_entity_leakage": false
+          },
+          "target": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": true
+            },
+            "target_entity_leakage": true
+          }
+        },
+        "gates": {
+          "baseline_not_degraded": true,
+          "baseline_unique_eight": false,
+          "noop_not_degraded": true,
+          "noop_unique_eight": false,
+          "random_not_degraded": false,
+          "random_unique_non_six": false,
+          "readout_spider_present": false,
+          "target_no_ant": false,
+          "target_not_degraded": false,
+          "target_unique_six": false
+        },
+        "passed": false,
+        "prompt_name": "paraphrase_creature"
+      }
+    ],
+    "prompt_count": 2
   },
   "primary": {
-    "alphas": [],
+    "alphas": [
+      {
+        "alpha": 4.0,
+        "conditions": {
+          "baseline": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "noop": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "random": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": false
+            },
+            "target_entity_leakage": false
+          },
+          "target": {
+            "answer_evidence": {
+              "eight": false,
+              "six": false
+            },
+            "answer_parse": {
+              "status": "no_answer",
+              "value": null
+            },
+            "degradation": {
+              "empty": false,
+              "incoherent": false,
+              "repetition": true
+            },
+            "target_entity_leakage": true
+          }
+        },
+        "gates": {
+          "baseline_not_degraded": true,
+          "baseline_unique_eight": false,
+          "noop_not_degraded": true,
+          "noop_unique_eight": false,
+          "random_not_degraded": true,
+          "random_unique_non_six": false,
+          "readout_spider_present": false,
+          "target_no_ant": false,
+          "target_not_degraded": false,
+          "target_unique_six": false
+        },
+        "passed": false,
+        "reasons": [
+          "readout_spider_missing",
+          "baseline_answer_invalid",
+          "noop_answer_invalid",
+          "random_answer_invalid",
+          "target_answer_invalid",
+          "target_contains_ant",
+          "target_degraded"
+        ]
+      }
+    ],
     "passing_alpha_count": 0,
     "passing_alphas": [],
     "prompt_name": "main",
     "readout": {
-      "evaluated": false,
-      "spider_present": null
+      "evaluated": true,
+      "spider_present": false
     }
   },
   "reason": {
-    "code": "asset_load_failed",
-    "message": "model or lens asset loading failed"
+    "code": "primary_gates_failed",
+    "message": "no alpha passed every primary-prompt gate"
   },
-  "run_id": "a116c3da-bb8f-4a31-a39a-4fd09dd6fcad",
+  "run_id": "20eabeef-17f5-49dc-a4a1-fcafc20a9533",
   "schema_version": 1,
   "status": "inconclusive"
 }

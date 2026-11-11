@@ -52,10 +52,11 @@ modelo, à seed e ao recorte avaliados.
 
 Neste terceiro estudo, preparei uma intervenção sobre um conceito
 intermediário, usando uma J-lens pré-ajustada e a troca `spider → ant`. A
-execução chegou ao ambiente L4 e à resolução dos ativos, mas foi interrompida
-antes de carregar os pesos porque a conta do Hugging Face ainda não tinha
-autorização para o modelo *gated*. Por isso, o resultado é inconclusivo: não
-houve readout, inferência ou intervenção científica.
+execução completa em uma NVIDIA L4 carregou o modelo e a lente, realizou o
+readout e aplicou a intervenção e os controles. O protocolo, porém, permaneceu
+inconclusivo: o baseline não produziu uma resposta numérica válida para o
+parser, o readout não encontrou `spider` e a intervenção-alvo vazou `ant` e
+gerou repetição, sem produzir seis de forma válida.
 
 ## Como ler os resultados
 
