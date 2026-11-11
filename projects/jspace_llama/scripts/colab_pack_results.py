@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import math
 import os
@@ -198,6 +200,125 @@ def _local_xml_name(value: str) -> str:
     return value.rsplit("}", 1)[-1].lower()
 
 
+SAFE_SVG_ELEMENTS = frozenset(
+    {
+        "agent",
+        "clippath",
+        "creator",
+        "date",
+        "defs",
+        "format",
+        "g",
+        "image",
+        "metadata",
+        "path",
+        "rdf",
+        "rect",
+        "style",
+        "svg",
+        "title",
+        "type",
+        "use",
+        "work",
+    }
+)
+SAFE_SVG_ATTRIBUTES = frozenset(
+    {
+        "clip-path",
+        "d",
+        "height",
+        "href",
+        "id",
+        "resource",
+        "style",
+        "transform",
+        "type",
+        "version",
+        "viewbox",
+        "width",
+        "x",
+        "y",
+    }
+)
+SAFE_STYLE_PROPERTIES = frozenset(
+    {
+        "fill",
+        "opacity",
+        "stroke",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-opacity",
+        "stroke-width",
+    }
+)
+SAFE_METADATA_RESOURCE = "http://purl.org/dc/dcmitype/StillImage"
+CSS_ESCAPE = re.compile(
+    r"\\(?:([0-9a-fA-F]{1,6})[ \t\r\n\f]?|([^0-9a-fA-F\r\n\f])|(\r\n|[\r\n\f]))"
+)
+SVG_FRAGMENT = re.compile(r"#[A-Za-z_][A-Za-z0-9_.:-]*\Z")
+SVG_CLIP_PATH = re.compile(
+    r"url\(\s*#[A-Za-z_][A-Za-z0-9_.:-]*\s*\)\Z",
+    flags=re.IGNORECASE,
+)
+SAFE_STYLE_ELEMENT = "*{stroke-linejoin:round;stroke-linecap:butt}"
+
+
+def _decode_css_escapes(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        hexadecimal, escaped, newline = match.groups()
+        if hexadecimal is not None:
+            codepoint = int(hexadecimal, 16)
+            if (
+                codepoint == 0
+                or codepoint > 0x10FFFF
+                or 0xD800 <= codepoint <= 0xDFFF
+            ):
+                return "\N{REPLACEMENT CHARACTER}"
+            return chr(codepoint)
+        if escaped is not None:
+            return escaped
+        if newline is not None:
+            return ""
+        raise AssertionError("unreachable CSS escape")
+
+    return CSS_ESCAPE.sub(replace, value)
+
+
+def _validate_style_attribute(name: str, value: str) -> None:
+    normalized = _decode_css_escapes(value)
+    lowered = normalized.lower()
+    if "url" in lowered or "@import" in lowered:
+        raise ValueError(f"result SVG contains external content: {name}")
+    if "\\" in normalized or "@" in normalized:
+        raise ValueError(f"result SVG contains unsafe CSS: {name}")
+    for declaration in normalized.split(";"):
+        if not declaration.strip():
+            continue
+        if ":" not in declaration:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+        property_name, property_value = declaration.split(":", 1)
+        if property_name.strip().lower() not in SAFE_STYLE_PROPERTIES:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+        if re.fullmatch(
+            r"[-#A-Za-z0-9.,%+ ]+",
+            property_value.strip(),
+        ) is None:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+
+
+def _validate_embedded_png(name: str, value: str) -> None:
+    prefix = "data:image/png;base64,"
+    if not value.lower().startswith(prefix):
+        raise ValueError(f"result SVG contains external content: {name}")
+    encoded = "".join(value[len(prefix) :].split())
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError(f"result SVG contains invalid embedded image: {name}") from error
+    if not decoded.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError(f"result SVG embedded image is not PNG: {name}")
+
+
 def _validate_svg(name: str, payload: bytes) -> None:
     try:
         text = payload.decode("utf-8")
@@ -210,15 +331,15 @@ def _validate_svg(name: str, payload: bytes) -> None:
         raise ValueError(f"result SVG contains ENTITY: {name}")
     if "<?XML-STYLESHEET" in upper:
         raise ValueError(f"result SVG contains active content: {name}")
-    if "@IMPORT" in upper:
-        raise ValueError(f"result SVG contains external content: {name}")
-    for match in re.finditer(
-        r"url\(\s*(['\"]?)(.*?)\1\s*\)",
+    without_declaration = re.sub(
+        r"^\s*<\?xml[^?]*\?>",
+        "",
         text,
+        count=1,
         flags=re.IGNORECASE,
-    ):
-        if not match.group(2).strip().startswith("#"):
-            raise ValueError(f"result SVG contains external content: {name}")
+    )
+    if "<?" in without_declaration:
+        raise ValueError(f"result SVG contains active content: {name}")
     try:
         root = ET.fromstring(text)
     except ET.ParseError as error:
@@ -226,20 +347,60 @@ def _validate_svg(name: str, payload: bytes) -> None:
     if _local_xml_name(root.tag) != "svg":
         raise ValueError(f"result SVG root is not svg: {name}")
     for element in root.iter():
-        if _local_xml_name(element.tag) in {"script", "foreignobject"}:
-            raise ValueError(f"result SVG contains active content: {name}")
+        element_name = _local_xml_name(element.tag)
+        if element_name not in SAFE_SVG_ELEMENTS:
+            raise ValueError(
+                f"result SVG contains active unsafe element "
+                f"{element_name}: {name}"
+            )
+        if element_name == "style":
+            decoded_style = _decode_css_escapes(element.text or "")
+            lowered_style = decoded_style.lower()
+            if "url" in lowered_style or "@import" in lowered_style:
+                raise ValueError(
+                    f"result SVG contains external content: {name}"
+                )
+            normalized_style = re.sub(
+                r"\s+",
+                "",
+                decoded_style,
+            ).lower()
+            if normalized_style != SAFE_STYLE_ELEMENT:
+                raise ValueError(f"result SVG contains unsafe CSS: {name}")
         for attribute, value in element.attrib.items():
             local_attribute = _local_xml_name(attribute)
-            normalized_value = value.strip()
-            lowered_value = normalized_value.lower()
-            if local_attribute.startswith("on"):
-                raise ValueError(f"result SVG contains active content: {name}")
-            if local_attribute in {"href", "src"} and (
-                not normalized_value.startswith("#")
-            ):
-                raise ValueError(f"result SVG contains external content: {name}")
-            if "@import" in lowered_value:
-                raise ValueError(f"result SVG contains external content: {name}")
+            if local_attribute not in SAFE_SVG_ATTRIBUTES:
+                raise ValueError(
+                    f"result SVG contains unsafe attribute "
+                    f"{local_attribute}: {name}"
+                )
+            normalized_value = _decode_css_escapes(value.strip())
+            if local_attribute == "style":
+                _validate_style_attribute(name, normalized_value)
+            elif local_attribute == "clip-path":
+                if SVG_CLIP_PATH.fullmatch(normalized_value) is None:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "href":
+                if element_name == "use":
+                    if SVG_FRAGMENT.fullmatch(normalized_value) is None:
+                        raise ValueError(
+                            f"result SVG contains external content: {name}"
+                        )
+                elif element_name == "image":
+                    _validate_embedded_png(name, normalized_value)
+                else:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "resource":
+                if normalized_value != SAFE_METADATA_RESOURCE:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "type" and normalized_value != "text/css":
+                raise ValueError(f"result SVG contains unsafe type: {name}")
 
 
 def _reject_nonfinite_numbers(document: object) -> None:

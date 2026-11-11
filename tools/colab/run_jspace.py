@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import io
 import json
@@ -775,6 +777,125 @@ def _local_xml_name(value: str) -> str:
     return value.rsplit("}", 1)[-1].lower()
 
 
+SAFE_SVG_ELEMENTS = frozenset(
+    {
+        "agent",
+        "clippath",
+        "creator",
+        "date",
+        "defs",
+        "format",
+        "g",
+        "image",
+        "metadata",
+        "path",
+        "rdf",
+        "rect",
+        "style",
+        "svg",
+        "title",
+        "type",
+        "use",
+        "work",
+    }
+)
+SAFE_SVG_ATTRIBUTES = frozenset(
+    {
+        "clip-path",
+        "d",
+        "height",
+        "href",
+        "id",
+        "resource",
+        "style",
+        "transform",
+        "type",
+        "version",
+        "viewbox",
+        "width",
+        "x",
+        "y",
+    }
+)
+SAFE_STYLE_PROPERTIES = frozenset(
+    {
+        "fill",
+        "opacity",
+        "stroke",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-opacity",
+        "stroke-width",
+    }
+)
+SAFE_METADATA_RESOURCE = "http://purl.org/dc/dcmitype/StillImage"
+CSS_ESCAPE = re.compile(
+    r"\\(?:([0-9a-fA-F]{1,6})[ \t\r\n\f]?|([^0-9a-fA-F\r\n\f])|(\r\n|[\r\n\f]))"
+)
+SVG_FRAGMENT = re.compile(r"#[A-Za-z_][A-Za-z0-9_.:-]*\Z")
+SVG_CLIP_PATH = re.compile(
+    r"url\(\s*#[A-Za-z_][A-Za-z0-9_.:-]*\s*\)\Z",
+    flags=re.IGNORECASE,
+)
+SAFE_STYLE_ELEMENT = "*{stroke-linejoin:round;stroke-linecap:butt}"
+
+
+def _decode_css_escapes(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        hexadecimal, escaped, newline = match.groups()
+        if hexadecimal is not None:
+            codepoint = int(hexadecimal, 16)
+            if (
+                codepoint == 0
+                or codepoint > 0x10FFFF
+                or 0xD800 <= codepoint <= 0xDFFF
+            ):
+                return "\N{REPLACEMENT CHARACTER}"
+            return chr(codepoint)
+        if escaped is not None:
+            return escaped
+        if newline is not None:
+            return ""
+        raise AssertionError("unreachable CSS escape")
+
+    return CSS_ESCAPE.sub(replace, value)
+
+
+def _validate_style_attribute(name: str, value: str) -> None:
+    normalized = _decode_css_escapes(value)
+    lowered = normalized.lower()
+    if "url" in lowered or "@import" in lowered:
+        raise ValueError(f"result SVG contains external content: {name}")
+    if "\\" in normalized or "@" in normalized:
+        raise ValueError(f"result SVG contains unsafe CSS: {name}")
+    for declaration in normalized.split(";"):
+        if not declaration.strip():
+            continue
+        if ":" not in declaration:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+        property_name, property_value = declaration.split(":", 1)
+        if property_name.strip().lower() not in SAFE_STYLE_PROPERTIES:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+        if re.fullmatch(
+            r"[-#A-Za-z0-9.,%+ ]+",
+            property_value.strip(),
+        ) is None:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+
+
+def _validate_embedded_png(name: str, value: str) -> None:
+    prefix = "data:image/png;base64,"
+    if not value.lower().startswith(prefix):
+        raise ValueError(f"result SVG contains external content: {name}")
+    encoded = "".join(value[len(prefix) :].split())
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError(f"result SVG contains invalid embedded image: {name}") from error
+    if not decoded.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError(f"result SVG embedded image is not PNG: {name}")
+
+
 def _validate_svg_bytes(name: str, payload: bytes) -> None:
     try:
         text = payload.decode("utf-8")
@@ -787,15 +908,15 @@ def _validate_svg_bytes(name: str, payload: bytes) -> None:
         raise ValueError(f"result SVG contains ENTITY: {name}")
     if "<?XML-STYLESHEET" in upper:
         raise ValueError(f"result SVG contains active content: {name}")
-    if "@IMPORT" in upper:
-        raise ValueError(f"result SVG contains external content: {name}")
-    for match in re.finditer(
-        r"url\(\s*(['\"]?)(.*?)\1\s*\)",
+    without_declaration = re.sub(
+        r"^\s*<\?xml[^?]*\?>",
+        "",
         text,
+        count=1,
         flags=re.IGNORECASE,
-    ):
-        if not match.group(2).strip().startswith("#"):
-            raise ValueError(f"result SVG contains external content: {name}")
+    )
+    if "<?" in without_declaration:
+        raise ValueError(f"result SVG contains active content: {name}")
     try:
         root = ET.fromstring(text)
     except ET.ParseError as error:
@@ -803,20 +924,60 @@ def _validate_svg_bytes(name: str, payload: bytes) -> None:
     if _local_xml_name(root.tag) != "svg":
         raise ValueError(f"result SVG root is not svg: {name}")
     for element in root.iter():
-        if _local_xml_name(element.tag) in {"script", "foreignobject"}:
-            raise ValueError(f"result SVG contains active content: {name}")
+        element_name = _local_xml_name(element.tag)
+        if element_name not in SAFE_SVG_ELEMENTS:
+            raise ValueError(
+                f"result SVG contains active unsafe element "
+                f"{element_name}: {name}"
+            )
+        if element_name == "style":
+            decoded_style = _decode_css_escapes(element.text or "")
+            lowered_style = decoded_style.lower()
+            if "url" in lowered_style or "@import" in lowered_style:
+                raise ValueError(
+                    f"result SVG contains external content: {name}"
+                )
+            normalized_style = re.sub(
+                r"\s+",
+                "",
+                decoded_style,
+            ).lower()
+            if normalized_style != SAFE_STYLE_ELEMENT:
+                raise ValueError(f"result SVG contains unsafe CSS: {name}")
         for attribute, value in element.attrib.items():
             local_attribute = _local_xml_name(attribute)
-            normalized_value = value.strip()
-            lowered_value = normalized_value.lower()
-            if local_attribute.startswith("on"):
-                raise ValueError(f"result SVG contains active content: {name}")
-            if local_attribute in {"href", "src"} and (
-                not normalized_value.startswith("#")
-            ):
-                raise ValueError(f"result SVG contains external content: {name}")
-            if "@import" in lowered_value:
-                raise ValueError(f"result SVG contains external content: {name}")
+            if local_attribute not in SAFE_SVG_ATTRIBUTES:
+                raise ValueError(
+                    f"result SVG contains unsafe attribute "
+                    f"{local_attribute}: {name}"
+                )
+            normalized_value = _decode_css_escapes(value.strip())
+            if local_attribute == "style":
+                _validate_style_attribute(name, normalized_value)
+            elif local_attribute == "clip-path":
+                if SVG_CLIP_PATH.fullmatch(normalized_value) is None:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "href":
+                if element_name == "use":
+                    if SVG_FRAGMENT.fullmatch(normalized_value) is None:
+                        raise ValueError(
+                            f"result SVG contains external content: {name}"
+                        )
+                elif element_name == "image":
+                    _validate_embedded_png(name, normalized_value)
+                else:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "resource":
+                if normalized_value != SAFE_METADATA_RESOURCE:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "type" and normalized_value != "text/css":
+                raise ValueError(f"result SVG contains unsafe type: {name}")
 
 
 def _validate_result_bytes(name: str, payload: bytes) -> None:
@@ -949,30 +1110,19 @@ def extract_results_archive(
     validate_result_archive(archive, metadata=archive_metadata)
     with open_validated_file(archive, archive_metadata) as archive_source:
         with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
-            members = handle.getmembers()
-            member_names = [member.name for member in members]
-            normalized_names = [
-                _normalized_result_member(name) for name in member_names
-            ]
-            if len(member_names) != len(set(member_names)) or len(
-                normalized_names
-            ) != len(set(normalized_names)):
-                raise ValueError("duplicate result archive member")
-            names = set(normalized_names)
-            unexpected = names - allowlist
-            if unexpected:
-                joined = ", ".join(sorted(unexpected))
-                raise ValueError(f"unexpected result archive member: {joined}")
-            missing = allowlist - names
-            if missing:
-                joined = ", ".join(sorted(missing))
-                raise FileNotFoundError(
-                    f"missing result archive member: {joined}"
-                )
-
-            payloads: dict[str, bytes] = {}
+            members: list[tuple[tarfile.TarInfo, str]] = []
+            names: set[str] = set()
             total_size = 0
-            for member, name in zip(members, normalized_names, strict=True):
+            for member in handle:
+                name = _normalized_result_member(member.name)
+                if name in names:
+                    raise ValueError("duplicate result archive member")
+                if name not in allowlist:
+                    raise ValueError(
+                        f"unexpected result archive member: {name}"
+                    )
+                if len(members) >= len(allowlist):
+                    raise ValueError("too many result archive members")
                 if not member.isfile() or member.issym() or member.islnk():
                     raise ValueError(
                         "result archive must contain regular files only"
@@ -985,6 +1135,19 @@ def extract_results_archive(
                 total_size += member.size
                 if total_size > MAX_ARCHIVE_BYTES:
                     raise ValueError("result archive expands beyond size limit")
+                names.add(name)
+                members.append((member, name))
+
+            missing = allowlist - names
+            if missing:
+                joined = ", ".join(sorted(missing))
+                raise FileNotFoundError(
+                    f"missing result archive member: {joined}"
+                )
+
+            payloads: dict[str, bytes] = {}
+            for member, name in members:
+                size_limit = result_size_limit(name)
                 source = handle.extractfile(member)
                 if source is None:
                     raise ValueError(

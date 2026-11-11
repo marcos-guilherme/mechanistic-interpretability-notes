@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 from pathlib import Path
+import re
 import struct
 import sys
 import tarfile
@@ -450,6 +451,30 @@ def observation_payloads() -> dict[str, bytes]:
     return payloads
 
 
+def matplotlib_svg_bytes() -> bytes:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    buffer = io.StringIO()
+    figure, axes = plt.subplots()
+    axes.imshow([[0.0, 1.0], [1.0, 0.0]])
+    axes.set_title("safe observation")
+    try:
+        figure.savefig(buffer, format="svg", metadata={"Date": None})
+    finally:
+        plt.close(figure)
+    text = re.sub(
+        r"<!DOCTYPE.*?>\s*",
+        "",
+        buffer.getvalue(),
+        count=1,
+        flags=re.DOTALL,
+    )
+    return text.encode("utf-8")
+
+
 def write_tar_payloads(
     archive: Path,
     payloads: dict[str, bytes] | list[tuple[str, bytes]],
@@ -626,6 +651,70 @@ def test_observation_extract_rejects_bad_ihdr_crc(tmp_path: Path) -> None:
         runner.extract_results_archive(archive, tmp_path / "project", "observation")
 
 
+@pytest.mark.parametrize("target", ["pack", "fetch"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b"<style>.x{fill:u&#114;l(https://example.test/a.svg)}</style>"
+            b"</svg>"
+        ),
+        (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b"<style>.x{fill:u\\72l(https://example.test/a.svg)}</style>"
+            b"</svg>"
+        ),
+        (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b"<style>@\\69mport 'https://example.test/a.css';</style>"
+            b"</svg>"
+        ),
+        (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b'<path style="fill:u&#114;l(https://example.test/a.svg)"/>'
+            b"</svg>"
+        ),
+        (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b'<set attributeName="href" to="https://example.test/a.svg"/>'
+            b"</svg>"
+        ),
+        (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b'<animate attributeName="href" values="#safe;https://example.test/a"/>'
+            b"</svg>"
+        ),
+    ],
+)
+def test_svg_validators_reject_encoded_external_and_smil_content(
+    target: str,
+    payload: bytes,
+) -> None:
+    if target == "pack":
+        module = load_module(PACK_PATH, f"pack_svg_attack_{len(payload)}")
+        validator = module._validate_svg
+    else:
+        module = load_module(RUNNER_PATH, f"fetch_svg_attack_{len(payload)}")
+        validator = module._validate_svg_bytes
+
+    with pytest.raises(ValueError, match="SVG|external|active|element"):
+        validator("results/observation.svg", payload)
+
+
+@pytest.mark.parametrize("target", ["pack", "fetch"])
+def test_svg_validators_accept_generated_matplotlib_svg(target: str) -> None:
+    payload = matplotlib_svg_bytes()
+    if target == "pack":
+        module = load_module(PACK_PATH, "pack_svg_matplotlib")
+        validator = module._validate_svg
+    else:
+        module = load_module(RUNNER_PATH, "fetch_svg_matplotlib")
+        validator = module._validate_svg_bytes
+
+    validator("results/observation.svg", payload)
+
+
 @pytest.mark.parametrize(
     "entries",
     [
@@ -670,6 +759,76 @@ def test_observation_extract_rejects_noncanonical_member_path(
 
     with pytest.raises(ValueError, match="unsafe"):
         runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+
+def test_observation_extract_bounds_high_member_count_before_materializing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_bounded_members")
+    archive = tmp_path / "many-results.tar.gz"
+    entries = [
+        *observation_payloads().items(),
+        *[
+            (f"results/unexpected-{index}.json", b"{}")
+            for index in range(2_000)
+        ],
+    ]
+    write_tar_payloads(archive, entries)
+    next_calls = 0
+    real_next = runner.tarfile.TarFile.next
+
+    def counted_next(handle):
+        nonlocal next_calls
+        next_calls += 1
+        return real_next(handle)
+
+    monkeypatch.setattr(runner.tarfile.TarFile, "next", counted_next)
+    monkeypatch.setattr(
+        runner.tarfile.TarFile,
+        "getmembers",
+        lambda handle: pytest.fail("getmembers materialized the full archive"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="too many result archive members|unexpected result archive member",
+    ):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+    # TarFile.open() reads the first header, then iteration reads at most one
+    # header beyond the selected profile before the validator rejects.
+    assert next_calls <= len(OBSERVATION_RESULTS) + 2
+    assert not (tmp_path / "project").exists()
+
+
+def test_observation_extract_reads_no_payload_before_complete_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_validate_before_read")
+    payloads = observation_payloads()
+    payloads.pop("results/jspace_observation_panel.svg")
+    archive = tmp_path / "missing-results.tar.gz"
+    write_tar_payloads(archive, payloads)
+    extracted: list[str] = []
+    real_extractfile = runner.tarfile.TarFile.extractfile
+
+    def track_extractfile(handle, member):
+        extracted.append(member.name)
+        return real_extractfile(handle, member)
+
+    monkeypatch.setattr(
+        runner.tarfile.TarFile,
+        "extractfile",
+        track_extractfile,
+    )
+
+    with pytest.raises(FileNotFoundError, match="missing result archive member"):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+    assert extracted == []
+    assert not (tmp_path / "project").exists()
 
 
 def test_observation_extract_rejects_missing_and_oversized_members(
