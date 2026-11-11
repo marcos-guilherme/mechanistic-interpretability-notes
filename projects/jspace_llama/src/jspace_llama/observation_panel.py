@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 import math
 from typing import Any
@@ -11,6 +11,66 @@ import torch
 
 from jspace_llama.observation_data import MultihopItem, PANEL_NAMES
 from jspace_llama.observation_readout import ObservationReadoutError
+
+
+FINITE_CHECK_CHUNK_ELEMENTS = 1_000_000
+
+
+def _tensor_chunks_bounded(
+    tensor: torch.Tensor,
+    *,
+    max_elements: int,
+) -> Iterator[torch.Tensor]:
+    """Yield tensor views containing at most ``max_elements`` values."""
+    if tensor.numel() <= max_elements:
+        yield tensor
+        return
+    if tensor.is_contiguous():
+        flattened = tensor.view(-1)
+        for start in range(0, flattened.numel(), max_elements):
+            yield flattened.narrow(
+                0,
+                start,
+                min(max_elements, flattened.numel() - start),
+            )
+        return
+    if tensor.ndim == 1:
+        for start in range(0, tensor.numel(), max_elements):
+            yield tensor.narrow(
+                0,
+                start,
+                min(max_elements, tensor.numel() - start),
+            )
+        return
+    trailing_elements = tensor[0].numel()
+    if trailing_elements <= max_elements:
+        rows_per_chunk = max(1, max_elements // trailing_elements)
+        for start in range(0, tensor.shape[0], rows_per_chunk):
+            yield tensor.narrow(
+                0,
+                start,
+                min(rows_per_chunk, tensor.shape[0] - start),
+            )
+        return
+    for subtensor in tensor.unbind(0):
+        yield from _tensor_chunks_bounded(
+            subtensor,
+            max_elements=max_elements,
+        )
+
+
+def _tensor_is_finite_bounded(tensor: torch.Tensor) -> bool:
+    """Check finiteness with at most one 1M-element mask resident at a time."""
+    for chunk in _tensor_chunks_bounded(
+        tensor,
+        max_elements=FINITE_CHECK_CHUNK_ELEMENTS,
+    ):
+        finite_mask = torch.isfinite(chunk)
+        chunk_is_finite = bool(finite_mask.all().item())
+        del finite_mask
+        if not chunk_is_finite:
+            return False
+    return True
 
 
 def select_panel(
@@ -307,7 +367,7 @@ def read_qualitative_panel(
                 or vectors.ndim != 2
                 or min(vectors.shape) <= 0
                 or not vectors.dtype.is_floating_point
-                or not torch.isfinite(vectors).all().item()
+                or not _tensor_is_finite_bounded(vectors)
             ):
                 raise ObservationReadoutError(
                     "dictionary vectors must be a finite matrix"

@@ -8,6 +8,8 @@ import torch
 
 from jspace_llama.observation_data import MultihopItem, PANEL_NAMES
 from jspace_llama.observation_panel import (
+    FINITE_CHECK_CHUNK_ELEMENTS,
+    _tensor_is_finite_bounded,
     read_final_activations,
     read_qualitative_panel,
     select_panel,
@@ -149,6 +151,45 @@ def test_panel_is_fixed_and_complete() -> None:
     assert tuple(item.name for item in selected) == PANEL_NAMES
 
 
+def test_finite_checker_bounds_each_isfinite_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = torch.isfinite
+    observed_numel: list[int] = []
+
+    def recording_isfinite(tensor: torch.Tensor) -> torch.Tensor:
+        observed_numel.append(tensor.numel())
+        return original(tensor)
+
+    monkeypatch.setattr(torch, "isfinite", recording_isfinite)
+    values = torch.ones(FINITE_CHECK_CHUNK_ELEMENTS * 2 + 17)
+
+    assert _tensor_is_finite_bounded(values) is True
+    assert len(observed_numel) == 3
+    assert max(observed_numel) <= FINITE_CHECK_CHUNK_ELEMENTS
+
+
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf")])
+def test_finite_checker_finds_nonfinite_in_late_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+    nonfinite: float,
+) -> None:
+    original = torch.isfinite
+    observed_numel: list[int] = []
+
+    def recording_isfinite(tensor: torch.Tensor) -> torch.Tensor:
+        observed_numel.append(tensor.numel())
+        return original(tensor)
+
+    monkeypatch.setattr(torch, "isfinite", recording_isfinite)
+    values = torch.ones(FINITE_CHECK_CHUNK_ELEMENTS + 9)
+    values[-1] = nonfinite
+
+    assert _tensor_is_finite_bounded(values) is False
+    assert len(observed_numel) == 2
+    assert max(observed_numel) <= FINITE_CHECK_CHUNK_ELEMENTS
+
+
 def test_panel_rejects_a_missing_registered_item() -> None:
     items = tuple(
         item for item in fake_93_items() if item.name != PANEL_NAMES[-1]
@@ -242,6 +283,31 @@ def test_pursuit_failure_still_evicts_current_dictionary_layer() -> None:
         )
 
     assert dictionary.unit_calls == [12]
+    assert dictionary.evicted == [12]
+
+
+def test_nonfinite_dictionary_still_evicts_current_layer() -> None:
+    panel = tuple(_item(name) for name in PANEL_NAMES)
+    dictionary = FakeDictionary()
+    vectors = torch.zeros(16, 4)
+    vectors[-1, -1] = float("nan")
+    dictionary.unit = lambda layer: vectors
+
+    with pytest.raises(
+        ObservationReadoutError,
+        match="dictionary vectors",
+    ):
+        read_qualitative_panel(
+            model=object(),
+            dictionary=dictionary,
+            items=panel,
+            direct_records=_direct_records(panel),
+            audit=_audit(panel),
+            layers=(12, 13),
+            activation_reader=_activation_reader,
+            pursuit_fn=_pursuit,
+        )
+
     assert dictionary.evicted == [12]
 
 
