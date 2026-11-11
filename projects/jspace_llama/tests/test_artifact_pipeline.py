@@ -23,6 +23,11 @@ SCHEMAS = PROJECT / "schemas"
 VALIDATOR_PATH = PROJECT / "scripts" / "validate_results.py"
 RUNNER_PATH = ROOT / "tools" / "colab" / "run_jspace.py"
 JSPACE_COMMIT = "04c822a255fe0a10d84e08ec499e5e09f4b7d37a"
+SOURCE_COMMIT = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"],
+    cwd=ROOT,
+    text=True,
+).strip()
 
 
 def load_script(path: Path, name: str):
@@ -39,7 +44,7 @@ def complete_provenance() -> dict:
     prompt_cases = ExperimentConfig().prompts.cases
     return {
         "source": {
-            "commit": hashlib.sha1(b"source commit").hexdigest(),
+            "commit": SOURCE_COMMIT,
             "dirty": False,
             "scoped_dirty": False,
             "archive_sha256": runtime_source_sha256(PROJECT, ROOT),
@@ -262,6 +267,103 @@ def test_provenance_records_exact_prompts_resolved_revisions_and_file_hash(
         "8a79e44f3b87868447e8b0e514e4d9e3974591f3414ed8064a54ca49a7702709"
     )
     assert size == 11
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "data/anthropic-jlens/LICENSE",
+        "data/anthropic-jlens/README.md",
+        "data/anthropic-jlens/evaluations/lens-eval-multihop.json",
+    ],
+)
+def test_runtime_source_digest_covers_observational_data(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    from jspace_llama.provenance import runtime_source_sha256
+
+    repository = tmp_path / "repo"
+    project = repository / "projects" / "jspace_llama"
+    source = project / "src" / "jspace_llama" / "core.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    for data_relative in (
+        "data/anthropic-jlens/LICENSE",
+        "data/anthropic-jlens/README.md",
+        "data/anthropic-jlens/evaluations/lens-eval-multihop.json",
+    ):
+        path = project / data_relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data_relative, encoding="utf-8")
+
+    before = runtime_source_sha256(project, repository)
+    (project / relative).write_text("changed", encoding="utf-8")
+
+    assert runtime_source_sha256(project, repository) != before
+
+
+def test_historical_causal_manifest_remains_valid() -> None:
+    validator = load_script(VALIDATOR_PATH, "validate_historical_causal")
+    manifest = json.loads(
+        (PROJECT / "results" / "execution_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    final = json.loads(
+        (PROJECT / "results" / "final_evaluation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    validator.validate_documents(
+        manifest,
+        final,
+        schema_dir=SCHEMAS,
+        project_root=PROJECT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("commit", hashlib.sha1(b"tampered historical commit").hexdigest()),
+        ("archive_sha256", hashlib.sha256(b"tampered source").hexdigest()),
+    ],
+)
+def test_validator_rejects_tampered_historical_source(
+    field: str,
+    value: str,
+) -> None:
+    from jspace_llama.jsonio import document_sha256
+
+    validator = load_script(
+        VALIDATOR_PATH,
+        f"validate_tampered_historical_{field}",
+    )
+    manifest = json.loads(
+        (PROJECT / "results" / "execution_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    final = json.loads(
+        (PROJECT / "results" / "final_evaluation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest["provenance"]["source"][field] = value
+    final["manifest_sha256"] = document_sha256(manifest)
+
+    with pytest.raises(
+        validator.ResultsValidationError,
+        match="source (commit|archive digest)",
+    ):
+        validator.validate_documents(
+            manifest,
+            final,
+            schema_dir=SCHEMAS,
+            project_root=PROJECT,
+        )
 
 
 @pytest.mark.parametrize(
@@ -657,10 +759,23 @@ def test_archive_embeds_source_commit_and_dirty_state(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative, encoding="utf-8")
     commands = []
+    repository = tmp_path / "repo"
+    committed = {
+        path.relative_to(repository).as_posix(): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
 
     def fake_git(command, **kwargs):
         commands.append(command)
-        stdout = "9" * 40 + "\n" if "rev-parse" in command else ""
+        if "rev-parse" in command:
+            stdout = "9" * 40 + "\n"
+        elif "ls-tree" in command:
+            stdout = ("\n".join(sorted(committed)) + "\n").encode()
+        elif "show" in command:
+            stdout = committed[command[-1].split(":", 1)[1]]
+        else:
+            stdout = ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git)
@@ -681,6 +796,7 @@ def test_archive_embeds_source_commit_and_dirty_state(
         "dirty": False,
         "scoped_dirty": False,
         "archive_sha256": source["archive_sha256"],
+        "runtime_source_sha256": source["runtime_source_sha256"],
     }
     assert "jspace_llama/source_provenance.json" in names
     assert any("status" in command for command in commands)

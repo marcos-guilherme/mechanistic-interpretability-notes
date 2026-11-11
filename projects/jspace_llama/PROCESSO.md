@@ -1,10 +1,11 @@
-# Processo de estudo e reprodução causal do J-space
+# Processo de estudo causal e observacional do J-space
 
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
 
-> **Estado:** inconclusivo após execução causal; critérios primários não satisfeitos
+> **Estado:** tentativa causal inconclusiva preservada; atlas observacional
+> executado e validado
 >
-> **Última atualização:** 10 de novembro de 2026
+> **Última atualização:** 11 de novembro de 2026
 
 ## Síntese acadêmica
 
@@ -96,6 +97,127 @@ de base comportamental exigida não foi estabelecida e o conceito-fonte não
 apareceu no readout. O resultado científico adequado é que esta configuração
 de prompt, parser, lente, camadas e `alpha=4.0` permaneceu inconclusiva.
 
+### Extensão observacional: o atlas
+
+Depois dessa tentativa, decidi separar duas perguntas que o primeiro protocolo
+misturava na prática: “o que a lente consegue expor?” e “uma direção exposta
+tem efeito causal sobre a resposta?”. O atlas trata apenas da primeira. Ele foi
+implementado para mapear leituras internas de forma mais ampla antes de
+formular outra intervenção e foi executado no runtime remoto sem selecionar
+uma hipótese causal nova.
+
+Os 93 prompts vieram da avaliação `lens-eval-multihop` do repositório da
+Anthropic
+[`anthropics/jacobian-lens`](https://github.com/anthropics/jacobian-lens), na
+revisão fixada `581d398613e5602a5af361e1c34d3a92ea82ba8e`. Mantive apenas esse
+arquivo de avaliação, com SHA-256
+`2cd5a47aa3d7627708843bc61f03ab1d10eda4184f357c5cbf93c97184e32c9c`, e a
+[licença Apache 2.0](data/anthropic-jlens/LICENSE) que acompanha a cópia local.
+
+Cada item contém um `prompt`, um `target` e conceitos intermediários esperados.
+O código fornece ao modelo somente o `prompt` bruto, exatamente como texto,
+sem *chat template*. Essa escolha preserva a distribuição da avaliação e a
+posição de leitura original: o prompt termina imediatamente antes do
+`target`, e a lente lê a posição final. O `target` é metadado de avaliação e
+auditoria; ele não é concatenado ao texto de entrada nem revelado ao modelo.
+
+O atlas compara três leituras que cumprem papéis diferentes:
+
+- **J-lens direta:** aplica a lente com o ajuste do Jacobiano e mede o rank de
+  cada conceito intermediário na posição final do prompt;
+- **logit lens:** repete o mesmo ranking sem o ajuste do Jacobiano, oferecendo
+  uma comparação direta nos mesmos prompts e camadas;
+- **`gradient_pursuit`:** decompõe a ativação residual observada em direções do
+  dicionário para um painel qualitativo registrado de 12 prompts. É uma
+  leitura esparsa separada; seus coeficientes não são ranks da J-lens.
+
+Nenhuma dessas rotas gera uma continuação. A J-lens e a logit lens apenas
+projetam estados já produzidos no *prefill*; o `gradient_pursuit` lê cópias das
+ativações finais e não as escreve de volta no modelo. Portanto, este protocolo
+não contém edição, clamp, troca de conceito ou qualquer outra intervenção
+causal.
+
+As métricas diretas são `pass@1`, `pass@5` e `pass@10`: para cada item, calculo
+a fração dos intermediários cujo melhor rank fica dentro de `k` e depois tiro
+a média entre os 93 itens. O cálculo é registrado tanto para a *band* de
+workspace resolvida em runtime quanto para todas as camadas ajustadas da lente.
+Ranks por camada e o painel fixo de 12 prompts completam o diagnóstico. Esses
+resultados serão observacionais, inclusive quando mostrarem diferenças entre
+métodos ou regiões da rede.
+
+Também separei sucesso operacional de desempenho científico. O status
+`success` exige 93 registros alinhados, auditoria de tokenização, painel
+completo, escopos de camada coerentes, proveniência verificável, hashes e
+figuras válidos. Ele não exige `pass@k` alto. Assim, uma execução completa com
+recuperação baixa ainda pode ser publicada como operacionalmente bem-sucedida,
+sem que isso demonstre um workspace útil ou um efeito causal.
+
+### Resultados observacionais
+
+A execução canônica `2fcb8a49-136f-4868-91cc-f98f9dc2e57d` começou em
+`2026-11-11T15:14:19.427513Z` e terminou em
+`2026-11-11T15:19:29.812212Z`. Em uma NVIDIA L4, com `bfloat16` e CUDA 13.2,
+ela processou os 93 itens e terminou com `status=success`. Esse estado afirma
+que o pipeline e a evidência foram completados e validados; não afirma que a
+recuperação foi alta e não modifica o resultado causal anterior.
+
+Na *band* 12–28, a J-lens obteve `pass@1=0,344086`,
+`pass@5=0,548387` e `pass@10=0,596774`; a logit lens obteve `0,284946`,
+`0,392473` e `0,435484`. Quando permiti que o melhor rank viesse de qualquer
+camada ajustada, 0–30, a J-lens passou a `0,344086`, `0,564516` e `0,629032`,
+e a logit lens a `0,284946`, `0,392473` e `0,446237`. A J-lens recuperou uma
+fração maior de intermediários neste recorte, mas essa comparação entre
+projeções sobre os mesmos estados é observacional: ela não mostra que os
+conceitos recuperados causem a resposta.
+
+Dos 103 intermediários, 82 eram single-token e 21 eram multi-token. Os 82
+single-token aparecem em 81 itens. Nesse subconjunto, os valores
+`pass@1/5/10` na *band* foram `0,395062 / 0,641975 / 0,691358` para J-lens e
+`0,333333 / 0,456790 / 0,506173` para logit lens. Em todas as camadas, foram
+`0,395062 / 0,654321 / 0,716049` e
+`0,333333 / 0,456790 / 0,518519`, respectivamente. A diferença em relação ao
+conjunto total sugere que a tokenização participa da dificuldade medida; não
+autoriza generalizar para outros tokenizers, lentes ou corpora.
+
+No schema v2, não auditei apenas o primeiro token de cada intermediário. Também
+registrei os IDs e os hashes da tokenização bruta dos 93 prompts. O readout
+confere se a tokenização interna da lente coincide com essa auditoria, e o
+painel reutiliza os mesmos IDs ao capturar a posição final. Isso fecha uma
+fonte de divergência silenciosa entre duas leituras do mesmo texto.
+
+O painel fixo de 12 itens mostra tanto recuperações claras quanto falhas.
+`Brazil` em `amazon-language`, `Mars`, `gold`, `March`, `oxygen` e `east`
+chegaram ao rank 1 da J-lens. `spider`, no item `spider-legs`, teve melhor
+rank 2 na camada 19, tanto na *band* quanto no conjunto completo. Já
+`nhop-primary-planet` foi difícil: na *band*, `3`, `three` e `third` tiveram
+ranks 1999, 1090 e 514; a busca em todas as camadas melhorou esses valores
+para 24, 286 e 349, sem torná-los recuperações fortes.
+
+No heatmap, as primeiras camadas concentram ranks altos para a maioria dos
+itens. Há uma melhora ampla a partir da região intermediária e uma
+concentração qualitativa de ranks menores entre aproximadamente as camadas 17
+e 28, mas permanecem faixas de itens ruins nessa mesma região; as camadas 29 e
+30 também são heterogêneas. Como cada célula usa o menor rank entre os
+intermediários daquele item, a figura não localiza uma camada causal nem
+garante que todos os conceitos do item estejam disponíveis.
+
+O `gradient_pursuit` às vezes reencontra o texto esperado. No caso de
+`spider`, ele inclui `Spider` ou `spider` entre os componentes em várias
+camadas, chegando ao segundo componente na camada 24, enquanto o ranking
+direto da J-lens encontra rank 2 na camada 19. Essa proximidade é útil como
+checagem qualitativa, não como igualdade: o ranking direto ordena tokens
+projetados pela lente, enquanto o pursuit aproxima uma ativação com uma
+combinação esparsa e reporta coeficientes e variância explicada. Há também
+casos em que o intermediário não aparece entre os componentes registrados,
+como `basketball` e `Spain`, embora o ranking direto ainda possa localizá-lo.
+
+As três representações PNG são coerentes com o JSON em métricas, ordem dos
+itens e ranks destacados. O gráfico de `pass@k` e o heatmap comunicam bem seus
+agregados. O painel, porém, imprime tokens brutos: quebras de linha, glifos de
+outros scripts e fragmentos como `newRow` reduzem a legibilidade de várias
+células. Não interpreto esse ruído visual como conteúdo semântico e uso o JSON
+validado como fonte numérica.
+
 ### Contribuição para o TCC
 
 Mesmo inconclusivo, este estudo tem uma função metodológica importante no meu
@@ -107,6 +229,10 @@ terceiro nível de análise causal que explorei — a intervenção sobre concei
 em um espaço de trabalho aprendido por uma lente. Registrar o baseline
 inválido, o readout sem `spider` e a degradação da intervenção evita transformar
 uma execução completa em uma conclusão mais forte do que os dados permitem.
+O atlas estende essa contribuição metodológica ao separar exploração
+observacional de confirmação causal. Ele não reclassifica a tentativa anterior
+e não fornece, por si só, evidência de que um conceito lido seja usado pelo
+modelo para produzir a resposta.
 
 ## Trabalho de referência e implementação
 
@@ -180,6 +306,8 @@ execução.
 
 ## Execução e reprodução
 
+### Protocolo causal preservado
+
 O modelo é *gated*. Antes da execução, é necessário entrar no site do Hugging
 Face com a mesma conta usada no CLI e aceitar ou solicitar acesso na
 [página oficial do modelo](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct).
@@ -209,19 +337,112 @@ uv run pytest -q
 
 A sessão de GPU deve ser encerrada mesmo após erro ou queda da conexão local.
 
+### Atlas observacional
+
+O atlas usa a mesma preparação de runtime, mas outro notebook e um perfil de
+download separado. Na raiz do repositório:
+
+```powershell
+python tools/colab/run_jspace.py probe
+python tools/colab/run_jspace.py start --gpu L4
+python tools/colab/run_jspace.py sync
+python tools/colab/run_jspace.py bootstrap
+python tools/colab/run_jspace.py auth-hf
+python tools/colab/run_jspace.py execute --notebook projects/jspace_llama/notebooks/02_observe_multihop_jspace.ipynb --timeout 7200
+python tools/colab/run_jspace.py fetch --result-set observation
+python tools/colab/run_jspace.py stop
+```
+
+O perfil `observation` transporta exatamente nove membros, sem sobrescrever os
+resultados causais: dois JSONs compactos, seis figuras canônicas PNG/SVG e o
+sidecar ignorado `artifacts/jspace_observation_raw.json`. O sidecar contém os
+registros observacionais no nível de cada prompt usados para reconciliar
+hashes, ranks, painel, tokenização e conteúdo; ele não contém saídas geradas
+nem continuações. Tanto o empacotamento quanto o download validam o JSON, o
+caminho permitido e o limite de tamanho, e o fetch publica os nove membros na
+mesma transação com rollback. Para validar o conjunto completo:
+
+```powershell
+cd projects/jspace_llama
+uv run python scripts/validate_observation.py
+```
+
+Na execução canônica, o fetch trouxe o sidecar necessário e essa validação
+independente terminou com `PASS`. Ele continua gitignored e não faz parte do
+commit de evidência canônica, que contém apenas os dois JSONs compactos e as
+seis figuras.
+
+### O que a execução remota ensinou
+
+Os problemas operacionais encontrados durante a execução também esclareceram
+o que preciso controlar para chamar uma medição de reproduzível. No Colab, o
+diretório corrente não é uma forma segura de descobrir a raiz sincronizada;
+o runner precisa localizar a estrutura do projeto por marcadores e trabalhar
+a partir dela. Isso evita que uma sessão iniciada em outro caminho use arquivos
+ou ambiente errados sem perceber.
+
+Também observei que o estado já importado do Matplotlib e de extensões nativas
+pode sobreviver à atualização do ambiente dentro do mesmo processo. A
+renderização das figuras em um processo isolado passou a separar a inferência
+do estado gráfico persistente e a falhar de forma explícita se o renderizador
+não estiver coerente. Essa separação importa porque uma figura produzida não é
+evidência suficiente de que foi produzida pelo ambiente que o manifesto
+declara.
+
+O sidecar observacional é naturalmente muito maior que os JSONs compactos.
+Os limites de tamanho no empacotamento e no transporte precisam, portanto,
+ser específicos ao tipo de artefato: baixos demais rejeitam evidência válida;
+altos e indiscriminados deixam de detectar saídas acidentais. Por fim, a
+validação encontrou um falso positivo ao interpretar o token legítimo `/x`
+como caminho. A correção foi tornar a checagem sensível ao campo e ao schema,
+em vez de procurar padrões suspeitos em qualquer string. A lição comum é que
+reprodutibilidade depende tanto de rejeitar saídas indevidas quanto de não
+rejeitar dados válidos por heurísticas genéricas.
+
+A revisão integral ainda revelou que a primeira validação numérica do
+`gradient_pursuit` criava uma máscara `isfinite` do tamanho inteiro do
+dicionário em GPU. A L4 encerrou essa tentativa como `resource_exhausted`, sem
+publicar artefatos parciais. Troquei a checagem por blocos limitados a um milhão
+de elementos e repeti o protocolo em uma sessão limpa. A execução v2 então
+terminou com `success`, preservando a rejeição de `NaN` e infinito sem exigir
+uma segunda cópia do dicionário na memória.
+
+Também passei a recomputar a proveniência do código a partir dos blobs do commit
+histórico, e não apenas a confiar no hash declarado pelo produtor. O manifesto
+canônico aponta para o commit `4cd9756786ee83dabc0d3340385919fd408cc549`
+e para o digest de fonte
+`0c7d97282d2d4c699a4c392d5efb6a9388dd9d8cee0b7b9d5f63e6dc7f8dc8e8`.
+
 ## Evidência canônica
 
 - [`results/execution_manifest.json`](results/execution_manifest.json):
   ambiente, revisões resolvidas, configuração e motivo terminal.
 - [`results/final_evaluation.json`](results/final_evaluation.json): estado
   científico agregado e campos explicitamente não avaliados.
+- [`results/jspace_observation_manifest.json`](results/jspace_observation_manifest.json):
+  proveniência e estado operacional da execução observacional.
+- [`results/jspace_observation.json`](results/jspace_observation.json):
+  métricas, ranks, painel e resumo de tokenização do atlas.
+- [`results/jspace_observation_pass_at_k.png`](results/jspace_observation_pass_at_k.png)
+  e versão SVG: comparação agregada das duas lentes.
+- [`results/jspace_observation_rank_heatmap.png`](results/jspace_observation_rank_heatmap.png)
+  e versão SVG: ranks da J-lens por item e camada.
+- [`results/jspace_observation_panel.png`](results/jspace_observation_panel.png)
+  e versão SVG: painel qualitativo registrado.
 - [`README.md`](README.md): instruções operacionais resumidas.
 - [`notebooks/01_readout_and_causal_swap.ipynb`](notebooks/01_readout_and_causal_swap.ipynb):
-  ponto de entrada da execução real.
+  ponto de entrada da execução causal.
+- [`notebooks/02_observe_multihop_jspace.ipynb`](notebooks/02_observe_multihop_jspace.ipynb):
+  ponto de entrada fino do atlas.
+- [`scripts/validate_observation.py`](scripts/validate_observation.py):
+  validação independente dos artefatos observacionais.
 
 O artefato final registra um prompt principal, duas paráfrases e um valor de
 `alpha` efetivamente avaliados. Nenhuma combinação passou por todos os
-critérios primários.
+critérios primários. Esse resultado causal permanece byte a byte inalterado.
+Os oito artefatos observacionais são uma evidência separada. O sidecar
+observacional torna a validação reproduzível localmente, mas permanece fora da
+evidência canônica versionada.
 
 ## Desvios e limitações
 
@@ -234,13 +455,22 @@ critérios primários.
 | `spider` ausente no readout | A lente não expôs o conceito-fonte nas camadas avaliadas | A intervenção não parte de uma representação-fonte validada |
 | Vazamento de `ant` e repetição | A condição-alvo degradou a continuação em `alpha=4.0` | A mudança não pode ser tratada como redirecionamento factual limpo |
 | TorchAudio incompatível no Colab | Pacote pré-instalado usava CUDA 13.0, enquanto PyTorch usava 13.2 | Exigiu remoção segura do pacote de áudio não utilizado antes da execução |
+| Tokenizer e lente específicos | Tokenização do Llama e lente ajustada em Salesforce-Wikitext | Os ranks não generalizam automaticamente para outro vocabulário, corpus ou lente |
+| *Band* 12–28 e camadas ajustadas 0–30 | Escopos disponíveis nesta lente e neste protocolo | A distribuição por camada não estabelece uma região universal de workspace |
+| Painel fixo de 12 itens | Diagnóstico qualitativo registrado antes da execução | Exemplos bons ou ruins não estimam desempenho fora dos 93 itens |
+| Painel visual com tokens brutos | A figura preserva fragmentos do tokenizer | Glifos e quebras de linha prejudicam leitura; valores devem vir do JSON |
+
+No atlas, o painel de 12 itens é deliberadamente qualitativo, e a comparação
+entre *band* e todas as camadas continua observacional; nenhuma delas mede
+efeito sobre a saída do modelo.
 
 ## Próximo passo científico
 
-O próximo passo deve começar pela linha de base, antes de ampliar o sweep da
-intervenção. Eu avaliaria prompts e regras de parsing pré-declarados capazes de
-obter uma resposta basal inequívoca e, em seguida, verificaria em quais camadas
-e formulações a J-lens expõe o conceito-fonte. Somente depois dessas duas
-precondições repetiria a troca com múltiplos valores de `alpha` e controles.
-Essas mudanças devem constituir uma nova execução registrada, não uma seleção
-retrospectiva dos casos desta rodada.
+Uma confirmação causal futura deve começar por uma especificação nova, com
+hipótese, prompts ainda não usados neste atlas, regras de parsing e controles
+pré-declarados capazes de estabelecer uma linha de base inequívoca. A leitura
+observacional pode motivar esse trabalho, mas não autoriza escolher
+retrospectivamente, nesta documentação, um conceito, uma direção, uma camada
+ou um `alpha` que pareça favorável. Também não separo agora prompts do conjunto
+como *held-out*: isso faria parte da nova especificação, antes de qualquer
+execução causal. Qualquer troca precisará de uma execução registrada própria.

@@ -9,6 +9,7 @@ dependencies = [
     "huggingface-hub>=0.34",
     "jsonschema>=4.23",
     "jspace @ git+https://github.com/haohww/jspace@04c822a255fe0a10d84e08ec499e5e09f4b7d37a",
+    "matplotlib>=3.9",
     "safetensors>=0.4",
     "torch>=2.2",
     "transformers>=4.56",

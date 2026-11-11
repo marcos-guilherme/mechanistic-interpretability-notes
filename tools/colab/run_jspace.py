@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+from contextlib import contextmanager
+import gzip
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
 from typing import Sequence
+import xml.etree.ElementTree as ET
+import zlib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,15 +35,44 @@ BOOTSTRAP_SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 AUTH_SUCCESS_MARKER = "JSPACE_HF_AUTH_SUCCESS"
 PACK_SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
+RESULT_SET_ENV = "JSPACE_RESULT_SET"
 MAX_RESULT_BYTES = 1_048_576
-RESULT_ALLOWLIST = frozenset(
-    {
-        "results/execution_manifest.json",
-        "results/final_evaluation.json",
-    }
-)
+MAX_OBSERVATION_RAW_BYTES = 5 * 1_048_576
+MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
+MAX_FIGURE_BYTES = 5 * 1_048_576
+MAX_ARCHIVE_BYTES = 40 * 1_048_576
+MAX_IMAGE_DIMENSION = 10_000
+MAX_PNG_CHUNKS = 4_096
+MAX_EMBEDDED_PNG_BYTES = 4 * 1_048_576
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_TAR_HEADER_OVERHEAD_BYTES = 1_048_576
+TAR_BLOCK_BYTES = 512
+OBSERVATION_RAW = "artifacts/jspace_observation_raw.json"
+RESULT_SETS = {
+    "causal": frozenset(
+        {
+            "results/execution_manifest.json",
+            "results/final_evaluation.json",
+        }
+    ),
+    "observation": frozenset(
+        {
+            OBSERVATION_RAW,
+            "results/jspace_observation_manifest.json",
+            "results/jspace_observation.json",
+            "results/jspace_observation_pass_at_k.png",
+            "results/jspace_observation_pass_at_k.svg",
+            "results/jspace_observation_rank_heatmap.png",
+            "results/jspace_observation_rank_heatmap.svg",
+            "results/jspace_observation_panel.png",
+            "results/jspace_observation_panel.svg",
+        }
+    ),
+}
+RESULT_ALLOWLIST = RESULT_SETS["causal"]
 ARCHIVE_ROOT_FILES = frozenset({"README.md", "pyproject.toml", "uv.lock"})
 ARCHIVE_SUFFIXES = {
+    "data": frozenset({"", ".json", ".md"}),
     "notebooks": frozenset({".ipynb"}),
     "schemas": frozenset({".json"}),
     "scripts": frozenset({".py"}),
@@ -67,6 +104,75 @@ SENSITIVE_FILENAMES = frozenset(
         "token",
     }
 )
+
+
+def result_allowlist(result_set: str) -> set[str]:
+    try:
+        return set(RESULT_SETS[result_set])
+    except KeyError as error:
+        raise ValueError(f"unknown result set: {result_set}") from error
+
+
+def result_size_limit(name: str) -> int:
+    if name == OBSERVATION_RAW:
+        return MAX_OBSERVATION_RAW_BYTES
+    if name == "results/jspace_observation.json":
+        return MAX_OBSERVATION_JSON_BYTES
+    if name.endswith((".png", ".svg")):
+        return MAX_FIGURE_BYTES
+    return MAX_RESULT_BYTES
+
+
+def decompressed_tar_limit(result_set: str) -> int:
+    allowlist = result_allowlist(result_set)
+    padded_payload_bytes = sum(
+        (
+            (result_size_limit(name) + TAR_BLOCK_BYTES - 1)
+            // TAR_BLOCK_BYTES
+        )
+        * TAR_BLOCK_BYTES
+        for name in allowlist
+    )
+    standard_header_bytes = len(allowlist) * TAR_BLOCK_BYTES
+    return (
+        padded_payload_bytes
+        + standard_header_bytes
+        + MAX_TAR_HEADER_OVERHEAD_BYTES
+    )
+
+
+class _BoundedDecompressedReader:
+    def __init__(self, source, limit: int) -> None:
+        self._source = source
+        self._limit = limit
+        self._count = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        remaining = self._limit - self._count
+        requested = remaining + 1 if size < 0 else min(size, remaining + 1)
+        payload = self._source.read(requested)
+        if len(payload) > remaining:
+            raise ValueError(
+                "decompressed TAR exceeds selected result profile limit"
+            )
+        self._count += len(payload)
+        return payload
+
+
+@contextmanager
+def open_bounded_result_tar(
+    archive_source,
+    result_set: str,
+):
+    with gzip.GzipFile(fileobj=archive_source, mode="rb") as decompressed:
+        bounded = _BoundedDecompressedReader(
+            decompressed,
+            decompressed_tar_limit(result_set),
+        )
+        with tarfile.open(fileobj=bounded, mode="r|") as handle:
+            yield handle
 
 
 def huggingface_token_path(home: Path | None = None) -> Path:
@@ -151,14 +257,17 @@ def run_remote_operation(
     *,
     timeout: int,
     operation_marker: str,
+    environment: dict[str, str] | None = None,
 ) -> None:
     nonce = secrets.token_hex(32)
     expected_marker = f"{operation_marker}:{nonce}"
+    remote_environment = dict(environment or {})
+    remote_environment[SUCCESS_NONCE_ENV] = nonce
     command = exec_command(
         session,
         file,
         timeout=timeout,
-        environment={SUCCESS_NONCE_ENV: nonce},
+        environment=remote_environment,
     )
     run_remote_script(command, expected_marker)
 
@@ -339,10 +448,12 @@ def _cleanup_private_download_directory(
 def fetch_results(
     session: str,
     *,
+    result_set: str = "causal",
     staging: Path = STAGING,
     project: Path = PROJECT,
     root: Path = ROOT,
 ) -> None:
+    result_allowlist(result_set)
     staging_metadata = _ensure_staging_directory(staging, root)
     private_directory = Path(
         tempfile.mkdtemp(prefix="jspace-fetch-", dir=staging)
@@ -367,7 +478,10 @@ def fetch_results(
             staging,
             private_metadata,
         )
-        extract_results_archive(local, project)
+        if result_set == "causal":
+            extract_results_archive(local, project)
+        else:
+            extract_results_archive(local, project, result_set)
     finally:
         _cleanup_private_download_directory(
             private_directory,
@@ -411,6 +525,12 @@ def _archive_candidates(project: Path) -> list[Path]:
                     continue
                 if suffix not in suffixes:
                     raise ValueError(f"archive source has unapproved suffix: {path}")
+                relative = path.relative_to(project).as_posix()
+                if (
+                    suffix == ""
+                    and relative != "data/anthropic-jlens/LICENSE"
+                ):
+                    raise ValueError(f"archive source has unapproved suffix: {path}")
                 validate_archive_file(path, project)
                 candidates.append(path)
 
@@ -447,10 +567,9 @@ def _runtime_critical_files(
         for path in _archive_candidates(project)
         if (
             path.relative_to(project).parts[0]
-            in {"src", "notebooks", "schemas", "scripts"}
+            in {"data", "src", "notebooks", "schemas", "scripts"}
             or path.name in {"pyproject.toml", "uv.lock"}
         )
-        and path.name != "README.md"
         and "tests" not in path.relative_to(project).parts
     ]
     runner = repository_root / "tools" / "colab" / "run_jspace.py"
@@ -505,6 +624,7 @@ def _runtime_git_pathspecs(
     except ValueError:
         project_relative = "projects/jspace_llama"
     return [
+        f"{project_relative}/data",
         f"{project_relative}/src",
         f"{project_relative}/notebooks",
         f"{project_relative}/schemas",
@@ -513,6 +633,78 @@ def _runtime_git_pathspecs(
         f"{project_relative}/uv.lock",
         "tools/colab/run_jspace.py",
     ]
+
+
+def _is_runtime_git_path(path: str, project_relative: str) -> bool:
+    relative = path.removeprefix(f"{project_relative}/")
+    if relative == path:
+        return path == "tools/colab/run_jspace.py"
+    if relative in {"pyproject.toml", "uv.lock"}:
+        return True
+    if relative.startswith("data/"):
+        suffix = Path(relative).suffix.lower()
+        return (
+            suffix in {".json", ".md"}
+            or relative == "data/anthropic-jlens/LICENSE"
+        )
+    if relative.startswith(("src/", "scripts/")):
+        return relative.endswith(".py")
+    if relative.startswith("schemas/"):
+        return relative.endswith(".json")
+    if relative.startswith("notebooks/"):
+        return (
+            relative.endswith(".ipynb")
+            and not relative.endswith("_output.ipynb")
+        )
+    return False
+
+
+def runtime_source_sha256_at_commit(
+    project: Path,
+    repository_root: Path,
+    commit: str,
+) -> str:
+    try:
+        project_relative = project.resolve().relative_to(
+            repository_root.resolve()
+        ).as_posix()
+    except ValueError:
+        project_relative = "projects/jspace_llama"
+    tree = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+            "--",
+            *_runtime_git_pathspecs(project, repository_root),
+        ],
+        cwd=repository_root,
+        capture_output=True,
+        check=True,
+    ).stdout
+    paths = [
+        path
+        for path in tree.decode("utf-8").splitlines()
+        if _is_runtime_git_path(path, project_relative)
+    ]
+    if not paths:
+        raise ValueError("source commit has no runtime-critical files")
+    digest = hashlib.sha256()
+    for label in sorted(paths):
+        content = subprocess.run(
+            ["git", "show", f"{commit}:{label}"],
+            cwd=repository_root,
+            capture_output=True,
+            check=True,
+        ).stdout
+        label_bytes = label.encode("utf-8")
+        digest.update(len(label_bytes).to_bytes(8, "big"))
+        digest.update(label_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def capture_source_provenance(
@@ -551,6 +743,11 @@ def capture_source_provenance(
         "archive_sha256": runtime_source_sha256(
             project,
             repository_root,
+        ),
+        "runtime_source_sha256": runtime_source_sha256_at_commit(
+            project,
+            repository_root,
+            revision,
         ),
     }
 
@@ -648,6 +845,8 @@ def validate_result_archive(
         archive_metadata,
         context="result archive",
     )
+    if getattr(archive_metadata, "st_size", 0) > MAX_ARCHIVE_BYTES:
+        raise ValueError(f"result archive is too large: {archive}")
 
 
 def _validate_json_bytes(name: str, payload: bytes) -> None:
@@ -662,62 +861,403 @@ def _validate_json_bytes(name: str, payload: bytes) -> None:
     def reject_constant(value: str):
         raise ValueError(f"non-finite JSON value: {value}")
 
+    def reject_nonfinite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"non-finite JSON value: {value}")
+        return parsed
+
     try:
         json.loads(
             payload.decode("utf-8"),
             object_pairs_hook=reject_duplicates,
             parse_constant=reject_constant,
+            parse_float=reject_nonfinite_float,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise ValueError(f"result artifact is not valid JSON: {name}") from error
 
 
-def extract_results_archive(archive: Path, project: Path = PROJECT) -> None:
-    archive_metadata = os.lstat(archive)
-    validate_result_archive(archive, metadata=archive_metadata)
-    with open_validated_file(archive, archive_metadata) as archive_source:
-        with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
-            members = handle.getmembers()
-            member_names = [member.name for member in members]
-            if len(member_names) != len(set(member_names)):
-                raise ValueError("duplicate result archive member")
-            names = set(member_names)
-            unexpected = names - RESULT_ALLOWLIST
-            if unexpected:
-                joined = ", ".join(sorted(unexpected))
-                raise ValueError(f"unexpected result archive member: {joined}")
-            missing = RESULT_ALLOWLIST - names
-            if missing:
-                joined = ", ".join(sorted(missing))
-                raise FileNotFoundError(
-                    f"missing result archive member: {joined}"
+def _validate_png_bytes(name: str, payload: bytes) -> None:
+    if len(payload) > MAX_FIGURE_BYTES:
+        raise ValueError(f"result PNG is too large: {name}")
+    if not payload.startswith(PNG_SIGNATURE):
+        raise ValueError(f"result artifact is not a valid PNG: {name}")
+    offset = len(PNG_SIGNATURE)
+    chunk_count = 0
+    seen_ihdr = False
+    seen_plte = False
+    seen_idat = False
+    idat_finished = False
+    seen_iend = False
+    idat_bytes = 0
+    plte_entries = 0
+    bit_depth = -1
+    color_type = -1
+    while offset < len(payload):
+        if seen_iend:
+            raise ValueError(f"result PNG has trailing bytes: {name}")
+        if len(payload) - offset < 12:
+            raise ValueError(f"result PNG is truncated: {name}")
+        length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        chunk_type = payload[offset + 4 : offset + 8]
+        if (
+            length > MAX_FIGURE_BYTES
+            or length > len(payload) - offset - 12
+        ):
+            raise ValueError(f"result PNG has an invalid chunk length: {name}")
+        if (
+            not all(
+                65 <= byte <= 90 or 97 <= byte <= 122
+                for byte in chunk_type
+            )
+            or not 65 <= chunk_type[2] <= 90
+        ):
+            raise ValueError(f"result PNG has an invalid chunk type: {name}")
+        data_start = offset + 8
+        data_end = data_start + length
+        chunk_data = payload[data_start:data_end]
+        expected_crc = struct.unpack(">I", payload[data_end : data_end + 4])[0]
+        actual_crc = zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF
+        if expected_crc != actual_crc:
+            if chunk_type == b"IHDR":
+                raise ValueError(
+                    f"result PNG has an invalid IHDR checksum: {name}"
                 )
+            raise ValueError(f"result PNG has an invalid chunk checksum: {name}")
+        offset = data_end + 4
+        chunk_count += 1
+        if chunk_count > MAX_PNG_CHUNKS:
+            raise ValueError(f"result PNG has too many chunks: {name}")
+        if chunk_count == 1 and chunk_type != b"IHDR":
+            raise ValueError(f"result PNG does not start with IHDR: {name}")
 
-            payloads: dict[str, bytes] = {}
-            for member in members:
-                if not member.isfile() or member.issym() or member.islnk():
-                    raise ValueError(
-                        "result archive must contain regular files only"
-                    )
-                if member.size < 0 or member.size > MAX_RESULT_BYTES:
-                    raise ValueError(
-                        f"result artifact is too large: {member.name}"
-                    )
-                source = handle.extractfile(member)
-                if source is None:
-                    raise ValueError(
-                        f"cannot read result artifact: {member.name}"
-                    )
-                payload = source.read(MAX_RESULT_BYTES + 1)
-                if len(payload) > MAX_RESULT_BYTES:
-                    raise ValueError(
-                        f"result artifact is too large: {member.name}"
-                    )
-                _validate_json_bytes(member.name, payload)
-                payloads[member.name] = payload
+        if chunk_type == b"IHDR":
+            if seen_ihdr or chunk_count != 1 or length != 13:
+                raise ValueError(f"result PNG has an invalid IHDR: {name}")
+            seen_ihdr = True
+            width, height = struct.unpack(">II", chunk_data[:8])
+            if not (
+                0 < width <= MAX_IMAGE_DIMENSION
+                and 0 < height <= MAX_IMAGE_DIMENSION
+            ):
+                raise ValueError(f"result PNG has invalid dimensions: {name}")
+            (
+                bit_depth,
+                color_type,
+                compression,
+                filter_method,
+                interlace,
+            ) = chunk_data[8:]
+            valid_bit_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if (
+                bit_depth not in valid_bit_depths.get(color_type, set())
+                or compression != 0
+                or filter_method != 0
+                or interlace not in {0, 1}
+            ):
+                raise ValueError(
+                    f"result PNG has invalid IHDR fields: {name}"
+                )
+        elif chunk_type == b"PLTE":
+            if (
+                not seen_ihdr
+                or seen_plte
+                or seen_idat
+                or length == 0
+                or length % 3 != 0
+                or length > 768
+            ):
+                raise ValueError(f"result PNG has an invalid PLTE: {name}")
+            seen_plte = True
+            plte_entries = length // 3
+        elif chunk_type == b"IDAT":
+            if not seen_ihdr or idat_finished:
+                raise ValueError(f"result PNG has a misordered IDAT: {name}")
+            seen_idat = True
+            idat_bytes += length
+        elif chunk_type == b"IEND":
+            if not seen_ihdr or not seen_idat or length != 0:
+                raise ValueError(f"result PNG has an invalid IEND: {name}")
+            seen_iend = True
+            if offset != len(payload):
+                raise ValueError(f"result PNG has trailing bytes: {name}")
+        elif 65 <= chunk_type[0] <= 90:
+            raise ValueError(
+                f"result PNG has an unknown critical chunk: {name}"
+            )
 
+        if seen_idat and chunk_type not in {b"IDAT", b"IEND"}:
+            idat_finished = True
+
+    if not seen_ihdr or not seen_idat or idat_bytes == 0 or not seen_iend:
+        raise ValueError(f"result PNG is incomplete: {name}")
+    if color_type == 3 and not seen_plte:
+        raise ValueError(f"result PNG is missing PLTE: {name}")
+    if color_type in {0, 4} and seen_plte:
+        raise ValueError(f"result PNG has a forbidden PLTE: {name}")
+    if color_type == 3 and plte_entries > 2**bit_depth:
+        raise ValueError(f"result PNG has an oversized PLTE: {name}")
+
+
+def _local_xml_name(value: str) -> str:
+    return value.rsplit("}", 1)[-1].lower()
+
+
+SAFE_SVG_ELEMENTS = frozenset(
+    {
+        "agent",
+        "clippath",
+        "creator",
+        "date",
+        "defs",
+        "format",
+        "g",
+        "image",
+        "metadata",
+        "path",
+        "rdf",
+        "rect",
+        "style",
+        "svg",
+        "title",
+        "type",
+        "use",
+        "work",
+    }
+)
+SAFE_SVG_ATTRIBUTES = frozenset(
+    {
+        "clip-path",
+        "d",
+        "height",
+        "href",
+        "id",
+        "resource",
+        "style",
+        "transform",
+        "type",
+        "version",
+        "viewbox",
+        "width",
+        "x",
+        "y",
+    }
+)
+SAFE_STYLE_PROPERTIES = frozenset(
+    {
+        "fill",
+        "opacity",
+        "stroke",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-opacity",
+        "stroke-width",
+    }
+)
+SAFE_METADATA_RESOURCE = "http://purl.org/dc/dcmitype/StillImage"
+CSS_ESCAPE = re.compile(
+    r"\\(?:([0-9a-fA-F]{1,6})[ \t\r\n\f]?|([^0-9a-fA-F\r\n\f])|(\r\n|[\r\n\f]))"
+)
+SVG_FRAGMENT = re.compile(r"#[A-Za-z_][A-Za-z0-9_.:-]*\Z")
+SVG_CLIP_PATH = re.compile(
+    r"url\(\s*#[A-Za-z_][A-Za-z0-9_.:-]*\s*\)\Z",
+    flags=re.IGNORECASE,
+)
+SAFE_STYLE_ELEMENT = "*{stroke-linejoin:round;stroke-linecap:butt}"
+
+
+def _decode_css_escapes(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        hexadecimal, escaped, newline = match.groups()
+        if hexadecimal is not None:
+            codepoint = int(hexadecimal, 16)
+            if (
+                codepoint == 0
+                or codepoint > 0x10FFFF
+                or 0xD800 <= codepoint <= 0xDFFF
+            ):
+                return "\N{REPLACEMENT CHARACTER}"
+            return chr(codepoint)
+        if escaped is not None:
+            return escaped
+        if newline is not None:
+            return ""
+        raise AssertionError("unreachable CSS escape")
+
+    return CSS_ESCAPE.sub(replace, value)
+
+
+def _validate_style_attribute(name: str, value: str) -> None:
+    normalized = _decode_css_escapes(value)
+    lowered = normalized.lower()
+    if "url" in lowered or "@import" in lowered:
+        raise ValueError(f"result SVG contains external content: {name}")
+    if "\\" in normalized or "@" in normalized:
+        raise ValueError(f"result SVG contains unsafe CSS: {name}")
+    for declaration in normalized.split(";"):
+        if not declaration.strip():
+            continue
+        if ":" not in declaration:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+        property_name, property_value = declaration.split(":", 1)
+        if property_name.strip().lower() not in SAFE_STYLE_PROPERTIES:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+        if re.fullmatch(
+            r"[-#A-Za-z0-9.,%+ ]+",
+            property_value.strip(),
+        ) is None:
+            raise ValueError(f"result SVG contains unsafe CSS: {name}")
+
+
+def _validate_embedded_png(name: str, value: str) -> None:
+    prefix = "data:image/png;base64,"
+    if not value.lower().startswith(prefix):
+        raise ValueError(f"result SVG contains external content: {name}")
+    encoded = "".join(value[len(prefix) :].split())
+    max_encoded = ((MAX_EMBEDDED_PNG_BYTES + 2) // 3) * 4
+    if len(encoded) > max_encoded:
+        raise ValueError(f"result SVG embedded PNG is too large: {name}")
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError(f"result SVG contains invalid embedded image: {name}") from error
+    if len(decoded) > MAX_EMBEDDED_PNG_BYTES:
+        raise ValueError(f"result SVG embedded PNG is too large: {name}")
+    _validate_png_bytes(name, decoded)
+
+
+def _validate_svg_bytes(name: str, payload: bytes) -> None:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"result artifact is not valid UTF-8 SVG: {name}") from error
+    upper = text.upper()
+    if "<!DOCTYPE" in upper:
+        raise ValueError(f"result SVG contains DOCTYPE: {name}")
+    if "<!ENTITY" in upper:
+        raise ValueError(f"result SVG contains ENTITY: {name}")
+    if "<?XML-STYLESHEET" in upper:
+        raise ValueError(f"result SVG contains active content: {name}")
+    without_declaration = re.sub(
+        r"^\s*<\?xml[^?]*\?>",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if "<?" in without_declaration:
+        raise ValueError(f"result SVG contains active content: {name}")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as error:
+        raise ValueError(f"result artifact is not valid XML SVG: {name}") from error
+    if _local_xml_name(root.tag) != "svg":
+        raise ValueError(f"result SVG root is not svg: {name}")
+    for element in root.iter():
+        element_name = _local_xml_name(element.tag)
+        if element_name not in SAFE_SVG_ELEMENTS:
+            raise ValueError(
+                f"result SVG contains active unsafe element "
+                f"{element_name}: {name}"
+            )
+        if element_name == "style":
+            decoded_style = _decode_css_escapes(element.text or "")
+            lowered_style = decoded_style.lower()
+            if "url" in lowered_style or "@import" in lowered_style:
+                raise ValueError(
+                    f"result SVG contains external content: {name}"
+                )
+            normalized_style = re.sub(
+                r"\s+",
+                "",
+                decoded_style,
+            ).lower()
+            if normalized_style != SAFE_STYLE_ELEMENT:
+                raise ValueError(f"result SVG contains unsafe CSS: {name}")
+        for attribute, value in element.attrib.items():
+            local_attribute = _local_xml_name(attribute)
+            if local_attribute not in SAFE_SVG_ATTRIBUTES:
+                raise ValueError(
+                    f"result SVG contains unsafe attribute "
+                    f"{local_attribute}: {name}"
+                )
+            normalized_value = _decode_css_escapes(value.strip())
+            if local_attribute == "style":
+                _validate_style_attribute(name, normalized_value)
+            elif local_attribute == "clip-path":
+                if SVG_CLIP_PATH.fullmatch(normalized_value) is None:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "href":
+                if element_name == "use":
+                    if SVG_FRAGMENT.fullmatch(normalized_value) is None:
+                        raise ValueError(
+                            f"result SVG contains external content: {name}"
+                        )
+                elif element_name == "image":
+                    _validate_embedded_png(name, normalized_value)
+                else:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "resource":
+                if normalized_value != SAFE_METADATA_RESOURCE:
+                    raise ValueError(
+                        f"result SVG contains external content: {name}"
+                    )
+            elif local_attribute == "type" and normalized_value != "text/css":
+                raise ValueError(f"result SVG contains unsafe type: {name}")
+
+
+def _validate_result_bytes(name: str, payload: bytes) -> None:
+    if name.endswith(".json"):
+        _validate_json_bytes(name, payload)
+    elif name.endswith(".png"):
+        _validate_png_bytes(name, payload)
+    elif name.endswith(".svg"):
+        _validate_svg_bytes(name, payload)
+    else:
+        raise ValueError(f"unsupported result artifact: {name}")
+
+
+def _normalized_result_member(name: str) -> str:
+    if "\x00" in name or "\\" in name:
+        raise ValueError(f"unsafe result archive member: {name}")
+    path = PurePosixPath(name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"unsafe result archive member: {name}")
+    normalized = path.as_posix()
+    if name != normalized:
+        raise ValueError(f"unsafe result archive member: {name}")
+    if (
+        not normalized.startswith("results/")
+        and normalized != OBSERVATION_RAW
+    ):
+        raise ValueError(f"unsafe result archive member: {name}")
+    return normalized
+
+
+def _validate_result_directories(
+    project: Path,
+    payloads: dict[str, bytes],
+) -> Path:
     results = project / "results"
-    for directory in (project, results):
+    directories = {
+        project,
+        *{
+            project / PurePosixPath(name).parent
+            for name in payloads
+        },
+    }
+    for directory in sorted(directories, key=lambda path: len(path.parts)):
         if os.path.lexists(directory):
             metadata = os.lstat(directory)
             if stat.S_ISLNK(metadata.st_mode):
@@ -730,17 +1270,184 @@ def extract_results_archive(archive: Path, project: Path = PROJECT) -> None:
                 raise ValueError(
                     f"result destination is not a directory: {directory}"
                 )
-    results.mkdir(parents=True, exist_ok=True)
-    for name, payload in payloads.items():
+    for directory in sorted(directories, key=lambda path: len(path.parts)):
+        directory.mkdir(parents=True, exist_ok=True)
+    return results
+
+
+def _replace_result_payloads(
+    payloads: dict[str, bytes],
+    project: Path,
+) -> None:
+    results = _validate_result_directories(project, payloads)
+    destinations: dict[str, Path] = {}
+    metadata: dict[str, object | None] = {}
+    for name in sorted(payloads):
         destination = project / PurePosixPath(name)
         validate_result_destination(destination, project)
+        destinations[name] = destination
         if os.path.lexists(destination):
+            current = os.lstat(destination)
             validate_result_destination(
                 destination,
                 project,
-                metadata=os.lstat(destination),
+                metadata=current,
             )
-        destination.write_bytes(payload)
+            metadata[name] = current
+        else:
+            metadata[name] = None
+
+    with tempfile.TemporaryDirectory(
+        prefix=".jspace-result-transaction-",
+        dir=results,
+    ) as transaction_name:
+        transaction = Path(transaction_name)
+        prepared = transaction / "prepared"
+        backups = transaction / "backups"
+        prepared.mkdir()
+        backups.mkdir()
+        prepared_paths: dict[str, Path] = {}
+        backup_paths: dict[str, Path | None] = {}
+        for index, name in enumerate(sorted(payloads)):
+            prepared_path = prepared / str(index)
+            prepared_path.write_bytes(payloads[name])
+            prepared_paths[name] = prepared_path
+            expected = metadata[name]
+            if expected is None:
+                backup_paths[name] = None
+                continue
+            current = os.lstat(destinations[name])
+            if not _same_file_identity(expected, current):
+                raise ValueError(
+                    f"result destination changed after validation: "
+                    f"{destinations[name]}"
+                )
+            backup = backups / str(index)
+            with open_validated_file(destinations[name], current) as source:
+                with backup.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+            backup_paths[name] = backup
+
+        replaced: list[str] = []
+        try:
+            for name in sorted(payloads):
+                os.replace(prepared_paths[name], destinations[name])
+                replaced.append(name)
+        except BaseException:
+            rollback_errors: list[BaseException] = []
+            for name in reversed(replaced):
+                try:
+                    backup = backup_paths[name]
+                    if backup is None:
+                        destinations[name].unlink(missing_ok=True)
+                    else:
+                        os.replace(backup, destinations[name])
+                except BaseException as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise RuntimeError(
+                    "result replacement failed and rollback was incomplete"
+                ) from rollback_errors[0]
+            raise
+
+
+def _scan_result_tar_members(
+    handle: tarfile.TarFile,
+    allowlist: set[str],
+) -> list[tuple[str, int]]:
+    members: list[tuple[str, int]] = []
+    names: set[str] = set()
+    total_size = 0
+    profile_payload_limit = sum(
+        result_size_limit(name) for name in allowlist
+    )
+    for member in handle:
+        name = _normalized_result_member(member.name)
+        if name in names:
+            raise ValueError("duplicate result archive member")
+        if name not in allowlist:
+            raise ValueError(f"unexpected result archive member: {name}")
+        if len(members) >= len(allowlist):
+            raise ValueError("too many result archive members")
+        if not member.isfile() or member.issym() or member.islnk():
+            raise ValueError(
+                "result archive must contain regular files only"
+            )
+        size_limit = result_size_limit(name)
+        if member.size < 0 or member.size > size_limit:
+            raise ValueError(f"result artifact is too large: {name}")
+        total_size += member.size
+        if total_size > profile_payload_limit:
+            raise ValueError("result archive expands beyond size limit")
+        names.add(name)
+        members.append((name, member.size))
+
+    missing = allowlist - names
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise FileNotFoundError(
+            f"missing result archive member: {joined}"
+        )
+    return members
+
+
+def _read_validated_result_tar(
+    handle: tarfile.TarFile,
+    expected: list[tuple[str, int]],
+) -> dict[str, bytes]:
+    payloads: dict[str, bytes] = {}
+    index = 0
+    for member in handle:
+        if index >= len(expected):
+            raise ValueError("result archive changed after validation")
+        expected_name, expected_size = expected[index]
+        name = _normalized_result_member(member.name)
+        if (
+            name != expected_name
+            or member.size != expected_size
+            or not member.isfile()
+            or member.issym()
+            or member.islnk()
+        ):
+            raise ValueError("result archive changed after validation")
+        size_limit = result_size_limit(name)
+        source = handle.extractfile(member)
+        if source is None:
+            raise ValueError(f"cannot read result artifact: {name}")
+        payload = source.read(size_limit + 1)
+        if len(payload) > size_limit:
+            raise ValueError(f"result artifact is too large: {name}")
+        _validate_result_bytes(name, payload)
+        payloads[name] = payload
+        index += 1
+    if index != len(expected):
+        raise ValueError("result archive changed after validation")
+    return payloads
+
+
+def extract_results_archive(
+    archive: Path,
+    project: Path = PROJECT,
+    result_set: str = "causal",
+) -> None:
+    allowlist = result_allowlist(result_set)
+    archive_metadata = os.lstat(archive)
+    validate_result_archive(archive, metadata=archive_metadata)
+    with open_validated_file(archive, archive_metadata) as archive_source:
+        with open_bounded_result_tar(
+            archive_source,
+            result_set,
+        ) as handle:
+            expected = _scan_result_tar_members(handle, allowlist)
+
+    with open_validated_file(archive, archive_metadata) as archive_source:
+        with open_bounded_result_tar(
+            archive_source,
+            result_set,
+        ) as handle:
+            payloads = _read_validated_result_tar(handle, expected)
+
+    _replace_result_payloads(payloads, project)
 
 
 def notebook_output_path(notebook: Path) -> Path:
@@ -856,9 +1563,17 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--session", default="jspace-llama")
     start.add_argument("--gpu", choices=("T4", "L4", "A100"), default="L4")
 
-    for action in ("sync", "bootstrap", "auth-hf", "fetch", "stop"):
+    for action in ("sync", "bootstrap", "auth-hf", "stop"):
         action_parser = actions.add_parser(action)
         action_parser.add_argument("--session", default="jspace-llama")
+
+    fetch = actions.add_parser("fetch")
+    fetch.add_argument("--session", default="jspace-llama")
+    fetch.add_argument(
+        "--result-set",
+        choices=tuple(RESULT_SETS),
+        default="causal",
+    )
 
     execute = actions.add_parser("execute")
     execute.add_argument("--session", default="jspace-llama")
@@ -911,8 +1626,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             PROJECT / "scripts" / "colab_pack_results.py",
             timeout=300,
             operation_marker=PACK_SUCCESS_MARKER,
+            environment={RESULT_SET_ENV: args.result_set},
         )
-        fetch_results(args.session)
+        fetch_results(args.session, result_set=args.result_set)
     elif args.action == "stop":
         run(stop_command(args.session))
     return 0

@@ -6,12 +6,53 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any
 
 
 class StrictJSONError(ValueError):
     pass
+
+
+class BoundedFileError(ValueError):
+    pass
+
+
+def read_regular_file_bounded(
+    path: str | Path,
+    *,
+    max_bytes: int,
+) -> bytes:
+    source = Path(path)
+    before = os.lstat(source)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise BoundedFileError("file is not a regular file")
+    if before.st_size > max_bytes:
+        raise BoundedFileError("file is too large")
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise BoundedFileError("file changed during validation")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read(max_bytes + 1)
+        after = os.fstat(descriptor)
+        if len(payload) > max_bytes or after.st_size > max_bytes:
+            raise BoundedFileError("file is too large")
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or after.st_size != len(payload)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise BoundedFileError("file changed during validation")
+        return payload
+    finally:
+        os.close(descriptor)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

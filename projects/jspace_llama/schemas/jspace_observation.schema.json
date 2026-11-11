@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jspace_observation.schema.json",
+  "title": "J-space compact observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact",
+    "run_id",
+    "status",
+    "reason",
+    "metrics",
+    "tokenization_summary",
+    "per_item_best_ranks",
+    "panel",
+    "layers",
+    "panel_names",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "artifact": {"const": "jspace_observation"},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["success", "inconclusive"]},
+    "reason": {"$ref": "#/$defs/reasonOrNull"},
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jlens", "logit_lens"],
+      "properties": {
+        "jlens": {"$ref": "#/$defs/methodMetrics"},
+        "logit_lens": {"$ref": "#/$defs/methodMetrics"}
+      }
+    },
+    "tokenization_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_count",
+        "intermediate_count",
+        "single_token_count",
+        "multi_token_count"
+      ],
+      "properties": {
+        "item_count": {"type": "integer", "minimum": 0, "maximum": 93},
+        "intermediate_count": {"type": "integer", "minimum": 0},
+        "single_token_count": {"type": "integer", "minimum": 0},
+        "multi_token_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "per_item_best_ranks": {
+      "type": "array",
+      "maxItems": 93,
+      "items": {"$ref": "#/$defs/rankItem"}
+    },
+    "panel": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {"$ref": "#/$defs/panelItem"}
+    },
+    "layers": {"$ref": "#/$defs/layers"},
+    "panel_names": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "carnival-ocean"},
+        {"const": "amazon-language"},
+        {"const": "mars-color"},
+        {"const": "spider-legs"},
+        {"const": "basketball-players"},
+        {"const": "atomic-79-symbol"},
+        {"const": "planet-3-moons"},
+        {"const": "rhyme-rain-neighbor"},
+        {"const": "etym-wargod-month"},
+        {"const": "chem-photosynthesis-Z"},
+        {"const": "nhop-primary-planet"},
+        {"const": "inv-sunrise-opposite"}
+      ],
+      "items": false,
+      "minItems": 12,
+      "maxItems": 12
+    },
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "success"}}},
+      "then": {
+        "properties": {
+          "reason": {"type": "null"},
+          "per_item_best_ranks": {"minItems": 93, "maxItems": 93},
+          "panel": {"minItems": 12, "maxItems": 12},
+          "tokenization_summary": {
+            "properties": {"item_count": {"const": 93}}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "inconclusive"}}},
+      "then": {
+        "properties": {
+          "reason": {"$ref": "#/$defs/reason"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "incomplete_observation",
+            "incomplete_provenance",
+            "cuda_required",
+            "asset_load_failed",
+            "resource_exhausted",
+            "tokenization_failed",
+            "dimension_mismatch",
+            "layer_band_invalid",
+            "lens_integrity_failed",
+            "dataset_invalid",
+            "readout_failed"
+          ]
+        },
+        "message": {"type": "string", "minLength": 1}
+      }
+    },
+    "reasonOrNull": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/reason"}
+      ]
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "n_items",
+        "n_intermediates",
+        "pass@1",
+        "pass@5",
+        "pass@10"
+      ],
+      "properties": {
+        "n_items": {"type": "integer", "minimum": 0, "maximum": 93},
+        "n_intermediates": {"type": "integer", "minimum": 0},
+        "pass@1": {"type": "number", "minimum": 0, "maximum": 1},
+        "pass@5": {"type": "number", "minimum": 0, "maximum": 1},
+        "pass@10": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "methodMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["band", "all_layers"],
+      "properties": {
+        "band": {"$ref": "#/$defs/metric"},
+        "all_layers": {"$ref": "#/$defs/metric"}
+      }
+    },
+    "rankEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "rank"],
+      "properties": {
+        "layer": {"type": "integer", "minimum": 0, "maximum": 31},
+        "rank": {"type": "integer", "minimum": 1}
+      }
+    },
+    "methodRank": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ranks",
+        "best_rank",
+        "best_layer",
+        "all_layers_best_rank",
+        "all_layers_best_layer"
+      ],
+      "properties": {
+        "ranks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/rankEntry"}
+        },
+        "best_rank": {"type": "integer", "minimum": 1},
+        "best_layer": {"type": "integer", "minimum": 0, "maximum": 31},
+        "all_layers_best_rank": {"type": "integer", "minimum": 1},
+        "all_layers_best_layer": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        }
+      }
+    },
+    "intermediate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "token_id",
+        "single_token",
+        "jlens",
+        "logit_lens"
+      ],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "token_id": {"type": "integer", "minimum": 0},
+        "single_token": {"type": "boolean"},
+        "jlens": {"$ref": "#/$defs/methodRank"},
+        "logit_lens": {"$ref": "#/$defs/methodRank"}
+      }
+    },
+    "rankItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "prompt",
+        "prompt_token_ids",
+        "prompt_token_count",
+        "prompt_sha256",
+        "prompt_token_ids_sha256",
+        "intermediates"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "prompt": {"type": "string", "minLength": 1},
+        "prompt_token_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "integer", "minimum": 0}
+        },
+        "prompt_token_count": {"type": "integer", "minimum": 1},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "prompt_token_ids_sha256": {"$ref": "#/$defs/sha256"},
+        "intermediates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/intermediate"}
+        }
+      }
+    },
+    "token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_id", "token", "rank"],
+      "properties": {
+        "token_id": {"type": "integer", "minimum": 0},
+        "token": {"type": "string"},
+        "rank": {"type": "integer", "minimum": 1}
+      }
+    },
+    "directSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "tokens"],
+      "properties": {
+        "layer": {"type": "integer", "minimum": 0, "maximum": 31},
+        "tokens": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {"$ref": "#/$defs/token"}
+        }
+      }
+    },
+    "topTokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jlens", "logit_lens"],
+      "properties": {
+        "jlens": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/directSlot"}
+        },
+        "logit_lens": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/directSlot"}
+        }
+      }
+    },
+    "pursuitToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_id", "token", "rank", "coefficient"],
+      "properties": {
+        "token_id": {"type": "integer", "minimum": 0},
+        "token": {"type": "string"},
+        "rank": {"type": "integer", "minimum": 1},
+        "coefficient": {"type": "number"}
+      }
+    },
+    "pursuitSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "tokens", "variance_explained"],
+      "properties": {
+        "layer": {"type": "integer", "minimum": 0, "maximum": 31},
+        "tokens": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pursuitToken"}
+        },
+        "variance_explained": {"type": "number"}
+      }
+    },
+    "panelItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "prompt",
+        "target",
+        "intermediates",
+        "top_tokens",
+        "pursuit"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "prompt": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "intermediates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/intermediate"}
+        },
+        "top_tokens": {"$ref": "#/$defs/topTokens"},
+        "pursuit": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pursuitSlot"}
+        }
+      }
+    },
+    "layers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["band", "all_layers"],
+      "properties": {
+        "band": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0, "maximum": 31},
+          "uniqueItems": true
+        },
+        "all_layers": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0, "maximum": 31},
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

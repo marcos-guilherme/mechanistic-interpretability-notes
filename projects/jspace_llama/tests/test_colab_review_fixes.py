@@ -46,6 +46,35 @@ def add_tar_bytes(
     handle.addfile(info, io.BytesIO(payload))
 
 
+def write_bootstrap_metadata_bomb(
+    archive: Path,
+    extension: str,
+    metadata_bytes: int,
+) -> None:
+    if extension == "pax":
+        with tarfile.open(
+            archive,
+            "w:gz",
+            format=tarfile.PAX_FORMAT,
+            pax_headers={"comment": "A" * metadata_bytes},
+        ) as handle:
+            add_tar_bytes(handle, "jspace_llama/src/pkg.py", b"source")
+        return
+    if extension == "gnu-longname":
+        with tarfile.open(
+            archive,
+            "w:gz",
+            format=tarfile.GNU_FORMAT,
+        ) as handle:
+            add_tar_bytes(
+                handle,
+                "jspace_llama/" + "A" * metadata_bytes,
+                b"",
+            )
+        return
+    raise AssertionError(f"unknown extension fixture: {extension}")
+
+
 def write_result_files(root: Path) -> None:
     results = root / "results"
     results.mkdir(parents=True)
@@ -146,7 +175,7 @@ def test_bootstrap_marker_is_emitted_only_after_success(
 ) -> None:
     bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_main_marker")
     project = tmp_path / "jspace_llama"
-    migration_calls: list[tuple[Path, Path]] = []
+    events: list[str] = []
     monkeypatch.setattr(
         bootstrap,
         "replace_project_tree",
@@ -156,27 +185,54 @@ def test_bootstrap_marker_is_emitted_only_after_success(
     monkeypatch.setattr(
         bootstrap,
         "dependency_commands",
-        lambda project, requirements: [],
+        lambda project, requirements: [["locked-install"]],
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_checked",
+        lambda command: events.append("install"),
     )
     monkeypatch.setattr(
         bootstrap,
         "migrate_same_session",
-        lambda active_project, legacy: migration_calls.append(
-            (active_project, legacy)
-        ),
+        lambda active_project, legacy: events.append("migration"),
         raising=False,
     )
-    monkeypatch.setattr(bootstrap, "print_runtime_diagnostics", lambda torch: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "print_runtime_diagnostics",
+        lambda torch: events.append("diagnostics"),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_matplotlib_smoke_check",
+        lambda: events.append("smoke"),
+        raising=False,
+    )
     monkeypatch.setitem(sys.modules, "torch", object())
     nonce = "c" * 64
     monkeypatch.setenv(bootstrap.SUCCESS_NONCE_ENV, nonce)
 
     assert bootstrap.main() == 0
-    assert migration_calls == [(project, bootstrap.LEGACY_PROJECT)]
+    assert events == ["install", "diagnostics", "migration", "smoke"]
     assert (
         capsys.readouterr().out.strip()
         == f"{bootstrap.SUCCESS_MARKER}:{nonce}"
     )
+
+
+def test_bootstrap_matplotlib_smoke_check_uses_clean_child_process() -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_matplotlib_smoke")
+
+    command = bootstrap.matplotlib_smoke_command()
+
+    assert command[:2] == [sys.executable, "-c"]
+    script = command[2]
+    assert "importlib.metadata.version" in script
+    assert "matplotlib.__version__" in script
+    assert "Text.get_fontfeatures" in script
+    assert "ft2font.CharacterCodeType" in script
+    assert "FigureCanvasSVG" in script
 
 
 def test_local_runner_rejects_missing_remote_success_marker(
@@ -415,18 +471,172 @@ def test_bootstrap_rejects_duplicate_normalized_destinations(
         bootstrap.safe_extract(archive, tmp_path / "destination")
 
 
-def test_bootstrap_rejects_special_archive_members(tmp_path: Path) -> None:
-    bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_special")
+@pytest.mark.parametrize(
+    "member_type",
+    [
+        tarfile.SYMTYPE,
+        tarfile.LNKTYPE,
+        tarfile.FIFOTYPE,
+        tarfile.CHRTYPE,
+        tarfile.BLKTYPE,
+        tarfile.GNUTYPE_SPARSE,
+    ],
+)
+def test_bootstrap_rejects_special_archive_members(
+    tmp_path: Path,
+    member_type: bytes,
+) -> None:
+    bootstrap = load_module(
+        BOOTSTRAP_PATH,
+        f"review_bootstrap_special_{member_type!r}",
+    )
     archive = tmp_path / "special.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:
         add_tar_bytes(
             handle,
             "jspace_llama/src/pipe.py",
             b"",
-            member_type=tarfile.FIFOTYPE,
+            member_type=member_type,
         )
 
     with pytest.raises(ValueError, match="regular files"):
+        bootstrap.safe_extract(archive, tmp_path / "destination")
+
+
+@pytest.mark.parametrize("extension", ["pax", "gnu-longname"])
+def test_bootstrap_bounds_extension_metadata_before_tarfile_parse(
+    tmp_path: Path,
+    extension: str,
+) -> None:
+    bootstrap = load_module(
+        BOOTSTRAP_PATH,
+        f"bounded_bootstrap_{extension.replace('-', '_')}",
+    )
+    archive = tmp_path / f"{extension}.tar.gz"
+    destination = tmp_path / "destination"
+    write_bootstrap_metadata_bomb(
+        archive,
+        extension,
+        metadata_bytes=20 * 1_048_576,
+    )
+
+    assert archive.stat().st_size < 200_000
+    with pytest.raises(ValueError, match="decompressed TAR exceeds"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_many_members_without_materializing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_members")
+    archive = tmp_path / "many-members.tar.gz"
+    destination = tmp_path / "destination"
+    with tarfile.open(archive, "w:gz") as handle:
+        for index in range(1_025):
+            add_tar_bytes(
+                handle,
+                f"jspace_llama/src/item-{index}.py",
+                b"",
+            )
+    next_calls = 0
+    real_next = bootstrap.tarfile.TarFile.next
+
+    def counted_next(handle):
+        nonlocal next_calls
+        next_calls += 1
+        return real_next(handle)
+
+    monkeypatch.setattr(bootstrap.tarfile.TarFile, "next", counted_next)
+    monkeypatch.setattr(
+        bootstrap.tarfile.TarFile,
+        "getmembers",
+        lambda handle: pytest.fail("getmembers materialized the archive"),
+    )
+
+    with pytest.raises(ValueError, match="too many project archive members"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert next_calls <= 1_026
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_oversized_declared_member(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_declared")
+    archive = tmp_path / "oversized-member.tar.gz"
+    destination = tmp_path / "destination"
+    payload = b"\x00" * (8 * 1_048_576 + 1)
+    with tarfile.open(archive, "w:gz") as handle:
+        add_tar_bytes(handle, "jspace_llama/src/large.py", payload)
+
+    with pytest.raises(ValueError, match="project archive member is too large"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_oversized_total_payload(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_total")
+    archive = tmp_path / "oversized-total.tar.gz"
+    destination = tmp_path / "destination"
+    with tarfile.open(archive, "w:gz") as handle:
+        for index, size in enumerate((6, 6, 5)):
+            add_tar_bytes(
+                handle,
+                f"jspace_llama/src/large-{index}.py",
+                b"\x00" * (size * 1_048_576),
+            )
+
+    assert archive.stat().st_size < 100_000
+    with pytest.raises(ValueError, match="expands beyond size limit"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_bounded_copy_rejects_actual_size_above_declared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_actual")
+    archive = tmp_path / "actual-size.tar.gz"
+    destination = tmp_path / "destination"
+    with tarfile.open(archive, "w:gz") as handle:
+        add_tar_bytes(handle, "jspace_llama/src/pkg.py", b"A")
+    monkeypatch.setattr(
+        bootstrap.tarfile.TarFile,
+        "extractfile",
+        lambda handle, member: io.BytesIO(b"AB"),
+    )
+
+    with pytest.raises(ValueError, match="declared size"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_oversized_compressed_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_compressed")
+    archive = tmp_path / "archive.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        add_tar_bytes(handle, "jspace_llama/src/pkg.py", b"source")
+    monkeypatch.setattr(bootstrap, "MAX_PROJECT_ARCHIVE_BYTES", 1, raising=False)
+
+    with pytest.raises(ValueError, match="project archive is too large"):
         bootstrap.safe_extract(archive, tmp_path / "destination")
 
 
@@ -558,6 +768,56 @@ def test_bootstrap_migrates_legacy_checkout_and_cached_namespace(
         else:
             sys.modules[unrelated_name] = prior_unrelated
         real_invalidate_caches()
+
+
+def test_bootstrap_invalidates_preloaded_matplotlib_tree_only(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "matplotlib_session_migration")
+    project = tmp_path / "content" / "jspace_llama_project"
+    (project / "src").mkdir(parents=True)
+    legacy = tmp_path / "content" / "jspace_llama"
+    stale_names = (
+        "matplotlib",
+        "matplotlib.pyplot",
+        "matplotlib.backends",
+        "matplotlib.backends.backend_svg",
+    )
+    unrelated_names = ("matplotlib_inline", "seaborn")
+    test_names = (*stale_names, *unrelated_names)
+    missing = object()
+    prior_modules = {
+        name: sys.modules.get(name, missing) for name in test_names
+    }
+    prior_sys_path = list(sys.path)
+    stale_modules = {name: ModuleType(name) for name in stale_names}
+    unrelated_modules = {
+        name: ModuleType(name) for name in unrelated_names
+    }
+
+    try:
+        sys.modules.update(stale_modules)
+        sys.modules.update(unrelated_modules)
+
+        bootstrap.migrate_same_session(
+            project,
+            legacy,
+            package_name="bootstrap_test_package",
+        )
+
+        assert all(name not in sys.modules for name in stale_names)
+        assert all(
+            sys.modules[name] is unrelated_modules[name]
+            for name in unrelated_names
+        )
+    finally:
+        sys.path[:] = prior_sys_path
+        for name, prior in prior_modules.items():
+            if prior is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prior
+        importlib.invalidate_caches()
 
 
 def test_same_session_migration_replaces_stale_and_duplicate_paths(

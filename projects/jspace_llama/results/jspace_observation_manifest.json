@@ -1,0 +1,50 @@
+{
+  "artifact": "jspace_observation_manifest",
+  "dataset": {
+    "item_count": 93,
+    "sha256": "2cd5a47aa3d7627708843bc61f03ab1d10eda4184f357c5cbf93c97184e32c9c",
+    "upstream_repository": "anthropics/jacobian-lens",
+    "upstream_revision": "581d398613e5602a5af361e1c34d3a92ea82ba8e"
+  },
+  "ended_at": "2026-11-11T15:19:29.812212Z",
+  "provenance": {
+    "hardware": {
+      "cuda_version": "13.2",
+      "dtype": "bfloat16",
+      "gpu_name": "NVIDIA L4"
+    },
+    "lens": {
+      "filename": "llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt",
+      "integrity_verified": true,
+      "repo_id": "neuronpedia/jacobian-lens",
+      "resolved_revision": "d2527c3cdbaa60dd4b65cbca1604921f044e989a",
+      "sha256": "d5300a1575c0b5ad6e01b098c75adb072f3a6c246f184ce2fb35a3550fc8c68b",
+      "size_bytes": 1040197778
+    },
+    "model": {
+      "id": "meta-llama/Llama-3.1-8B-Instruct",
+      "layer_count": 32,
+      "resolved_revision": "0e9e39f249a16976918f6564b8830bc894c89659"
+    },
+    "software": {
+      "huggingface_hub": "2.4.0",
+      "jspace": "0.1.0",
+      "jspace_commit": "04c822a255fe0a10d84e08ec499e5e09f4b7d37a",
+      "python": "3.13.16",
+      "pytorch": "2.15.0",
+      "transformers": "5.22.2"
+    },
+    "source": {
+      "commit": "4cd9756786ee83dabc0d3340385919fd408cc549",
+      "dirty": false,
+      "runtime_source_sha256": "0c7d97282d2d4c699a4c392d5efb6a9388dd9d8cee0b7b9d5f63e6dc7f8dc8e8",
+      "scoped_dirty": false
+    }
+  },
+  "raw_artifact_sha256": "6a255fdc617fd3438a04aaa0b26d0489c6d8af59e37291057aa5539df76c0fb6",
+  "reason": null,
+  "run_id": "2fcb8a49-136f-4868-91cc-f98f9dc2e57d",
+  "schema_version": 2,
+  "started_at": "2026-11-11T15:14:19.427513Z",
+  "status": "success"
+}

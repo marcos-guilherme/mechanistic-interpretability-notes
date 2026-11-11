@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jspace_observation_manifest.schema.json",
+  "title": "J-space observation manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact",
+    "run_id",
+    "status",
+    "started_at",
+    "ended_at",
+    "provenance",
+    "dataset",
+    "raw_artifact_sha256",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "artifact": {"const": "jspace_observation_manifest"},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["success", "inconclusive", "error"]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "ended_at": {"type": "string", "format": "date-time"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upstream_repository",
+        "upstream_revision",
+        "sha256",
+        "item_count"
+      ],
+      "properties": {
+        "upstream_repository": {"const": "anthropics/jacobian-lens"},
+        "upstream_revision": {
+          "const": "581d398613e5602a5af361e1c34d3a92ea82ba8e"
+        },
+        "sha256": {
+          "const": "2cd5a47aa3d7627708843bc61f03ab1d10eda4184f357c5cbf93c97184e32c9c"
+        },
+        "item_count": {"const": 93}
+      }
+    },
+    "raw_artifact_sha256": {"$ref": "#/$defs/sha256OrNull"},
+    "reason": {"$ref": "#/$defs/reasonOrNull"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "success"}}},
+      "then": {
+        "properties": {
+          "raw_artifact_sha256": {"$ref": "#/$defs/sha256"},
+          "reason": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"enum": ["inconclusive", "error"]}}},
+      "then": {
+        "properties": {
+          "reason": {"$ref": "#/$defs/reason"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha40OrNull": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256OrNull": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "model", "lens", "software", "hardware"],
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commit",
+            "dirty",
+            "scoped_dirty",
+            "runtime_source_sha256"
+          ],
+          "properties": {
+            "commit": {"$ref": "#/$defs/sha40OrNull"},
+            "dirty": {"type": ["boolean", "null"]},
+            "scoped_dirty": {"type": ["boolean", "null"]},
+            "runtime_source_sha256": {"$ref": "#/$defs/sha256OrNull"}
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "resolved_revision", "layer_count"],
+          "properties": {
+            "id": {
+              "oneOf": [
+                {"type": "null"},
+                {"const": "meta-llama/Llama-3.1-8B-Instruct"}
+              ]
+            },
+            "resolved_revision": {"$ref": "#/$defs/sha40OrNull"},
+            "layer_count": {"type": ["integer", "null"], "minimum": 1}
+          }
+        },
+        "lens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repo_id",
+            "filename",
+            "resolved_revision",
+            "sha256",
+            "size_bytes",
+            "integrity_verified"
+          ],
+          "properties": {
+            "repo_id": {
+              "oneOf": [
+                {"type": "null"},
+                {"const": "neuronpedia/jacobian-lens"}
+              ]
+            },
+            "filename": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "const": "llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt"
+                }
+              ]
+            },
+            "resolved_revision": {"$ref": "#/$defs/sha40OrNull"},
+            "sha256": {"$ref": "#/$defs/sha256OrNull"},
+            "size_bytes": {"type": ["integer", "null"], "minimum": 1},
+            "integrity_verified": {"type": ["boolean", "null"]}
+          }
+        },
+        "software": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "python",
+            "pytorch",
+            "transformers",
+            "huggingface_hub",
+            "jspace",
+            "jspace_commit"
+          ],
+          "properties": {
+            "python": {"type": "string", "minLength": 1},
+            "pytorch": {"type": "string", "minLength": 1},
+            "transformers": {"type": "string", "minLength": 1},
+            "huggingface_hub": {"type": "string", "minLength": 1},
+            "jspace": {"type": "string", "minLength": 1},
+            "jspace_commit": {
+              "const": "04c822a255fe0a10d84e08ec499e5e09f4b7d37a"
+            }
+          }
+        },
+        "hardware": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gpu_name", "cuda_version", "dtype"],
+          "properties": {
+            "gpu_name": {"type": ["string", "null"]},
+            "cuda_version": {"type": ["string", "null"]},
+            "dtype": {
+              "oneOf": [{"type": "null"}, {"const": "bfloat16"}]
+            }
+          }
+        }
+      }
+    },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "incomplete_observation",
+            "incomplete_provenance",
+            "cuda_required",
+            "asset_load_failed",
+            "resource_exhausted",
+            "tokenization_failed",
+            "dimension_mismatch",
+            "layer_band_invalid",
+            "lens_integrity_failed",
+            "dataset_invalid",
+            "readout_failed",
+            "unexpected_error"
+          ]
+        },
+        "message": {"type": "string", "minLength": 1}
+      }
+    },
+    "reasonOrNull": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/reason"}
+      ]
+    }
+  }
+}

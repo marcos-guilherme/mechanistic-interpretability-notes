@@ -4,9 +4,10 @@ import argparse
 import hashlib
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 import sys
 from typing import Any
 
@@ -182,6 +183,7 @@ def _runtime_source_sha256(project_root: Path) -> str:
     repository = project.parents[1]
     candidates: list[tuple[str, Path]] = []
     for pattern in (
+        "data/**/*",
         "src/**/*.py",
         "notebooks/*.ipynb",
         "schemas/*.json",
@@ -214,6 +216,117 @@ def _runtime_source_sha256(project_root: Path) -> str:
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()
+
+
+def _runtime_git_pathspecs(
+    project: Path,
+    repository: Path,
+) -> list[str]:
+    try:
+        project_relative = project.relative_to(repository).as_posix()
+    except ValueError as error:
+        raise ResultsValidationError(
+            "project root is outside its source repository"
+        ) from error
+    return [
+        f"{project_relative}/data",
+        f"{project_relative}/src",
+        f"{project_relative}/notebooks",
+        f"{project_relative}/schemas",
+        f"{project_relative}/scripts",
+        f"{project_relative}/pyproject.toml",
+        f"{project_relative}/uv.lock",
+        "tools/colab/run_jspace.py",
+    ]
+
+
+def _is_runtime_git_path(path: str, project_relative: str) -> bool:
+    relative = path.removeprefix(f"{project_relative}/")
+    if relative == path:
+        return path == "tools/colab/run_jspace.py"
+    if relative in {"pyproject.toml", "uv.lock"}:
+        return True
+    if relative.startswith("data/"):
+        suffix = PurePosixPath(relative).suffix.lower()
+        return (
+            suffix in {".json", ".md"}
+            or relative == "data/anthropic-jlens/LICENSE"
+        )
+    if relative.startswith("src/") or relative.startswith("scripts/"):
+        return relative.endswith(".py")
+    if relative.startswith("schemas/"):
+        return relative.endswith(".json")
+    if relative.startswith("notebooks/"):
+        return (
+            relative.endswith(".ipynb")
+            and not relative.endswith("_output.ipynb")
+        )
+    return False
+
+
+def _git_bytes(
+    repository: Path,
+    command: list[str],
+    *,
+    error_message: str,
+) -> bytes:
+    completed = subprocess.run(
+        command,
+        cwd=repository,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ResultsValidationError(error_message)
+    return completed.stdout
+
+
+def _runtime_source_sha256_at_commit(
+    project_root: Path,
+    commit: str,
+) -> str:
+    project = project_root.resolve()
+    repository = project.parents[1]
+    pathspecs = _runtime_git_pathspecs(project, repository)
+    project_relative = project.relative_to(repository).as_posix()
+    output = _git_bytes(
+        repository,
+        ["git", "ls-tree", "-r", "--name-only", commit, "--", *pathspecs],
+        error_message="source commit is unavailable from local repository",
+    )
+    paths = [
+        path
+        for path in output.decode("utf-8").splitlines()
+        if _is_runtime_git_path(path, project_relative)
+    ]
+    if not paths:
+        raise ResultsValidationError(
+            "source commit contains no runtime-critical files"
+        )
+
+    digest = hashlib.sha256()
+    for label in sorted(paths):
+        content = _git_bytes(
+            repository,
+            ["git", "show", f"{commit}:{label}"],
+            error_message=f"source commit cannot read runtime file: {label}",
+        )
+        label_bytes = label.encode("utf-8")
+        digest.update(len(label_bytes).to_bytes(8, "big"))
+        digest.update(label_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _current_commit(project_root: Path) -> str:
+    project = project_root.resolve()
+    repository = project.parents[1]
+    return _git_bytes(
+        repository,
+        ["git", "rev-parse", "HEAD"],
+        error_message="cannot resolve current source commit",
+    ).decode("ascii").strip()
 
 
 def _validate_schema(
@@ -483,12 +596,21 @@ def validate_documents(
     source = manifest["provenance"]["source"]
     archive_sha256 = source.get("archive_sha256")
     if archive_sha256 is not None:
-        actual_source_sha256 = _runtime_source_sha256(
-            Path(project_root),
-        )
+        project_path = Path(project_root)
+        source_commit = source["commit"]
+        if (
+            source_commit != _current_commit(project_path)
+            and source.get("scoped_dirty") is False
+        ):
+            actual_source_sha256 = _runtime_source_sha256_at_commit(
+                project_path,
+                source_commit,
+            )
+        else:
+            actual_source_sha256 = _runtime_source_sha256(project_path)
         if archive_sha256 != actual_source_sha256:
             raise ResultsValidationError(
-                "source archive digest does not match local runtime files"
+                "source archive digest does not match runtime files"
             )
     manifest_lens = manifest["provenance"]["lens"]
     final_integrity = final["integrity"]

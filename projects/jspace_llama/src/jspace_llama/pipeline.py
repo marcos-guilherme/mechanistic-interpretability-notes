@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -50,6 +51,16 @@ from jspace_llama.runtime import (
     translate_huggingface_error,
     validate_intervention_tokens,
 )
+
+
+@dataclass(frozen=True)
+class LoadedRuntime:
+    bundle: Any
+    model_revision: str
+    lens_revision: str
+    lens_sha256: str
+    lens_size: int
+    hardware: dict[str, str]
 
 
 def _utc_now() -> str:
@@ -112,20 +123,20 @@ def _partial_provenance(
     }
 
 
-def execute_real_experiment(
-    *,
-    project_root: Path,
+def load_pinned_runtime(
     config: ExperimentConfig,
     provenance: dict[str, Any],
-) -> dict[str, Any]:
+) -> LoadedRuntime:
+    """Load and verify the shared pinned model and lens assets."""
     from huggingface_hub import hf_hub_download, snapshot_download
 
     runtime_info = require_cuda()
-    provenance["hardware"] = {
+    hardware = {
         "gpu_name": runtime_info.gpu_name,
         "cuda_version": str(torch.version.cuda),
         "dtype": runtime_info.dtype,
     }
+    provenance["hardware"] = hardware
     model_revision, lens_revision = resolve_huggingface_revisions(
         config.assets.model_id,
         config.assets.lens_repo_id,
@@ -138,7 +149,9 @@ def execute_real_experiment(
             revision=model_revision,
         )
     except torch.OutOfMemoryError as error:
-        raise ResourceExhaustionError("asset download exhausted memory") from error
+        raise ResourceExhaustionError(
+            "asset download exhausted memory"
+        ) from error
     except HUGGINGFACE_OPERATIONAL_ERRORS as error:
         raise translate_huggingface_error(
             error,
@@ -157,7 +170,9 @@ def execute_real_experiment(
             revision=lens_revision,
         )
     except torch.OutOfMemoryError as error:
-        raise ResourceExhaustionError("asset download exhausted memory") from error
+        raise ResourceExhaustionError(
+            "asset download exhausted memory"
+        ) from error
     except HUGGINGFACE_OPERATIONAL_ERRORS as error:
         raise translate_huggingface_error(
             error,
@@ -184,6 +199,28 @@ def execute_real_experiment(
         lens_hash,
         lens_size,
     )
+    return LoadedRuntime(
+        bundle=bundle,
+        model_revision=model_revision,
+        lens_revision=lens_revision,
+        lens_sha256=lens_hash,
+        lens_size=lens_size,
+        hardware=hardware,
+    )
+
+
+def execute_real_experiment(
+    *,
+    project_root: Path,
+    config: ExperimentConfig,
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    runtime = load_pinned_runtime(config, provenance)
+    bundle = runtime.bundle
+    model_revision = runtime.model_revision
+    lens_revision = runtime.lens_revision
+    lens_hash = runtime.lens_sha256
+    lens_size = runtime.lens_size
     validate_intervention_tokens(
         bundle.model.tokenizer,
         (config.source, config.target),
