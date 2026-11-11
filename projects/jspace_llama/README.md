@@ -5,7 +5,9 @@ circuito ou uma direção comportamental, quis entender se seria possível ler e
 em uma etapa separada, alterar um conceito intermediário usado pelo modelo.
 Este projeto agora reúne duas investigações que não devem ser confundidas: uma
 tentativa causal mínima, já executada e inconclusiva, e um atlas observacional
-implementado localmente, mas ainda sem execução remota nem resultados.
+executado e validado sobre 93 prompts. O primeiro resultado continua sendo
+causalmente inconclusivo; o segundo descreve o que as lentes recuperam, sem
+transformar essa leitura em evidência de mecanismo.
 
 Na etapa causal, usei uma J-lens já ajustada no
 `meta-llama/Llama-3.1-8B-Instruct` e planejei a troca `spider → ant`. Essa
@@ -58,7 +60,7 @@ O atlas mantém três leituras separadas:
   observada, apenas no painel qualitativo fixo de 12 prompts. Ele não altera a
   ativação e seus coeficientes não são tratados como os ranks das duas lentes.
 
-Para as leituras diretas, o resultado reportará `pass@1`, `pass@5` e
+Para as leituras diretas, o resultado reporta `pass@1`, `pass@5` e
 `pass@10`, tanto na *band* de workspace resolvida em runtime quanto no conjunto
 de camadas ajustadas da lente. O painel de 12 prompts, os ranks por camada e a
 própria *band* também são diagnósticos observacionais. Eles podem orientar uma
@@ -69,8 +71,54 @@ Aqui, `success` tem sentido operacional: os 93 itens, a auditoria de
 tokenização, o painel, os escopos de camadas, a proveniência e os hashes
 precisam formar um conjunto completo e validado. Isso não exige `pass@k` alto;
 uma execução completa pode ser operacionalmente bem-sucedida mesmo com
-recuperação baixa. Como a execução remota ainda não ocorreu, não apresento
-valores, figuras ou camadas do atlas.
+recuperação baixa. A execução canônica
+`bc8ec4ac-1ecd-4cee-8022-294bd0734040` terminou com esse `success` operacional
+em uma NVIDIA L4; não houve geração de texto nem intervenção.
+
+No conjunto completo, as métricas extraídas do JSON validado foram:
+
+- J-lens na *band* 12–28: `pass@1=0,344086`,
+  `pass@5=0,548387` e `pass@10=0,596774`;
+- logit lens na mesma *band*: `0,284946`, `0,392473` e `0,435484`;
+- J-lens em todas as camadas ajustadas, 0–30: `0,344086`, `0,564516` e
+  `0,629032`;
+- logit lens em todas as camadas: `0,284946`, `0,392473` e `0,446237`.
+
+A auditoria encontrou 103 intermediários: 82 eram representáveis por um único
+token e 21, por múltiplos tokens. O subconjunto single-token cobre 81 dos 93
+itens e teve recuperação maior: na *band*, J-lens `0,395062 / 0,641975 /
+0,691358` e logit lens `0,333333 / 0,456790 / 0,506173`; em todas as camadas,
+J-lens `0,395062 / 0,654321 / 0,716049` e logit lens `0,333333 / 0,456790 /
+0,518519`, sempre na ordem `pass@1/5/10`. Isso descreve este conjunto e esta
+tokenização; não demonstra superioridade causal da J-lens.
+
+O painel ajuda a tornar a escala dos ranks concreta. `Brazil` em
+`amazon-language`, `Mars` em `mars-color`, `gold` em `atomic-79-symbol`,
+`March` em `etym-wargod-month`, `oxygen` em `chem-photosynthesis-Z` e `east`
+em `inv-sunrise-opposite` chegaram ao rank 1 da J-lens. Para `spider` em
+`spider-legs`, o melhor resultado foi rank 2 na camada 19. Em contraste, os
+três intermediários de `nhop-primary-planet` ficaram mal posicionados dentro
+da *band*: `3` em rank 1999 na camada 12, `three` em 1090 na camada 12 e
+`third` em 514 na camada 18. Considerando todas as camadas, esses ranks
+melhoram para 24, 286 e 349, respectivamente, o que também mostra por que
+*band* e busca global não devem ser tratadas como a mesma medida.
+
+O heatmap é compatível com esse quadro: muitos itens melhoram a partir das
+camadas intermediárias e se concentram em ranks menores aproximadamente entre
+17 e 28, enquanto algumas linhas continuam ruins mesmo nessa região. Ele
+mostra o menor rank por item e camada em escala logarítmica, não uma fronteira
+causal nem uma camada universal. O `gradient_pursuit` por vezes reencontra o
+mesmo texto — `spider`, por exemplo, aparece entre seus componentes em várias
+camadas —, mas decompõe a ativação por coeficientes; não é outro cálculo do
+rank direto e não foi fundido com `pass@k`.
+
+As figuras reproduzem as métricas e a estrutura do JSON. O gráfico de barras e
+o heatmap são legíveis; já o painel preserva tokens brutos, inclusive quebras
+de linha, scripts variados e símbolos de controle, o que torna algumas células
+visualmente ruidosas. Por isso, ele serve como visão qualitativa, enquanto o
+JSON validado permanece a fonte para valores exatos. A interpretação ainda é
+limitada pelo tokenizer, pela lente treinada no corpus Salesforce-Wikitext,
+pelo recorte de camadas e pelo painel exploratório de 12 itens.
 
 ## Fluxo causal no Colab L4
 
@@ -205,17 +253,17 @@ cd projects/jspace_llama
 uv run python scripts/validate_observation.py
 ```
 
-Neste estágio pré-execução, os artefatos observacionais ainda não existem.
-Portanto, o resultado correto desse comando é `FAIL` com a ausência explícita
-de `jspace_observation_manifest.json`; ele não deve aceitar os dois JSONs
-causais como se fossem o atlas. Depois de uma execução e de
-`fetch --result-set observation`, os nove membros chegam juntos, inclusive o
-sidecar necessário para a validação independente; somente os dois JSONs
-compactos e as seis figuras formam a futura evidência canônica versionada.
+Depois de `fetch --result-set observation`, os nove membros chegaram juntos,
+inclusive o sidecar necessário para a validação independente. O comando agora
+termina com `PASS`: reconcilia o sidecar com os dois JSONs compactos, seus
+schemas, hashes, contagens e métricas, e valida as seis figuras. Somente os
+dois JSONs compactos e as seis figuras formam a evidência canônica versionada;
+o sidecar bruto e o notebook de saída continuam ignorados.
 
-O estado `success` exige proveniência limpa e verificada por digest, integridade
-da lente e readout explicitamente avaliados e pelo menos um `alpha` que passe
-por todos os critérios do prompt principal `main`. O parser deve identificar
+No protocolo causal, o estado `success` exige proveniência limpa e verificada
+por digest, integridade da lente e readout explicitamente avaliados e pelo
+menos um `alpha` que passe por todos os critérios do prompt principal `main`.
+O parser deve identificar
 unicamente oito no baseline e no no-op, uma resposta coerente diferente de seis
 no controle aleatório e unicamente seis na intervenção-alvo, sem vazamento de
 `ant` nem degradação.

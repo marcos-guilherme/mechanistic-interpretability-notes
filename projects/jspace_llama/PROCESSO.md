@@ -3,7 +3,7 @@
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
 
 > **Estado:** tentativa causal inconclusiva preservada; atlas observacional
-> implementado, ainda sem execução remota
+> executado e validado
 >
 > **Última atualização:** 11 de novembro de 2026
 
@@ -103,8 +103,8 @@ Depois dessa tentativa, decidi separar duas perguntas que o primeiro protocolo
 misturava na prática: “o que a lente consegue expor?” e “uma direção exposta
 tem efeito causal sobre a resposta?”. O atlas trata apenas da primeira. Ele foi
 implementado para mapear leituras internas de forma mais ampla antes de
-formular outra intervenção, mas ainda não foi executado no runtime remoto.
-Por isso, esta seção descreve o protocolo, não resultados.
+formular outra intervenção e foi executado no runtime remoto sem selecionar
+uma hipótese causal nova.
 
 Os 93 prompts vieram da avaliação `lens-eval-multihop` do repositório da
 Anthropic
@@ -151,6 +151,66 @@ completo, escopos de camada coerentes, proveniência verificável, hashes e
 figuras válidos. Ele não exige `pass@k` alto. Assim, uma execução completa com
 recuperação baixa ainda pode ser publicada como operacionalmente bem-sucedida,
 sem que isso demonstre um workspace útil ou um efeito causal.
+
+### Resultados observacionais
+
+A execução canônica `bc8ec4ac-1ecd-4cee-8022-294bd0734040` começou em
+`2026-11-11T07:53:02.832167Z` e terminou em
+`2026-11-11T07:55:37.531131Z`. Em uma NVIDIA L4, com `bfloat16` e CUDA 13.2,
+ela processou os 93 itens e terminou com `status=success`. Esse estado afirma
+que o pipeline e a evidência foram completados e validados; não afirma que a
+recuperação foi alta e não modifica o resultado causal anterior.
+
+Na *band* 12–28, a J-lens obteve `pass@1=0,344086`,
+`pass@5=0,548387` e `pass@10=0,596774`; a logit lens obteve `0,284946`,
+`0,392473` e `0,435484`. Quando permiti que o melhor rank viesse de qualquer
+camada ajustada, 0–30, a J-lens passou a `0,344086`, `0,564516` e `0,629032`,
+e a logit lens a `0,284946`, `0,392473` e `0,446237`. A J-lens recuperou uma
+fração maior de intermediários neste recorte, mas essa comparação entre
+projeções sobre os mesmos estados é observacional: ela não mostra que os
+conceitos recuperados causem a resposta.
+
+Dos 103 intermediários, 82 eram single-token e 21 eram multi-token. Os 82
+single-token aparecem em 81 itens. Nesse subconjunto, os valores
+`pass@1/5/10` na *band* foram `0,395062 / 0,641975 / 0,691358` para J-lens e
+`0,333333 / 0,456790 / 0,506173` para logit lens. Em todas as camadas, foram
+`0,395062 / 0,654321 / 0,716049` e
+`0,333333 / 0,456790 / 0,518519`, respectivamente. A diferença em relação ao
+conjunto total sugere que a tokenização participa da dificuldade medida; não
+autoriza generalizar para outros tokenizers, lentes ou corpora.
+
+O painel fixo de 12 itens mostra tanto recuperações claras quanto falhas.
+`Brazil` em `amazon-language`, `Mars`, `gold`, `March`, `oxygen` e `east`
+chegaram ao rank 1 da J-lens. `spider`, no item `spider-legs`, teve melhor
+rank 2 na camada 19, tanto na *band* quanto no conjunto completo. Já
+`nhop-primary-planet` foi difícil: na *band*, `3`, `three` e `third` tiveram
+ranks 1999, 1090 e 514; a busca em todas as camadas melhorou esses valores
+para 24, 286 e 349, sem torná-los recuperações fortes.
+
+No heatmap, as primeiras camadas concentram ranks altos para a maioria dos
+itens. Há uma melhora ampla a partir da região intermediária e uma
+concentração qualitativa de ranks menores entre aproximadamente as camadas 17
+e 28, mas permanecem faixas de itens ruins nessa mesma região; as camadas 29 e
+30 também são heterogêneas. Como cada célula usa o menor rank entre os
+intermediários daquele item, a figura não localiza uma camada causal nem
+garante que todos os conceitos do item estejam disponíveis.
+
+O `gradient_pursuit` às vezes reencontra o texto esperado. No caso de
+`spider`, ele inclui `Spider` ou `spider` entre os componentes em várias
+camadas, chegando ao segundo componente na camada 24, enquanto o ranking
+direto da J-lens encontra rank 2 na camada 19. Essa proximidade é útil como
+checagem qualitativa, não como igualdade: o ranking direto ordena tokens
+projetados pela lente, enquanto o pursuit aproxima uma ativação com uma
+combinação esparsa e reporta coeficientes e variância explicada. Há também
+casos em que o intermediário não aparece entre os componentes registrados,
+como `basketball` e `Spain`, embora o ranking direto ainda possa localizá-lo.
+
+As três representações PNG são coerentes com o JSON em métricas, ordem dos
+itens e ranks destacados. O gráfico de `pass@k` e o heatmap comunicam bem seus
+agregados. O painel, porém, imprime tokens brutos: quebras de linha, glifos de
+outros scripts e fragmentos como `newRow` reduzem a legibilidade de várias
+células. Não interpreto esse ruído visual como conteúdo semântico e uso o JSON
+validado como fonte numérica.
 
 ### Contribuição para o TCC
 
@@ -271,7 +331,7 @@ uv run pytest -q
 
 A sessão de GPU deve ser encerrada mesmo após erro ou queda da conexão local.
 
-### Atlas observacional ainda não executado
+### Atlas observacional
 
 O atlas usa a mesma preparação de runtime, mas outro notebook e um perfil de
 download separado. Na raiz do repositório:
@@ -301,14 +361,37 @@ cd projects/jspace_llama
 uv run python scripts/validate_observation.py
 ```
 
-Antes da execução remota, esse comando termina com status 1 e informa
-explicitamente que `jspace_observation_manifest.json` não existe. Esse é o
-estado esperado nesta etapa: o validador não confunde
-`execution_manifest.json` e `final_evaluation.json` com resultados do atlas.
-Depois da execução remota, o mesmo fetch traz o sidecar necessário para que
-essa validação independente possa terminar com sucesso. Ele continua
-gitignored e não faz parte do commit de evidência canônica, que conterá apenas
-os dois JSONs compactos e as seis figuras.
+Na execução canônica, o fetch trouxe o sidecar necessário e essa validação
+independente terminou com `PASS`. Ele continua gitignored e não faz parte do
+commit de evidência canônica, que contém apenas os dois JSONs compactos e as
+seis figuras.
+
+### O que a execução remota ensinou
+
+Os problemas operacionais encontrados durante a execução também esclareceram
+o que preciso controlar para chamar uma medição de reproduzível. No Colab, o
+diretório corrente não é uma forma segura de descobrir a raiz sincronizada;
+o runner precisa localizar a estrutura do projeto por marcadores e trabalhar
+a partir dela. Isso evita que uma sessão iniciada em outro caminho use arquivos
+ou ambiente errados sem perceber.
+
+Também observei que o estado já importado do Matplotlib e de extensões nativas
+pode sobreviver à atualização do ambiente dentro do mesmo processo. A
+renderização das figuras em um processo isolado passou a separar a inferência
+do estado gráfico persistente e a falhar de forma explícita se o renderizador
+não estiver coerente. Essa separação importa porque uma figura produzida não é
+evidência suficiente de que foi produzida pelo ambiente que o manifesto
+declara.
+
+O sidecar observacional é naturalmente muito maior que os JSONs compactos.
+Os limites de tamanho no empacotamento e no transporte precisam, portanto,
+ser específicos ao tipo de artefato: baixos demais rejeitam evidência válida;
+altos e indiscriminados deixam de detectar saídas acidentais. Por fim, a
+validação encontrou um falso positivo ao interpretar o token legítimo `/x`
+como caminho. A correção foi tornar a checagem sensível ao campo e ao schema,
+em vez de procurar padrões suspeitos em qualquer string. A lição comum é que
+reprodutibilidade depende tanto de rejeitar saídas indevidas quanto de não
+rejeitar dados válidos por heurísticas genéricas.
 
 ## Evidência canônica
 
@@ -316,20 +399,30 @@ os dois JSONs compactos e as seis figuras.
   ambiente, revisões resolvidas, configuração e motivo terminal.
 - [`results/final_evaluation.json`](results/final_evaluation.json): estado
   científico agregado e campos explicitamente não avaliados.
+- [`results/jspace_observation_manifest.json`](results/jspace_observation_manifest.json):
+  proveniência e estado operacional da execução observacional.
+- [`results/jspace_observation.json`](results/jspace_observation.json):
+  métricas, ranks, painel e resumo de tokenização do atlas.
+- [`results/jspace_observation_pass_at_k.png`](results/jspace_observation_pass_at_k.png)
+  e versão SVG: comparação agregada das duas lentes.
+- [`results/jspace_observation_rank_heatmap.png`](results/jspace_observation_rank_heatmap.png)
+  e versão SVG: ranks da J-lens por item e camada.
+- [`results/jspace_observation_panel.png`](results/jspace_observation_panel.png)
+  e versão SVG: painel qualitativo registrado.
 - [`README.md`](README.md): instruções operacionais resumidas.
 - [`notebooks/01_readout_and_causal_swap.ipynb`](notebooks/01_readout_and_causal_swap.ipynb):
   ponto de entrada da execução causal.
 - [`notebooks/02_observe_multihop_jspace.ipynb`](notebooks/02_observe_multihop_jspace.ipynb):
-  ponto de entrada fino do atlas, ainda não executado remotamente.
+  ponto de entrada fino do atlas.
 - [`scripts/validate_observation.py`](scripts/validate_observation.py):
-  validação independente dos futuros artefatos observacionais.
+  validação independente dos artefatos observacionais.
 
 O artefato final registra um prompt principal, duas paráfrases e um valor de
 `alpha` efetivamente avaliados. Nenhuma combinação passou por todos os
-critérios primários. Ainda não há JSONs nem figuras canônicos do atlas; seus
-valores só poderão ser documentados depois da execução remota e da validação.
-O sidecar observacional será transportado para tornar essa validação
-reproduzível localmente, mas permanecerá fora da evidência canônica versionada.
+critérios primários. Esse resultado causal permanece byte a byte inalterado.
+Os oito artefatos observacionais são uma evidência separada. O sidecar
+observacional torna a validação reproduzível localmente, mas permanece fora da
+evidência canônica versionada.
 
 ## Desvios e limitações
 
@@ -342,18 +435,22 @@ reproduzível localmente, mas permanecerá fora da evidência canônica versiona
 | `spider` ausente no readout | A lente não expôs o conceito-fonte nas camadas avaliadas | A intervenção não parte de uma representação-fonte validada |
 | Vazamento de `ant` e repetição | A condição-alvo degradou a continuação em `alpha=4.0` | A mudança não pode ser tratada como redirecionamento factual limpo |
 | TorchAudio incompatível no Colab | Pacote pré-instalado usava CUDA 13.0, enquanto PyTorch usava 13.2 | Exigiu remoção segura do pacote de áudio não utilizado antes da execução |
+| Tokenizer e lente específicos | Tokenização do Llama e lente ajustada em Salesforce-Wikitext | Os ranks não generalizam automaticamente para outro vocabulário, corpus ou lente |
+| *Band* 12–28 e camadas ajustadas 0–30 | Escopos disponíveis nesta lente e neste protocolo | A distribuição por camada não estabelece uma região universal de workspace |
+| Painel fixo de 12 itens | Diagnóstico qualitativo registrado antes da execução | Exemplos bons ou ruins não estimam desempenho fora dos 93 itens |
+| Painel visual com tokens brutos | A figura preserva fragmentos do tokenizer | Glifos e quebras de linha prejudicam leitura; valores devem vir do JSON |
 
-No atlas, a limitação atual é anterior à interpretação: a implementação local
-está testada, mas a medição em L4 ainda não aconteceu. O painel de 12 itens é
-deliberadamente qualitativo, e a comparação entre *band* e todas as camadas
-continua observacional; nenhuma delas mede efeito sobre a saída do modelo.
+No atlas, o painel de 12 itens é deliberadamente qualitativo, e a comparação
+entre *band* e todas as camadas continua observacional; nenhuma delas mede
+efeito sobre a saída do modelo.
 
 ## Próximo passo científico
 
-O próximo passo operacional é executar e validar o atlas sem preencher de
-antemão qualquer resultado. Depois disso, uma confirmação causal deve começar
-por uma hipótese nova e por prompts e regras de parsing pré-declarados capazes
-de estabelecer uma linha de base inequívoca. A leitura observacional pode
-motivar essa hipótese, mas não autoriza escolher retrospectivamente, nesta
-documentação, um conceito, uma direção ou um `alpha` que pareça favorável.
-Qualquer nova troca precisa de controles e de uma execução registrada própria.
+Uma confirmação causal futura deve começar por uma especificação nova, com
+hipótese, prompts ainda não usados neste atlas, regras de parsing e controles
+pré-declarados capazes de estabelecer uma linha de base inequívoca. A leitura
+observacional pode motivar esse trabalho, mas não autoriza escolher
+retrospectivamente, nesta documentação, um conceito, uma direção, uma camada
+ou um `alpha` que pareça favorável. Também não separo agora prompts do conjunto
+como *held-out*: isso faria parte da nova especificação, antes de qualquer
+execução causal. Qualquer troca precisará de uma execução registrada própria.
