@@ -40,22 +40,36 @@ gerações.
 - [Avaliação final canônica](../../projects/refusal_direction/results/final_evaluation.json)
 - [Manifesto da execução](../../projects/refusal_direction/results/execution_manifest.json)
 
-### J-space Llama — execução inconclusiva
+### J-space Llama — tentativa causal e atlas observacional
 
-O núcleo reutilizável e a orquestração de uma intervenção causal mínima em
-J-space sobre Llama estão implementados, incluindo validação de runtime,
-intervenções, controles e o notebook de entrada. Depois que o acesso ao modelo
-foi aprovado, uma execução em NVIDIA L4 carregou e verificou a lente, executou
-readout, baseline, no-op, controle aleatório e troca-alvo. Nenhum alpha passou
-pelos critérios do prompt principal: o baseline não forneceu uma resposta
-numérica válida, `spider` não apareceu no readout e a intervenção-alvo vazou
-`ant` e se degradou por repetição. O estado permanece inconclusivo e não
-constitui evidência contra o mecanismo mais amplo de J-space.
+Organizei este estudo em três etapas distintas. A primeira é a tentativa causal
+já executada: depois que o acesso ao modelo foi aprovado, uma execução em
+NVIDIA L4 carregou e verificou a lente, executou readout, baseline, no-op,
+controle aleatório e a troca `spider → ant`. O baseline não forneceu uma
+resposta numérica válida, `spider` não apareceu no readout e a intervenção
+vazou `ant` e se degradou por repetição. O resultado permanece inconclusivo,
+foi preservado sem alteração e não constitui evidência contra o mecanismo mais
+amplo de J-space.
+
+A segunda etapa é um atlas estritamente observacional, implementado mas ainda
+não executado remotamente. Ele lê os 93 prompts multihop da Anthropic, em uma
+revisão fixada e sob licença Apache 2.0, compara J-lens direta e logit lens e
+mantém um painel qualitativo fixo de 12 prompts com `gradient_pursuit`. O
+protocolo usa prompt bruto, não fornece `target` ao modelo, não gera texto e
+não edita ativações. Seus futuros `pass@1/5/10`, ranks por camada, painel e
+*band* serão evidência observacional; sucesso operacional significará
+artefatos completos e validados, não métricas altas.
+
+Uma terceira etapa, se for realizada, será uma nova confirmação causal. Ela
+precisará de hipótese, prompts e controles pré-declarados próprios, sem
+selecionar retrospectivamente conceito, direção ou `alpha` a partir desta
+documentação.
 
 - [Visão geral e fluxo implementado](../../projects/jspace_llama/README.md)
 - [Processo de estudo e reprodução](../../projects/jspace_llama/PROCESSO.md)
-- [Avaliação final canônica](../../projects/jspace_llama/results/final_evaluation.json)
-- [Manifesto da execução](../../projects/jspace_llama/results/execution_manifest.json)
+- [Avaliação causal final canônica](../../projects/jspace_llama/results/final_evaluation.json)
+- [Manifesto da execução causal](../../projects/jspace_llama/results/execution_manifest.json)
+- [Notebook do atlas ainda não executado](../../projects/jspace_llama/notebooks/02_observe_multihop_jspace.ipynb)
 
 ## Como ler este repositório
 

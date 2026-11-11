@@ -1,10 +1,11 @@
-# Processo de estudo e reprodução causal do J-space
+# Processo de estudo causal e observacional do J-space
 
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
 
-> **Estado:** inconclusivo após execução causal; critérios primários não satisfeitos
+> **Estado:** tentativa causal inconclusiva preservada; atlas observacional
+> implementado, ainda sem execução remota
 >
-> **Última atualização:** 10 de novembro de 2026
+> **Última atualização:** 11 de novembro de 2026
 
 ## Síntese acadêmica
 
@@ -96,6 +97,61 @@ de base comportamental exigida não foi estabelecida e o conceito-fonte não
 apareceu no readout. O resultado científico adequado é que esta configuração
 de prompt, parser, lente, camadas e `alpha=4.0` permaneceu inconclusiva.
 
+### Extensão observacional: o atlas
+
+Depois dessa tentativa, decidi separar duas perguntas que o primeiro protocolo
+misturava na prática: “o que a lente consegue expor?” e “uma direção exposta
+tem efeito causal sobre a resposta?”. O atlas trata apenas da primeira. Ele foi
+implementado para mapear leituras internas de forma mais ampla antes de
+formular outra intervenção, mas ainda não foi executado no runtime remoto.
+Por isso, esta seção descreve o protocolo, não resultados.
+
+Os 93 prompts vieram da avaliação `lens-eval-multihop` do repositório da
+Anthropic
+[`anthropics/jacobian-lens`](https://github.com/anthropics/jacobian-lens), na
+revisão fixada `581d398613e5602a5af361e1c34d3a92ea82ba8e`. Mantive apenas esse
+arquivo de avaliação, com SHA-256
+`2cd5a47aa3d7627708843bc61f03ab1d10eda4184f357c5cbf93c97184e32c9c`, e a
+[licença Apache 2.0](data/anthropic-jlens/LICENSE) que acompanha a cópia local.
+
+Cada item contém um `prompt`, um `target` e conceitos intermediários esperados.
+O código fornece ao modelo somente o `prompt` bruto, exatamente como texto,
+sem *chat template*. Essa escolha preserva a distribuição da avaliação e a
+posição de leitura original: o prompt termina imediatamente antes do
+`target`, e a lente lê a posição final. O `target` é metadado de avaliação e
+auditoria; ele não é concatenado ao texto de entrada nem revelado ao modelo.
+
+O atlas compara três leituras que cumprem papéis diferentes:
+
+- **J-lens direta:** aplica a lente com o ajuste do Jacobiano e mede o rank de
+  cada conceito intermediário na posição final do prompt;
+- **logit lens:** repete o mesmo ranking sem o ajuste do Jacobiano, oferecendo
+  uma comparação direta nos mesmos prompts e camadas;
+- **`gradient_pursuit`:** decompõe a ativação residual observada em direções do
+  dicionário para um painel qualitativo registrado de 12 prompts. É uma
+  leitura esparsa separada; seus coeficientes não são ranks da J-lens.
+
+Nenhuma dessas rotas gera uma continuação. A J-lens e a logit lens apenas
+projetam estados já produzidos no *prefill*; o `gradient_pursuit` lê cópias das
+ativações finais e não as escreve de volta no modelo. Portanto, este protocolo
+não contém edição, clamp, troca de conceito ou qualquer outra intervenção
+causal.
+
+As métricas diretas são `pass@1`, `pass@5` e `pass@10`: para cada item, calculo
+a fração dos intermediários cujo melhor rank fica dentro de `k` e depois tiro
+a média entre os 93 itens. O cálculo é registrado tanto para a *band* de
+workspace resolvida em runtime quanto para todas as camadas ajustadas da lente.
+Ranks por camada e o painel fixo de 12 prompts completam o diagnóstico. Esses
+resultados serão observacionais, inclusive quando mostrarem diferenças entre
+métodos ou regiões da rede.
+
+Também separei sucesso operacional de desempenho científico. O status
+`success` exige 93 registros alinhados, auditoria de tokenização, painel
+completo, escopos de camada coerentes, proveniência verificável, hashes e
+figuras válidos. Ele não exige `pass@k` alto. Assim, uma execução completa com
+recuperação baixa ainda pode ser publicada como operacionalmente bem-sucedida,
+sem que isso demonstre um workspace útil ou um efeito causal.
+
 ### Contribuição para o TCC
 
 Mesmo inconclusivo, este estudo tem uma função metodológica importante no meu
@@ -107,6 +163,10 @@ terceiro nível de análise causal que explorei — a intervenção sobre concei
 em um espaço de trabalho aprendido por uma lente. Registrar o baseline
 inválido, o readout sem `spider` e a degradação da intervenção evita transformar
 uma execução completa em uma conclusão mais forte do que os dados permitem.
+O atlas estende essa contribuição metodológica ao separar exploração
+observacional de confirmação causal. Ele não reclassifica a tentativa anterior
+e não fornece, por si só, evidência de que um conceito lido seja usado pelo
+modelo para produzir a resposta.
 
 ## Trabalho de referência e implementação
 
@@ -180,6 +240,8 @@ execução.
 
 ## Execução e reprodução
 
+### Protocolo causal preservado
+
 O modelo é *gated*. Antes da execução, é necessário entrar no site do Hugging
 Face com a mesma conta usada no CLI e aceitar ou solicitar acesso na
 [página oficial do modelo](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct).
@@ -209,6 +271,37 @@ uv run pytest -q
 
 A sessão de GPU deve ser encerrada mesmo após erro ou queda da conexão local.
 
+### Atlas observacional ainda não executado
+
+O atlas usa a mesma preparação de runtime, mas outro notebook e um perfil de
+download separado. Na raiz do repositório:
+
+```powershell
+python tools/colab/run_jspace.py probe
+python tools/colab/run_jspace.py start --gpu L4
+python tools/colab/run_jspace.py sync
+python tools/colab/run_jspace.py bootstrap
+python tools/colab/run_jspace.py auth-hf
+python tools/colab/run_jspace.py execute --notebook projects/jspace_llama/notebooks/02_observe_multihop_jspace.ipynb --timeout 7200
+python tools/colab/run_jspace.py fetch --result-set observation
+python tools/colab/run_jspace.py stop
+```
+
+O perfil `observation` publica dois JSONs compactos e seis figuras, sem
+sobrescrever os resultados causais. O artefato bruto usado para reconciliar
+hashes e conteúdo permanece fora do Git. Para validar um conjunto
+observacional completo:
+
+```powershell
+cd projects/jspace_llama
+uv run python scripts/validate_observation.py
+```
+
+Antes da execução remota, esse comando termina com status 1 e informa
+explicitamente que `jspace_observation_manifest.json` não existe. Esse é o
+estado esperado nesta etapa: o validador não confunde
+`execution_manifest.json` e `final_evaluation.json` com resultados do atlas.
+
 ## Evidência canônica
 
 - [`results/execution_manifest.json`](results/execution_manifest.json):
@@ -217,11 +310,16 @@ A sessão de GPU deve ser encerrada mesmo após erro ou queda da conexão local.
   científico agregado e campos explicitamente não avaliados.
 - [`README.md`](README.md): instruções operacionais resumidas.
 - [`notebooks/01_readout_and_causal_swap.ipynb`](notebooks/01_readout_and_causal_swap.ipynb):
-  ponto de entrada da execução real.
+  ponto de entrada da execução causal.
+- [`notebooks/02_observe_multihop_jspace.ipynb`](notebooks/02_observe_multihop_jspace.ipynb):
+  ponto de entrada fino do atlas, ainda não executado remotamente.
+- [`scripts/validate_observation.py`](scripts/validate_observation.py):
+  validação independente dos futuros artefatos observacionais.
 
 O artefato final registra um prompt principal, duas paráfrases e um valor de
 `alpha` efetivamente avaliados. Nenhuma combinação passou por todos os
-critérios primários.
+critérios primários. Ainda não há JSONs nem figuras canônicos do atlas; seus
+valores só poderão ser documentados depois da execução remota e da validação.
 
 ## Desvios e limitações
 
@@ -235,12 +333,17 @@ critérios primários.
 | Vazamento de `ant` e repetição | A condição-alvo degradou a continuação em `alpha=4.0` | A mudança não pode ser tratada como redirecionamento factual limpo |
 | TorchAudio incompatível no Colab | Pacote pré-instalado usava CUDA 13.0, enquanto PyTorch usava 13.2 | Exigiu remoção segura do pacote de áudio não utilizado antes da execução |
 
+No atlas, a limitação atual é anterior à interpretação: a implementação local
+está testada, mas a medição em L4 ainda não aconteceu. O painel de 12 itens é
+deliberadamente qualitativo, e a comparação entre *band* e todas as camadas
+continua observacional; nenhuma delas mede efeito sobre a saída do modelo.
+
 ## Próximo passo científico
 
-O próximo passo deve começar pela linha de base, antes de ampliar o sweep da
-intervenção. Eu avaliaria prompts e regras de parsing pré-declarados capazes de
-obter uma resposta basal inequívoca e, em seguida, verificaria em quais camadas
-e formulações a J-lens expõe o conceito-fonte. Somente depois dessas duas
-precondições repetiria a troca com múltiplos valores de `alpha` e controles.
-Essas mudanças devem constituir uma nova execução registrada, não uma seleção
-retrospectiva dos casos desta rodada.
+O próximo passo operacional é executar e validar o atlas sem preencher de
+antemão qualquer resultado. Depois disso, uma confirmação causal deve começar
+por uma hipótese nova e por prompts e regras de parsing pré-declarados capazes
+de estabelecer uma linha de base inequívoca. A leitura observacional pode
+motivar essa hipótese, mas não autoriza escolher retrospectivamente, nesta
+documentação, um conceito, uma direção ou um `alpha` que pareça favorável.
+Qualquer nova troca precisa de controles e de uma execução registrada própria.
