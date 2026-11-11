@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 from pathlib import Path
+import struct
 import sys
 import tarfile
+import zlib
 
 import pytest
 
@@ -393,6 +396,340 @@ def test_downloaded_results_reject_unexpected_members(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unexpected result archive member"):
         runner.extract_results_archive(archive, tmp_path / "project")
+
+
+CAUSAL_RESULTS = {
+    "results/execution_manifest.json",
+    "results/final_evaluation.json",
+}
+OBSERVATION_RESULTS = {
+    "results/jspace_observation_manifest.json",
+    "results/jspace_observation.json",
+    "results/jspace_observation_pass_at_k.png",
+    "results/jspace_observation_pass_at_k.svg",
+    "results/jspace_observation_rank_heatmap.png",
+    "results/jspace_observation_rank_heatmap.svg",
+    "results/jspace_observation_panel.png",
+    "results/jspace_observation_panel.svg",
+}
+
+
+def png_bytes(width: int = 1, height: int = 1) -> bytes:
+    payload = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    chunk_type = b"IHDR"
+    crc = zlib.crc32(chunk_type + payload) & 0xFFFFFFFF
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(payload))
+        + chunk_type
+        + payload
+        + struct.pack(">I", crc)
+    )
+
+
+def png_with_invalid_compression_method() -> bytes:
+    payload = bytearray(png_bytes())
+    payload[26] = 1
+    crc = zlib.crc32(b"IHDR" + payload[16:29]) & 0xFFFFFFFF
+    payload[29:33] = struct.pack(">I", crc)
+    return bytes(payload)
+
+
+def observation_payloads() -> dict[str, bytes]:
+    payloads: dict[str, bytes] = {}
+    for name in OBSERVATION_RESULTS:
+        if name.endswith(".json"):
+            payloads[name] = b"{}"
+        elif name.endswith(".png"):
+            payloads[name] = png_bytes()
+        else:
+            payloads[name] = (
+                b'<svg xmlns="http://www.w3.org/2000/svg" '
+                b'width="1" height="1"><path d="M0 0"/></svg>'
+            )
+    return payloads
+
+
+def write_tar_payloads(
+    archive: Path,
+    payloads: dict[str, bytes] | list[tuple[str, bytes]],
+) -> None:
+    entries = payloads.items() if isinstance(payloads, dict) else payloads
+    with tarfile.open(archive, "w:gz") as handle:
+        for name, payload in entries:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            handle.addfile(info, io.BytesIO(payload))
+
+
+def test_result_profiles_are_exact_and_independent() -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_result_profiles")
+    pack = load_module(PACK_PATH, "pack_jspace_result_profiles")
+
+    assert runner.RESULT_SETS == {
+        "causal": frozenset(CAUSAL_RESULTS),
+        "observation": frozenset(OBSERVATION_RESULTS),
+    }
+    assert pack.RESULT_SETS == runner.RESULT_SETS
+    assert runner.result_allowlist("causal") == CAUSAL_RESULTS
+    assert runner.result_allowlist("observation") == OBSERVATION_RESULTS
+    with pytest.raises(ValueError, match="unknown result set"):
+        runner.result_allowlist("unknown")
+    with pytest.raises(ValueError, match="unknown result set"):
+        pack.result_allowlist("unknown")
+
+
+def test_fetch_cli_selects_observation_profile() -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_fetch_profile")
+
+    args = runner.parse_args(["fetch", "--result-set", "observation"])
+
+    assert args.result_set == "observation"
+
+
+def test_pack_observation_maps_pipeline_figures_to_canonical_names(
+    tmp_path: Path,
+) -> None:
+    pack = load_module(PACK_PATH, "pack_jspace_observation")
+    root = tmp_path / "jspace_llama"
+    results = root / "results"
+    figures = results / "figures"
+    figures.mkdir(parents=True)
+    (results / "jspace_observation_manifest.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    (results / "jspace_observation.json").write_text("{}", encoding="utf-8")
+    for stem in ("pass_at_k", "rank_heatmap", "panel"):
+        (figures / f"observation_{stem}.png").write_bytes(png_bytes())
+        (figures / f"observation_{stem}.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"/>',
+            encoding="utf-8",
+        )
+    archive = tmp_path / "results.tar.gz"
+
+    pack.pack_results(root, archive, "observation")
+
+    with tarfile.open(archive, "r:gz") as handle:
+        assert {member.name for member in handle.getmembers()} == (
+            OBSERVATION_RESULTS
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "payload", "message"),
+    [
+        (
+            "results/jspace_observation.json",
+            b'{"duplicate":1,"duplicate":2}',
+            "valid JSON",
+        ),
+        (
+            "results/jspace_observation.json",
+            b'{"value":NaN}',
+            "valid JSON",
+        ),
+        (
+            "results/jspace_observation.json",
+            b'{"value":1e9999}',
+            "valid JSON",
+        ),
+        (
+            "results/jspace_observation_panel.png",
+            b"not png",
+            "PNG",
+        ),
+        (
+            "results/jspace_observation_panel.png",
+            png_bytes(0, 1),
+            "dimensions",
+        ),
+        (
+            "results/jspace_observation_panel.png",
+            png_bytes(10_001, 1),
+            "dimensions",
+        ),
+        (
+            "results/jspace_observation_panel.png",
+            png_with_invalid_compression_method(),
+            "IHDR",
+        ),
+        (
+            "results/jspace_observation_panel.svg",
+            b'<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>',
+            "DOCTYPE",
+        ),
+        (
+            "results/jspace_observation_panel.svg",
+            b'<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>',
+            "active",
+        ),
+        (
+            "results/jspace_observation_panel.svg",
+            (
+                b'<svg xmlns="http://www.w3.org/2000/svg">'
+                b'<image href="https://example.test/a.png"/></svg>'
+            ),
+            "external",
+        ),
+        (
+            "results/jspace_observation_panel.svg",
+            (
+                b'<svg xmlns="http://www.w3.org/2000/svg">'
+                b"<style>.a{fill:url(#local)}"
+                b".b{fill:url(https://example.test/a.svg)}</style></svg>"
+            ),
+            "external",
+        ),
+    ],
+)
+def test_observation_extract_rejects_hostile_artifact_without_replacement(
+    tmp_path: Path,
+    name: str,
+    payload: bytes,
+    message: str,
+) -> None:
+    runner = load_module(
+        RUNNER_PATH,
+        f"run_jspace_hostile_{Path(name).suffix}_{len(payload)}",
+    )
+    project = tmp_path / "project"
+    results = project / "results"
+    results.mkdir(parents=True)
+    sentinels = {}
+    for result_name in OBSERVATION_RESULTS:
+        destination = project / result_name
+        destination.write_bytes(f"old:{result_name}".encode())
+        sentinels[result_name] = destination.read_bytes()
+    payloads = observation_payloads()
+    payloads[name] = payload
+    archive = tmp_path / "results.tar.gz"
+    write_tar_payloads(archive, payloads)
+
+    with pytest.raises(ValueError, match=message):
+        runner.extract_results_archive(archive, project, "observation")
+
+    assert {
+        result_name: (project / result_name).read_bytes()
+        for result_name in OBSERVATION_RESULTS
+    } == sentinels
+
+
+def test_observation_extract_rejects_bad_ihdr_crc(tmp_path: Path) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_bad_png_crc")
+    payloads = observation_payloads()
+    name = "results/jspace_observation_panel.png"
+    payloads[name] = payloads[name][:-1] + bytes([payloads[name][-1] ^ 0xFF])
+    archive = tmp_path / "results.tar.gz"
+    write_tar_payloads(archive, payloads)
+
+    with pytest.raises(ValueError, match="IHDR"):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [
+            *observation_payloads().items(),
+            ("../jspace_observation.json", b"{}"),
+        ],
+        [
+            *observation_payloads().items(),
+            ("results//jspace_observation.json", b"{}"),
+        ],
+        [
+            *observation_payloads().items(),
+            ("results/jspace_observation.json", b"{}"),
+        ],
+    ],
+)
+def test_observation_extract_rejects_traversal_and_duplicates(
+    tmp_path: Path,
+    entries: list[tuple[str, bytes]],
+) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_archive_names")
+    archive = tmp_path / "results.tar.gz"
+    write_tar_payloads(archive, entries)
+
+    with pytest.raises(ValueError, match="duplicate|unexpected|unsafe"):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+
+def test_observation_extract_rejects_noncanonical_member_path(
+    tmp_path: Path,
+) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_noncanonical_name")
+    payloads = observation_payloads()
+    payload = payloads.pop("results/jspace_observation.json")
+    entries = [
+        *payloads.items(),
+        ("results/./jspace_observation.json", payload),
+    ]
+    archive = tmp_path / "results.tar.gz"
+    write_tar_payloads(archive, entries)
+
+    with pytest.raises(ValueError, match="unsafe"):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+
+def test_observation_extract_rejects_missing_and_oversized_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_limits")
+    payloads = observation_payloads()
+    missing = payloads.pop("results/jspace_observation_panel.svg")
+    archive = tmp_path / "missing.tar.gz"
+    write_tar_payloads(archive, payloads)
+    with pytest.raises(FileNotFoundError, match="missing result archive member"):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+    payloads["results/jspace_observation_panel.svg"] = missing
+    archive = tmp_path / "large.tar.gz"
+    write_tar_payloads(archive, payloads)
+    monkeypatch.setattr(runner, "MAX_FIGURE_BYTES", 1)
+    with pytest.raises(ValueError, match="too large"):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+    monkeypatch.setattr(runner, "MAX_ARCHIVE_BYTES", 1)
+    with pytest.raises(ValueError, match="archive is too large"):
+        runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+
+def test_observation_extract_rolls_back_replacement_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_transaction")
+    project = tmp_path / "project"
+    results = project / "results"
+    results.mkdir(parents=True)
+    sentinels = {}
+    for name in OBSERVATION_RESULTS:
+        destination = project / name
+        destination.write_bytes(f"old:{name}".encode())
+        sentinels[name] = destination.read_bytes()
+    archive = tmp_path / "results.tar.gz"
+    write_tar_payloads(archive, observation_payloads())
+    real_replace = runner.os.replace
+    replacements = 0
+
+    def fail_second_publication(source: Path, destination: Path) -> None:
+        nonlocal replacements
+        if Path(destination).parent == results:
+            replacements += 1
+            if replacements == 2:
+                raise OSError("injected replacement failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(runner.os, "replace", fail_second_publication)
+
+    with pytest.raises(OSError, match="injected replacement failure"):
+        runner.extract_results_archive(archive, project, "observation")
+
+    assert {
+        name: (project / name).read_bytes() for name in OBSERVATION_RESULTS
+    } == sentinels
 
 
 def test_documentation_lists_exact_jspace_workflow_and_gated_auth() -> None:

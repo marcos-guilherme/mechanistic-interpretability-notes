@@ -4,17 +4,21 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
 from typing import Sequence
+import xml.etree.ElementTree as ET
+import zlib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,13 +31,33 @@ BOOTSTRAP_SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 AUTH_SUCCESS_MARKER = "JSPACE_HF_AUTH_SUCCESS"
 PACK_SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
+RESULT_SET_ENV = "JSPACE_RESULT_SET"
 MAX_RESULT_BYTES = 1_048_576
-RESULT_ALLOWLIST = frozenset(
-    {
-        "results/execution_manifest.json",
-        "results/final_evaluation.json",
-    }
-)
+MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
+MAX_FIGURE_BYTES = 5 * 1_048_576
+MAX_ARCHIVE_BYTES = 40 * 1_048_576
+MAX_IMAGE_DIMENSION = 10_000
+RESULT_SETS = {
+    "causal": frozenset(
+        {
+            "results/execution_manifest.json",
+            "results/final_evaluation.json",
+        }
+    ),
+    "observation": frozenset(
+        {
+            "results/jspace_observation_manifest.json",
+            "results/jspace_observation.json",
+            "results/jspace_observation_pass_at_k.png",
+            "results/jspace_observation_pass_at_k.svg",
+            "results/jspace_observation_rank_heatmap.png",
+            "results/jspace_observation_rank_heatmap.svg",
+            "results/jspace_observation_panel.png",
+            "results/jspace_observation_panel.svg",
+        }
+    ),
+}
+RESULT_ALLOWLIST = RESULT_SETS["causal"]
 ARCHIVE_ROOT_FILES = frozenset({"README.md", "pyproject.toml", "uv.lock"})
 ARCHIVE_SUFFIXES = {
     "data": frozenset({"", ".json", ".md"}),
@@ -68,6 +92,21 @@ SENSITIVE_FILENAMES = frozenset(
         "token",
     }
 )
+
+
+def result_allowlist(result_set: str) -> set[str]:
+    try:
+        return set(RESULT_SETS[result_set])
+    except KeyError as error:
+        raise ValueError(f"unknown result set: {result_set}") from error
+
+
+def result_size_limit(name: str) -> int:
+    if name == "results/jspace_observation.json":
+        return MAX_OBSERVATION_JSON_BYTES
+    if name.endswith((".png", ".svg")):
+        return MAX_FIGURE_BYTES
+    return MAX_RESULT_BYTES
 
 
 def huggingface_token_path(home: Path | None = None) -> Path:
@@ -152,14 +191,17 @@ def run_remote_operation(
     *,
     timeout: int,
     operation_marker: str,
+    environment: dict[str, str] | None = None,
 ) -> None:
     nonce = secrets.token_hex(32)
     expected_marker = f"{operation_marker}:{nonce}"
+    remote_environment = dict(environment or {})
+    remote_environment[SUCCESS_NONCE_ENV] = nonce
     command = exec_command(
         session,
         file,
         timeout=timeout,
-        environment={SUCCESS_NONCE_ENV: nonce},
+        environment=remote_environment,
     )
     run_remote_script(command, expected_marker)
 
@@ -340,10 +382,12 @@ def _cleanup_private_download_directory(
 def fetch_results(
     session: str,
     *,
+    result_set: str = "causal",
     staging: Path = STAGING,
     project: Path = PROJECT,
     root: Path = ROOT,
 ) -> None:
+    result_allowlist(result_set)
     staging_metadata = _ensure_staging_directory(staging, root)
     private_directory = Path(
         tempfile.mkdtemp(prefix="jspace-fetch-", dir=staging)
@@ -368,7 +412,10 @@ def fetch_results(
             staging,
             private_metadata,
         )
-        extract_results_archive(local, project)
+        if result_set == "causal":
+            extract_results_archive(local, project)
+        else:
+            extract_results_archive(local, project, result_set)
     finally:
         _cleanup_private_download_directory(
             private_directory,
@@ -655,6 +702,8 @@ def validate_result_archive(
         archive_metadata,
         context="result archive",
     )
+    if getattr(archive_metadata, "st_size", 0) > MAX_ARCHIVE_BYTES:
+        raise ValueError(f"result archive is too large: {archive}")
 
 
 def _validate_json_bytes(name: str, payload: bytes) -> None:
@@ -669,60 +718,133 @@ def _validate_json_bytes(name: str, payload: bytes) -> None:
     def reject_constant(value: str):
         raise ValueError(f"non-finite JSON value: {value}")
 
+    def reject_nonfinite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"non-finite JSON value: {value}")
+        return parsed
+
     try:
         json.loads(
             payload.decode("utf-8"),
             object_pairs_hook=reject_duplicates,
             parse_constant=reject_constant,
+            parse_float=reject_nonfinite_float,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise ValueError(f"result artifact is not valid JSON: {name}") from error
 
 
-def extract_results_archive(archive: Path, project: Path = PROJECT) -> None:
-    archive_metadata = os.lstat(archive)
-    validate_result_archive(archive, metadata=archive_metadata)
-    with open_validated_file(archive, archive_metadata) as archive_source:
-        with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
-            members = handle.getmembers()
-            member_names = [member.name for member in members]
-            if len(member_names) != len(set(member_names)):
-                raise ValueError("duplicate result archive member")
-            names = set(member_names)
-            unexpected = names - RESULT_ALLOWLIST
-            if unexpected:
-                joined = ", ".join(sorted(unexpected))
-                raise ValueError(f"unexpected result archive member: {joined}")
-            missing = RESULT_ALLOWLIST - names
-            if missing:
-                joined = ", ".join(sorted(missing))
-                raise FileNotFoundError(
-                    f"missing result archive member: {joined}"
-                )
+def _validate_png_bytes(name: str, payload: bytes) -> None:
+    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError(f"result artifact is not a valid PNG: {name}")
+    if len(payload) < 33:
+        raise ValueError(f"result PNG has an invalid IHDR: {name}")
+    length = struct.unpack(">I", payload[8:12])[0]
+    if length != 13 or payload[12:16] != b"IHDR":
+        raise ValueError(f"result PNG has an invalid IHDR: {name}")
+    ihdr = payload[16:29]
+    expected_crc = struct.unpack(">I", payload[29:33])[0]
+    actual_crc = zlib.crc32(b"IHDR" + ihdr) & 0xFFFFFFFF
+    if expected_crc != actual_crc:
+        raise ValueError(f"result PNG has an invalid IHDR checksum: {name}")
+    width, height = struct.unpack(">II", ihdr[:8])
+    if not (
+        0 < width <= MAX_IMAGE_DIMENSION
+        and 0 < height <= MAX_IMAGE_DIMENSION
+    ):
+        raise ValueError(f"result PNG has invalid dimensions: {name}")
+    bit_depth, color_type, compression, filter_method, interlace = ihdr[8:]
+    valid_bit_depths = {
+        0: {1, 2, 4, 8, 16},
+        2: {8, 16},
+        3: {1, 2, 4, 8},
+        4: {8, 16},
+        6: {8, 16},
+    }
+    if (
+        bit_depth not in valid_bit_depths.get(color_type, set())
+        or compression != 0
+        or filter_method != 0
+        or interlace not in {0, 1}
+    ):
+        raise ValueError(f"result PNG has invalid IHDR fields: {name}")
 
-            payloads: dict[str, bytes] = {}
-            for member in members:
-                if not member.isfile() or member.issym() or member.islnk():
-                    raise ValueError(
-                        "result archive must contain regular files only"
-                    )
-                if member.size < 0 or member.size > MAX_RESULT_BYTES:
-                    raise ValueError(
-                        f"result artifact is too large: {member.name}"
-                    )
-                source = handle.extractfile(member)
-                if source is None:
-                    raise ValueError(
-                        f"cannot read result artifact: {member.name}"
-                    )
-                payload = source.read(MAX_RESULT_BYTES + 1)
-                if len(payload) > MAX_RESULT_BYTES:
-                    raise ValueError(
-                        f"result artifact is too large: {member.name}"
-                    )
-                _validate_json_bytes(member.name, payload)
-                payloads[member.name] = payload
 
+def _local_xml_name(value: str) -> str:
+    return value.rsplit("}", 1)[-1].lower()
+
+
+def _validate_svg_bytes(name: str, payload: bytes) -> None:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"result artifact is not valid UTF-8 SVG: {name}") from error
+    upper = text.upper()
+    if "<!DOCTYPE" in upper:
+        raise ValueError(f"result SVG contains DOCTYPE: {name}")
+    if "<!ENTITY" in upper:
+        raise ValueError(f"result SVG contains ENTITY: {name}")
+    if "<?XML-STYLESHEET" in upper:
+        raise ValueError(f"result SVG contains active content: {name}")
+    if "@IMPORT" in upper:
+        raise ValueError(f"result SVG contains external content: {name}")
+    for match in re.finditer(
+        r"url\(\s*(['\"]?)(.*?)\1\s*\)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        if not match.group(2).strip().startswith("#"):
+            raise ValueError(f"result SVG contains external content: {name}")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as error:
+        raise ValueError(f"result artifact is not valid XML SVG: {name}") from error
+    if _local_xml_name(root.tag) != "svg":
+        raise ValueError(f"result SVG root is not svg: {name}")
+    for element in root.iter():
+        if _local_xml_name(element.tag) in {"script", "foreignobject"}:
+            raise ValueError(f"result SVG contains active content: {name}")
+        for attribute, value in element.attrib.items():
+            local_attribute = _local_xml_name(attribute)
+            normalized_value = value.strip()
+            lowered_value = normalized_value.lower()
+            if local_attribute.startswith("on"):
+                raise ValueError(f"result SVG contains active content: {name}")
+            if local_attribute in {"href", "src"} and (
+                not normalized_value.startswith("#")
+            ):
+                raise ValueError(f"result SVG contains external content: {name}")
+            if "@import" in lowered_value:
+                raise ValueError(f"result SVG contains external content: {name}")
+
+
+def _validate_result_bytes(name: str, payload: bytes) -> None:
+    if name.endswith(".json"):
+        _validate_json_bytes(name, payload)
+    elif name.endswith(".png"):
+        _validate_png_bytes(name, payload)
+    elif name.endswith(".svg"):
+        _validate_svg_bytes(name, payload)
+    else:
+        raise ValueError(f"unsupported result artifact: {name}")
+
+
+def _normalized_result_member(name: str) -> str:
+    if "\x00" in name or "\\" in name:
+        raise ValueError(f"unsafe result archive member: {name}")
+    path = PurePosixPath(name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"unsafe result archive member: {name}")
+    normalized = path.as_posix()
+    if name != normalized:
+        raise ValueError(f"unsafe result archive member: {name}")
+    if not normalized.startswith("results/"):
+        raise ValueError(f"unsafe result archive member: {name}")
+    return normalized
+
+
+def _validate_result_directories(project: Path) -> Path:
     results = project / "results"
     for directory in (project, results):
         if os.path.lexists(directory):
@@ -738,16 +860,145 @@ def extract_results_archive(archive: Path, project: Path = PROJECT) -> None:
                     f"result destination is not a directory: {directory}"
                 )
     results.mkdir(parents=True, exist_ok=True)
-    for name, payload in payloads.items():
+    return results
+
+
+def _replace_result_payloads(
+    payloads: dict[str, bytes],
+    project: Path,
+) -> None:
+    results = _validate_result_directories(project)
+    destinations: dict[str, Path] = {}
+    metadata: dict[str, object | None] = {}
+    for name in sorted(payloads):
         destination = project / PurePosixPath(name)
         validate_result_destination(destination, project)
+        destinations[name] = destination
         if os.path.lexists(destination):
+            current = os.lstat(destination)
             validate_result_destination(
                 destination,
                 project,
-                metadata=os.lstat(destination),
+                metadata=current,
             )
-        destination.write_bytes(payload)
+            metadata[name] = current
+        else:
+            metadata[name] = None
+
+    with tempfile.TemporaryDirectory(
+        prefix=".jspace-result-transaction-",
+        dir=results,
+    ) as transaction_name:
+        transaction = Path(transaction_name)
+        prepared = transaction / "prepared"
+        backups = transaction / "backups"
+        prepared.mkdir()
+        backups.mkdir()
+        prepared_paths: dict[str, Path] = {}
+        backup_paths: dict[str, Path | None] = {}
+        for index, name in enumerate(sorted(payloads)):
+            prepared_path = prepared / str(index)
+            prepared_path.write_bytes(payloads[name])
+            prepared_paths[name] = prepared_path
+            expected = metadata[name]
+            if expected is None:
+                backup_paths[name] = None
+                continue
+            current = os.lstat(destinations[name])
+            if not _same_file_identity(expected, current):
+                raise ValueError(
+                    f"result destination changed after validation: "
+                    f"{destinations[name]}"
+                )
+            backup = backups / str(index)
+            with open_validated_file(destinations[name], current) as source:
+                with backup.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+            backup_paths[name] = backup
+
+        replaced: list[str] = []
+        try:
+            for name in sorted(payloads):
+                os.replace(prepared_paths[name], destinations[name])
+                replaced.append(name)
+        except BaseException:
+            rollback_errors: list[BaseException] = []
+            for name in reversed(replaced):
+                try:
+                    backup = backup_paths[name]
+                    if backup is None:
+                        destinations[name].unlink(missing_ok=True)
+                    else:
+                        os.replace(backup, destinations[name])
+                except BaseException as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise RuntimeError(
+                    "result replacement failed and rollback was incomplete"
+                ) from rollback_errors[0]
+            raise
+
+
+def extract_results_archive(
+    archive: Path,
+    project: Path = PROJECT,
+    result_set: str = "causal",
+) -> None:
+    allowlist = result_allowlist(result_set)
+    archive_metadata = os.lstat(archive)
+    validate_result_archive(archive, metadata=archive_metadata)
+    with open_validated_file(archive, archive_metadata) as archive_source:
+        with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
+            members = handle.getmembers()
+            member_names = [member.name for member in members]
+            normalized_names = [
+                _normalized_result_member(name) for name in member_names
+            ]
+            if len(member_names) != len(set(member_names)) or len(
+                normalized_names
+            ) != len(set(normalized_names)):
+                raise ValueError("duplicate result archive member")
+            names = set(normalized_names)
+            unexpected = names - allowlist
+            if unexpected:
+                joined = ", ".join(sorted(unexpected))
+                raise ValueError(f"unexpected result archive member: {joined}")
+            missing = allowlist - names
+            if missing:
+                joined = ", ".join(sorted(missing))
+                raise FileNotFoundError(
+                    f"missing result archive member: {joined}"
+                )
+
+            payloads: dict[str, bytes] = {}
+            total_size = 0
+            for member, name in zip(members, normalized_names, strict=True):
+                if not member.isfile() or member.issym() or member.islnk():
+                    raise ValueError(
+                        "result archive must contain regular files only"
+                    )
+                size_limit = result_size_limit(name)
+                if member.size < 0 or member.size > size_limit:
+                    raise ValueError(
+                        f"result artifact is too large: {name}"
+                    )
+                total_size += member.size
+                if total_size > MAX_ARCHIVE_BYTES:
+                    raise ValueError("result archive expands beyond size limit")
+                source = handle.extractfile(member)
+                if source is None:
+                    raise ValueError(
+                        f"cannot read result artifact: {name}"
+                    )
+                payload = source.read(size_limit + 1)
+                if len(payload) > size_limit:
+                    raise ValueError(
+                        f"result artifact is too large: {name}"
+                    )
+                _validate_result_bytes(name, payload)
+                payloads[name] = payload
+
+    _replace_result_payloads(payloads, project)
 
 
 def notebook_output_path(notebook: Path) -> Path:
@@ -863,9 +1114,17 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--session", default="jspace-llama")
     start.add_argument("--gpu", choices=("T4", "L4", "A100"), default="L4")
 
-    for action in ("sync", "bootstrap", "auth-hf", "fetch", "stop"):
+    for action in ("sync", "bootstrap", "auth-hf", "stop"):
         action_parser = actions.add_parser(action)
         action_parser.add_argument("--session", default="jspace-llama")
+
+    fetch = actions.add_parser("fetch")
+    fetch.add_argument("--session", default="jspace-llama")
+    fetch.add_argument(
+        "--result-set",
+        choices=tuple(RESULT_SETS),
+        default="causal",
+    )
 
     execute = actions.add_parser("execute")
     execute.add_argument("--session", default="jspace-llama")
@@ -918,8 +1177,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             PROJECT / "scripts" / "colab_pack_results.py",
             timeout=300,
             operation_marker=PACK_SUCCESS_MARKER,
+            environment={RESULT_SET_ENV: args.result_set},
         )
-        fetch_results(args.session)
+        fetch_results(args.session, result_set=args.result_set)
     elif args.action == "stop":
         run(stop_command(args.session))
     return 0

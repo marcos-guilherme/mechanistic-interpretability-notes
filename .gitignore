@@ -28,3 +28,5 @@ projects/jspace_llama/artifacts/*
 projects/jspace_llama/results/*
 !projects/jspace_llama/results/.gitkeep
 !projects/jspace_llama/results/*.json
+!projects/jspace_llama/results/*.png
+!projects/jspace_llama/results/*.svg
