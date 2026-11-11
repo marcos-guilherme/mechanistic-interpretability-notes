@@ -191,4 +191,3 @@ Esta é a página oficial do modelo escolhido para o marco causal
 não substitui a aprovação da licença. A tentativa registrada parou justamente
 nesse limite, antes de qualquer inferência, e por isso permanece
 cientificamente inconclusiva.
-

@@ -356,4 +356,3 @@ modificados permanecem fora deste trabalho.
 git add README.md docs/replicacoes/README.md
 git commit -m "docs: link research references"
 ```
-

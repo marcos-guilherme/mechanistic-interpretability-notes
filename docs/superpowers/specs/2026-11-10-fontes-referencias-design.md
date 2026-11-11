@@ -110,4 +110,3 @@ A conclusão exige:
   reprodução textual extensa;
 - `git diff --check`;
 - ausência de erros de lint nos arquivos Markdown alterados.
-

@@ -327,4 +327,3 @@ As fontes dos experimentos e outros materiais formativos estão reunidos em
 [`REFERENCIAS.md`](REFERENCIAS.md). Para os exemplos, links e recomendações
 completas de Neel Nanda, consulte o [artigo
 original](https://www.alignmentforum.org/posts/jP9KDyMkchuv6tHwm/how-to-become-a-mechanistic-interpretability-researcher).
-
