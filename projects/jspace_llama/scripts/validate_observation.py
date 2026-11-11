@@ -57,7 +57,7 @@ ABSOLUTE_PATHS = (
     re.compile(r"(?i)\bfile://"),
     re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:[\\/]"),
     re.compile(r"\\\\[^\\/\s]+[\\/][^\\/\s]+"),
-    re.compile(r"(?<![:/\w])/(?:home|content|tmp|users?)/[^\s\"'<>]+", re.I),
+    re.compile(r"(?<![:/\w])/(?!/)[^\s\"'<>]+"),
 )
 REASON_MESSAGES = {
     "incomplete_observation": "observational run did not produce every required record",
@@ -315,12 +315,17 @@ def _validate_counts_and_claims(result: dict[str, Any]) -> bool:
 def _validate_raw(
     manifest: dict[str, Any],
     *,
-    raw_path: Path | None,
-) -> dict[str, Any] | None:
+    raw_path: Path,
+) -> dict[str, Any]:
     claimed = manifest["raw_artifact_sha256"]
-    if raw_path is None:
-        return None
-    payload = raw_path.read_bytes()
+    if not raw_path.is_file():
+        raise ObservationValidationError("raw artifact is required")
+    try:
+        payload = raw_path.read_bytes()
+    except OSError as error:
+        raise ObservationValidationError(
+            "raw artifact cannot be read"
+        ) from error
     if hashlib.sha256(payload).hexdigest() != claimed:
         raise ObservationValidationError(
             "raw artifact SHA-256 does not match manifest"
@@ -334,12 +339,178 @@ def _validate_raw(
     return raw
 
 
+def _raw_tokenization_summary(
+    audit: list[dict[str, Any]],
+) -> dict[str, int]:
+    intermediates = [
+        intermediate
+        for item in audit
+        for intermediate in item["intermediates"]
+    ]
+    single = sum(
+        intermediate["single_token"] is True
+        for intermediate in intermediates
+    )
+    return {
+        "item_count": len(audit),
+        "intermediate_count": len(intermediates),
+        "single_token_count": single,
+        "multi_token_count": len(intermediates) - single,
+    }
+
+
+def _project_raw_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": record["name"],
+            "intermediates": [
+                {
+                    "text": intermediate["text"],
+                    "single_token": intermediate["single_token"],
+                    **{
+                        method: intermediate[method]
+                        for method in METHODS
+                    },
+                }
+                for intermediate in record["intermediates"]
+            ],
+        }
+        for record in records
+    ]
+
+
+def _reconcile_raw(
+    raw: dict[str, Any],
+    manifest: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    if set(raw) != {
+        "provenance",
+        "tokenization_audit",
+        "direct",
+        "panel",
+        "layers",
+    }:
+        raise ObservationValidationError(
+            "raw observation has unexpected fields"
+        )
+    if raw["provenance"] != manifest["provenance"]:
+        raise ObservationValidationError(
+            "raw provenance differs from compact manifest"
+        )
+    if raw["layers"] != result["layers"]:
+        raise ObservationValidationError(
+            "raw layer scopes differ from compact result"
+        )
+    projected = _project_raw_records(raw["direct"]["items"])
+    if projected != result["per_item_best_ranks"]:
+        raise ObservationValidationError(
+            "raw direct records differ from compact result"
+        )
+    if raw["panel"]["items"] != result["panel"]:
+        raise ObservationValidationError(
+            "raw panel content differs from compact result"
+        )
+    direct_by_name = {
+        entry["name"]: entry for entry in raw["direct"]["items"]
+    }
+    for panel_item in raw["panel"]["items"]:
+        direct_item = direct_by_name.get(panel_item["name"])
+        if direct_item is None or {
+            key: direct_item[key]
+            for key in (
+                "name",
+                "prompt",
+                "target",
+                "intermediates",
+                "top_tokens",
+            )
+        } != {
+            key: panel_item[key]
+            for key in (
+                "name",
+                "prompt",
+                "target",
+                "intermediates",
+                "top_tokens",
+            )
+        }:
+            raise ObservationValidationError(
+                "raw panel differs from raw direct records"
+            )
+    if (
+        [entry["name"] for entry in raw["tokenization_audit"]]
+        != [entry["name"] for entry in projected]
+        or _raw_tokenization_summary(raw["tokenization_audit"])
+        != result["tokenization_summary"]
+    ):
+        raise ObservationValidationError(
+            "raw tokenization differs from compact result"
+        )
+    for audit_item, direct_item in zip(
+        raw["tokenization_audit"],
+        raw["direct"]["items"],
+        strict=True,
+    ):
+        if [
+            (
+                intermediate["text"],
+                intermediate["token_id"],
+                intermediate["single_token"],
+            )
+            for intermediate in audit_item["intermediates"]
+        ] != [
+            (
+                intermediate["text"],
+                intermediate["token_id"],
+                intermediate["single_token"],
+            )
+            for intermediate in direct_item["intermediates"]
+        ]:
+            raise ObservationValidationError(
+                "raw tokenization differs from raw direct records"
+            )
+    for method in METHODS:
+        for scope in SCOPES:
+            recomputed = _metric(projected, method, scope)
+            if (
+                raw["direct"]["metrics"][method][scope] != recomputed
+                or result["metrics"][method][scope] != recomputed
+            ):
+                raise ObservationValidationError(
+                    "raw metrics differ from compact result"
+                )
+            single_records = [
+                {
+                    "intermediates": [
+                        intermediate
+                        for intermediate in record["intermediates"]
+                        if intermediate["single_token"]
+                    ]
+                }
+                for record in projected
+                if any(
+                    intermediate["single_token"]
+                    for intermediate in record["intermediates"]
+                )
+            ]
+            if (
+                raw["direct"]["single_token_metrics"][method][scope]
+                != _metric(single_records, method, scope)
+            ):
+                raise ObservationValidationError(
+                    "raw single-token metrics do not recompute"
+                )
+
+
 def validate_documents(
     manifest: dict[str, Any],
     result: dict[str, Any],
     *,
     schema_dir: str | Path,
-    raw_path: str | Path | None = None,
+    raw_path: str | Path,
 ) -> None:
     schemas = Path(schema_dir)
     _reject_forbidden(manifest)
@@ -366,7 +537,7 @@ def validate_documents(
         raise ObservationValidationError("dataset claim is not pinned")
     raw = _validate_raw(
         manifest,
-        raw_path=None if raw_path is None else Path(raw_path),
+        raw_path=Path(raw_path),
     )
     complete = _validate_counts_and_claims(result)
     provenance_complete = _provenance_complete(manifest["provenance"])
@@ -391,25 +562,39 @@ def validate_documents(
             raise ObservationValidationError(
                 "successful observation needs raw hash and no reason"
             )
-        if raw is not None:
-            try:
-                if (
-                    len(raw["direct"]["items"]) != EXPECTED_ITEM_COUNT
-                    or len(raw["tokenization_audit"]) != EXPECTED_ITEM_COUNT
-                    or [item["name"] for item in raw["panel"]["items"]]
-                    != list(PANEL_NAMES)
-                ):
-                    raise ObservationValidationError(
-                        "raw observation is incomplete"
-                    )
-            except (KeyError, TypeError):
+        try:
+            if (
+                len(raw["direct"]["items"]) != EXPECTED_ITEM_COUNT
+                or len(raw["tokenization_audit"]) != EXPECTED_ITEM_COUNT
+                or [item["name"] for item in raw["panel"]["items"]]
+                != list(PANEL_NAMES)
+            ):
                 raise ObservationValidationError(
                     "raw observation is incomplete"
-                ) from None
+                )
+            _reconcile_raw(raw, manifest, result)
+        except (IndexError, KeyError, TypeError):
+            raise ObservationValidationError(
+                "raw observation is incomplete"
+            ) from None
     elif reason is None:
         raise ObservationValidationError(
             "inconclusive observation requires a reason"
         )
+    elif "failure" in raw:
+        if (
+            set(raw) != {"provenance", "failure"}
+            or raw["provenance"] != manifest["provenance"]
+            or set(raw["failure"]) != {"reason_code", "error_type"}
+            or raw["failure"]["reason_code"] != reason["code"]
+            or not isinstance(raw["failure"]["error_type"], str)
+            or not raw["failure"]["error_type"]
+        ):
+            raise ObservationValidationError(
+                "raw failure differs from compact result"
+            )
+    elif result["per_item_best_ranks"]:
+        _reconcile_raw(raw, manifest, result)
 
 
 def validate_result_files(
@@ -423,7 +608,7 @@ def validate_result_files(
         manifest,
         result,
         schema_dir=schema_dir,
-        raw_path=raw_path if raw_path.exists() else None,
+        raw_path=raw_path,
     )
 
 

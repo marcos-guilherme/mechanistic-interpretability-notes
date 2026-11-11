@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import os
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any, Callable
 import uuid
 
@@ -63,8 +66,6 @@ def execute_real_observation(
     provenance: dict[str, Any],
 ) -> dict[str, object]:
     """Run direct and pursuit readouts without constructing generation requests."""
-    runtime = load_pinned_runtime(config, provenance)
-    bundle = runtime.bundle
     dataset_path = (
         project_root
         / "data"
@@ -72,8 +73,48 @@ def execute_real_observation(
         / "evaluations"
         / "lens-eval-multihop.json"
     )
-    items = load_multihop_items(dataset_path)
-    audit = audit_tokenization(items, bundle.model.tokenizer)
+    try:
+        items = load_multihop_items(dataset_path)
+    except DatasetValidationError:
+        raise
+    except OSError as error:
+        raise DatasetValidationError(
+            "pinned multihop dataset is unavailable"
+        ) from error
+    runtime = load_pinned_runtime(config, provenance)
+    bundle = runtime.bundle
+    try:
+        audit = audit_tokenization(items, bundle.model.tokenizer)
+    except ValueError as error:
+        if not (
+            str(error) == "tokenization produced no token IDs"
+            or str(error).startswith("invalid literal for int()")
+        ):
+            raise
+        raise TokenizationError(
+            "observational tokenization audit failed"
+        ) from error
+    if len(audit) != len(items) or any(
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("intermediates"), (list, tuple))
+        or not entry["intermediates"]
+        or any(
+            not isinstance(intermediate, dict)
+            or not isinstance(intermediate.get("token_id"), int)
+            or intermediate["token_id"] < 0
+            or not isinstance(intermediate.get("token_ids"), (list, tuple))
+            or not intermediate["token_ids"]
+            or any(
+                not isinstance(token_id, int) or token_id < 0
+                for token_id in intermediate["token_ids"]
+            )
+            for intermediate in entry["intermediates"]
+        )
+        for entry in audit
+    ):
+        raise TokenizationError(
+            "observational tokenization audit is incomplete"
+        )
     all_layers = tuple(
         dict.fromkeys(int(layer) for layer in bundle.lens.source_layers)
     )
@@ -154,6 +195,73 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _publication_map(
+    *,
+    raw_path: Path,
+    manifest_path: Path,
+    result_path: Path,
+    figure_dir: Path,
+    staged_raw: Path | None,
+    staged_manifest: Path,
+    staged_result: Path,
+    staged_figure_dir: Path | None,
+) -> list[tuple[Path, Path | None]]:
+    publications: list[tuple[Path, Path | None]] = [
+        (raw_path, staged_raw),
+        (manifest_path, staged_manifest),
+        (result_path, staged_result),
+    ]
+    for stem in (
+        "observation_pass_at_k",
+        "observation_rank_heatmap",
+        "observation_panel",
+    ):
+        for suffix in (".png", ".svg"):
+            publications.append(
+                (
+                    figure_dir / f"{stem}{suffix}",
+                    (
+                        None
+                        if staged_figure_dir is None
+                        else staged_figure_dir / f"{stem}{suffix}"
+                    ),
+                )
+            )
+    return publications
+
+
+def _publish_files(
+    publications: list[tuple[Path, Path | None]],
+    staging: Path,
+) -> None:
+    """Publish a prepared artifact set, rolling back ordinary replace failures."""
+    backups = staging / "backups"
+    backups.mkdir()
+    originals: dict[Path, Path | None] = {}
+    for index, (target, _source) in enumerate(publications):
+        if target.exists():
+            backup = backups / f"{index}.bak"
+            shutil.copy2(target, backup)
+            originals[target] = backup
+        else:
+            originals[target] = None
+    try:
+        for target, source in publications:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source is None:
+                target.unlink(missing_ok=True)
+            else:
+                os.replace(source, target)
+    except BaseException:
+        for target, backup in originals.items():
+            if backup is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, target)
+        raise
+
+
 def run_observation_pipeline(
     project_root: str | Path,
     *,
@@ -173,71 +281,126 @@ def run_observation_pipeline(
     manifest_path = results_dir / "jspace_observation_manifest.json"
     result_path = results_dir / "jspace_observation.json"
     figure_dir = results_dir / "figures"
-    raw_path.unlink(missing_ok=True)
-    result_path.unlink(missing_ok=True)
-    for stem in (
-        "observation_pass_at_k",
-        "observation_rank_heatmap",
-        "observation_panel",
-    ):
-        for suffix in (".png", ".svg"):
-            (figure_dir / f"{stem}{suffix}").unlink(missing_ok=True)
-    try:
-        payload = (
-            execute()
-            if execute is not None
-            else execute_real_observation(
-                project_root=root,
-                config=resolved_config,
-                provenance=provenance,
-            )
-        )
-        if not isinstance(payload, dict):
-            raise TypeError("observational execute callback must return an object")
-        supplied_provenance = payload.get("provenance")
-        if isinstance(supplied_provenance, dict):
-            provenance = _observation_provenance(supplied_provenance)
-        atomic_write_json(raw_path, payload)
-        raw_hash = _file_sha256(raw_path)
-        manifest, result = build_observation_artifacts(
-            run_id=run_id,
-            started_at=started_at,
-            ended_at=_utc_now(),
-            provenance=provenance,
-            raw_artifact_sha256=raw_hash,
-            payload=payload,
-        )
-        atomic_write_json(manifest_path, manifest)
-        atomic_write_json(result_path, result)
-        if result["status"] == "success":
-            write_observation_figures(result, figure_dir)
-        return result
-    except EXPECTED_ERRORS as error:
-        manifest, result = build_observation_artifacts(
-            run_id=run_id,
-            started_at=started_at,
-            ended_at=_utc_now(),
-            provenance=provenance,
-            raw_artifact_sha256=None,
-            payload=None,
-            reason_code=_reason_code(error),
-        )
-        atomic_write_json(manifest_path, manifest)
-        atomic_write_json(result_path, result)
-        return result
-    except Exception:
-        result_path.unlink(missing_ok=True)
-        manifest, _result = build_observation_artifacts(
-            run_id=run_id,
-            started_at=started_at,
-            ended_at=_utc_now(),
-            provenance=provenance,
-            raw_artifact_sha256=None,
-            payload=None,
-            unexpected=True,
-        )
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".observation-run-",
+        dir=root,
+    ) as staging_name:
+        staging = Path(staging_name)
+        staged_raw = staging / "jspace_observation_raw.json"
+        staged_manifest = staging / "jspace_observation_manifest.json"
+        staged_result = staging / "jspace_observation.json"
+        staged_figure_dir = staging / "figures"
         try:
-            atomic_write_json(manifest_path, manifest)
+            payload = (
+                execute()
+                if execute is not None
+                else execute_real_observation(
+                    project_root=root,
+                    config=resolved_config,
+                    provenance=provenance,
+                )
+            )
+            if not isinstance(payload, dict):
+                raise TypeError(
+                    "observational execute callback must return an object"
+                )
+            supplied_provenance = payload.get("provenance")
+            if isinstance(supplied_provenance, dict):
+                provenance = _observation_provenance(supplied_provenance)
+            atomic_write_json(staged_raw, payload)
+            raw_hash = _file_sha256(staged_raw)
+            manifest, result = build_observation_artifacts(
+                run_id=run_id,
+                started_at=started_at,
+                ended_at=_utc_now(),
+                provenance=provenance,
+                raw_artifact_sha256=raw_hash,
+                payload=payload,
+            )
+            atomic_write_json(staged_manifest, manifest)
+            atomic_write_json(staged_result, result)
+            published_figures = None
+            if result["status"] == "success":
+                published_figures = write_observation_figures(
+                    result,
+                    staged_figure_dir,
+                )
+                if len(published_figures) != 6 or not all(
+                    path.is_file() and path.stat().st_size > 0
+                    for path in published_figures
+                ):
+                    raise RuntimeError(
+                        "observational figure set is incomplete"
+                    )
+            _publish_files(
+                _publication_map(
+                    raw_path=raw_path,
+                    manifest_path=manifest_path,
+                    result_path=result_path,
+                    figure_dir=figure_dir,
+                    staged_raw=staged_raw,
+                    staged_manifest=staged_manifest,
+                    staged_result=staged_result,
+                    staged_figure_dir=(
+                        staged_figure_dir
+                        if published_figures is not None
+                        else None
+                    ),
+                ),
+                staging,
+            )
+            return result
+        except EXPECTED_ERRORS as error:
+            reason_code = _reason_code(error)
+            atomic_write_json(
+                staged_raw,
+                {
+                    "provenance": provenance,
+                    "failure": {
+                        "reason_code": reason_code,
+                        "error_type": type(error).__name__,
+                    },
+                },
+            )
+            manifest, result = build_observation_artifacts(
+                run_id=run_id,
+                started_at=started_at,
+                ended_at=_utc_now(),
+                provenance=provenance,
+                raw_artifact_sha256=_file_sha256(staged_raw),
+                payload=None,
+                reason_code=reason_code,
+            )
+            atomic_write_json(staged_manifest, manifest)
+            atomic_write_json(staged_result, result)
+            _publish_files(
+                _publication_map(
+                    raw_path=raw_path,
+                    manifest_path=manifest_path,
+                    result_path=result_path,
+                    figure_dir=figure_dir,
+                    staged_raw=staged_raw,
+                    staged_manifest=staged_manifest,
+                    staged_result=staged_result,
+                    staged_figure_dir=None,
+                ),
+                staging,
+            )
+            return result
         except Exception:
-            pass
-        raise
+            if not manifest_path.exists():
+                manifest, _result = build_observation_artifacts(
+                    run_id=run_id,
+                    started_at=started_at,
+                    ended_at=_utc_now(),
+                    provenance=provenance,
+                    raw_artifact_sha256=None,
+                    payload=None,
+                    unexpected=True,
+                )
+                try:
+                    atomic_write_json(manifest_path, manifest)
+                except Exception:
+                    pass
+            raise

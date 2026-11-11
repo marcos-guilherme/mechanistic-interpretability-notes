@@ -11,7 +11,11 @@ import jsonschema
 import pytest
 
 from jspace_llama.jsonio import document_sha256
-from jspace_llama.observation_data import DATASET_SHA256, PANEL_NAMES
+from jspace_llama.observation_data import (
+    DATASET_SHA256,
+    PANEL_NAMES,
+    MultihopItem,
+)
 from jspace_llama.runtime import AssetLoadError
 
 
@@ -192,6 +196,39 @@ def _load_validator():
     return module
 
 
+def _published_observation_paths(root: Path) -> list[Path]:
+    return [
+        root / "artifacts" / "jspace_observation_raw.json",
+        root / "results" / "jspace_observation_manifest.json",
+        root / "results" / "jspace_observation.json",
+        *[
+            root / "results" / "figures" / f"{stem}{suffix}"
+            for stem in (
+                "observation_pass_at_k",
+                "observation_rank_heatmap",
+                "observation_panel",
+            )
+            for suffix in (".png", ".svg")
+        ],
+    ]
+
+
+def _rewrite_raw_and_hashes(
+    raw_path: Path,
+    raw: dict[str, object],
+    manifest: dict[str, object],
+    result: dict[str, object],
+) -> None:
+    raw_path.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest["raw_artifact_sha256"] = hashlib.sha256(
+        raw_path.read_bytes()
+    ).hexdigest()
+    result["manifest_sha256"] = document_sha256(manifest)
+
+
 def test_observation_success_depends_on_completeness_not_hits(
     tmp_path: Path,
 ) -> None:
@@ -227,6 +264,37 @@ def test_observation_pipeline_preserves_both_causal_results(
     )
 
     assert {path: path.read_bytes() for path in causal} == causal
+
+
+def test_prepublication_failure_preserves_all_prior_observation_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    paths = _published_observation_paths(tmp_path)
+    before = {}
+    for index, path in enumerate(paths):
+        content = f"prior-{index}".encode()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        before[path] = content
+    monkeypatch.setattr(
+        pipeline,
+        "write_observation_figures",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("render failed before publication")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        pipeline.run_observation_pipeline(
+            project_root=tmp_path,
+            execute=complete_payload,
+        )
+
+    assert {path: path.read_bytes() for path in paths} == before
+    assert list(tmp_path.glob(".observation-run-*")) == []
 
 
 def test_observation_hashes_raw_and_validates_strict_schemas(
@@ -311,6 +379,88 @@ def test_incomplete_run_is_inconclusive_and_validator_recomputes_claims(
         )
 
 
+def test_validator_requires_raw_artifact(tmp_path: Path) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    run_observation_pipeline(tmp_path, execute=complete_payload)
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    raw_path.unlink()
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="raw artifact|required|regular file",
+    ):
+        validator.validate_result_files(
+            tmp_path / "results",
+            SCHEMAS,
+            raw_path,
+        )
+
+
+def test_validator_rejects_raw_rank_that_contradicts_compact(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["direct"]["items"][0]["intermediates"][0]["jlens"]["ranks"][0][
+        "rank"
+    ] = 99
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="raw.*compact|direct.*differ",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
+def test_validator_rejects_arbitrary_posix_absolute_path(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    forbidden = "/var/lib/private/model.pt"
+    result["panel"][0]["top_tokens"]["jlens"][0]["tokens"][0][
+        "token"
+    ] = forbidden
+    raw["panel"]["items"][0]["top_tokens"]["jlens"][0]["tokens"][0][
+        "token"
+    ] = forbidden
+    raw["direct"]["items"][0]["top_tokens"]["jlens"][0]["tokens"][0][
+        "token"
+    ] = forbidden
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="absolute/local path",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
 def test_expected_errors_write_inconclusive_but_programming_errors_reraise(
     tmp_path: Path,
 ) -> None:
@@ -325,6 +475,23 @@ def test_expected_errors_write_inconclusive_but_programming_errors_reraise(
     )
     assert outcome["status"] == "inconclusive"
     assert outcome["reason"]["code"] == "asset_load_failed"
+    expected_manifest = json.loads(
+        (
+            tmp_path
+            / "results"
+            / "jspace_observation_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    _load_validator().validate_documents(
+        expected_manifest,
+        outcome,
+        schema_dir=SCHEMAS,
+        raw_path=(
+            tmp_path
+            / "artifacts"
+            / "jspace_observation_raw.json"
+        ),
+    )
 
     with pytest.raises(TypeError, match="programming bug"):
         run_observation_pipeline(
@@ -340,6 +507,113 @@ def test_expected_errors_write_inconclusive_but_programming_errors_reraise(
         / "results"
         / "jspace_observation.json"
     ).exists()
+
+
+def test_missing_dataset_is_expected_before_asset_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    monkeypatch.setattr(
+        pipeline,
+        "load_pinned_runtime",
+        lambda *args, **kwargs: pytest.fail(
+            "dataset must be checked before loading assets"
+        ),
+    )
+
+    outcome = pipeline.run_observation_pipeline(
+        tmp_path,
+        base_provenance=_provenance(),
+    )
+
+    assert outcome["status"] == "inconclusive"
+    assert outcome["reason"]["code"] == "dataset_invalid"
+
+
+def test_empty_tokenization_is_expected_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    item = MultihopItem(
+        name="item",
+        prompt="prompt ",
+        target="target",
+        intermediates=("intermediate",),
+    )
+    tokenizer = SimpleNamespace(
+        encode=lambda *args, **kwargs: [],
+    )
+    bundle = SimpleNamespace(
+        model=SimpleNamespace(tokenizer=tokenizer),
+        dictionary=object(),
+        lens=SimpleNamespace(source_layers=(12,)),
+        layers=(12,),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_multihop_items",
+        lambda path: (item,),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_pinned_runtime",
+        lambda config, provenance: SimpleNamespace(bundle=bundle),
+    )
+
+    outcome = pipeline.run_observation_pipeline(
+        tmp_path,
+        base_provenance=_provenance(),
+    )
+
+    assert outcome["status"] == "inconclusive"
+    assert outcome["reason"]["code"] == "tokenization_failed"
+
+
+def test_unrelated_tokenization_programming_error_is_reraised(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    item = MultihopItem(
+        name="item",
+        prompt="prompt ",
+        target="target",
+        intermediates=("intermediate",),
+    )
+    bundle = SimpleNamespace(
+        model=SimpleNamespace(tokenizer=object()),
+        dictionary=object(),
+        lens=SimpleNamespace(source_layers=(12,)),
+        layers=(12,),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_multihop_items",
+        lambda path: (item,),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_pinned_runtime",
+        lambda config, provenance: SimpleNamespace(bundle=bundle),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "audit_tokenization",
+        lambda items, tokenizer: (_ for _ in ()).throw(
+            ValueError("programming bug")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="programming bug"):
+        pipeline.run_observation_pipeline(
+            tmp_path,
+            base_provenance=_provenance(),
+        )
 
 
 def test_observation_module_neither_imports_interventions_nor_generates() -> None:

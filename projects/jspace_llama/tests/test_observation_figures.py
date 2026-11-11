@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import matplotlib
@@ -149,6 +150,34 @@ def test_figure_matrices_are_deterministic() -> None:
     assert first == second
     assert first["pass_at_k"]["jlens_band"] == [0.2, 0.4, 0.6]
     assert first["rank_heatmap"]["shape"] == [93, 17]
+
+
+def test_panel_rows_render_every_expected_intermediate_variant() -> None:
+    from jspace_llama.observation_figures import (
+        _panel_rows,
+        build_figure_matrices,
+    )
+
+    result = compact_result()
+    item = next(
+        entry
+        for entry in result["panel"]
+        if entry["name"] == "nhop-primary-planet"
+    )
+    second = copy.deepcopy(item["intermediates"][0])
+    second["text"] = "second expected hop"
+    second["jlens"]["best_layer"] = 13
+    second["jlens"]["best_rank"] = 2
+    item["intermediates"].append(second)
+
+    row = next(
+        entry
+        for entry in _panel_rows(build_figure_matrices(result))
+        if entry[0] == "nhop-primary-planet"
+    )
+
+    assert row[1] == "intermediate-10\nsecond expected hop"
+    assert row[2] == "L12 / 11\nL13 / 2"
 
 
 def test_all_figure_families_write_png_and_svg(tmp_path: Path) -> None:

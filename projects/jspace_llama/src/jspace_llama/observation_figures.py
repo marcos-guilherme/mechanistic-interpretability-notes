@@ -141,26 +141,37 @@ def _first_tokens(slots: object, *, limit: int = 3) -> str:
     return ", ".join(tokens) if tokens else "—"
 
 
-def _panel_figure(matrices: dict[str, object]) -> plt.Figure:
-    panel = matrices["panel"]
-    figure, axis = plt.subplots(figsize=(13, 9), dpi=120)
-    axis.axis("off")
+def _panel_rows(matrices: dict[str, object]) -> list[list[str]]:
     rows: list[list[str]] = []
-    for item in panel:
-        intermediate = item["intermediates"][0]
-        jlens = intermediate["jlens"]
+    for item in matrices["panel"]:
+        intermediates = item["intermediates"]
         rows.append(
             [
                 str(item["name"]),
-                str(intermediate["text"]),
-                f"L{jlens['best_layer']} / {jlens['best_rank']}",
+                "\n".join(
+                    str(intermediate["text"])
+                    for intermediate in intermediates
+                ),
+                "\n".join(
+                    (
+                        f"L{intermediate['jlens']['best_layer']} / "
+                        f"{intermediate['jlens']['best_rank']}"
+                    )
+                    for intermediate in intermediates
+                ),
                 _first_tokens(item["top_tokens"]["jlens"]),
                 _first_tokens(item["top_tokens"]["logit_lens"]),
                 _first_tokens(item["pursuit"]),
             ]
         )
+    return rows
+
+
+def _panel_figure(matrices: dict[str, object]) -> plt.Figure:
+    figure, axis = plt.subplots(figsize=(13, 9), dpi=120)
+    axis.axis("off")
     table = axis.table(
-        cellText=rows,
+        cellText=_panel_rows(matrices),
         colLabels=(
             "Item",
             "Expected intermediate",
