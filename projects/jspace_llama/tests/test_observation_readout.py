@@ -166,13 +166,24 @@ def test_direct_readout_keeps_prompts_methods_and_scopes_distinct() -> None:
         {"layer": 2, "rank": 1},
         {"layer": 3, "rank": 2},
     ]
-    assert first["jlens"]["band_best_rank"] == 1
-    assert first["jlens"]["band_best_layer"] == 2
-    assert first["logit_lens"]["best_rank"] == 1
+    assert first["jlens"]["best_rank"] == 1
+    assert first["jlens"]["best_layer"] == 2
+    assert first["jlens"]["all_layers_best_rank"] == 1
+    assert first["jlens"]["all_layers_best_layer"] == 2
+    assert "band_best_rank" not in first["jlens"]
+    assert first["logit_lens"]["best_rank"] == 3
+    assert first["logit_lens"]["best_layer"] == 2
+    assert first["logit_lens"]["all_layers_best_rank"] == 1
+    assert first["logit_lens"]["all_layers_best_layer"] == 1
+    assert [slot["layer"] for slot in panel["top_tokens"]["jlens"]] == [2, 3]
+    assert [slot["layer"] for slot in panel["top_tokens"]["logit_lens"]] == [
+        2,
+        3,
+    ]
     assert panel["top_tokens"]["jlens"][0] == {
-        "layer": 1,
+        "layer": 2,
         "tokens": [
-            {"token_id": 2, "token": "token-2", "rank": 1},
+            {"token_id": 1, "token": "token-1", "rank": 1},
             {"token_id": 3, "token": "token-3", "rank": 2},
         ],
     }

@@ -117,7 +117,9 @@ def _metric_records(
     single_token_only: bool,
 ) -> list[dict[str, object]]:
     projected: list[dict[str, object]] = []
-    rank_key = "band_best_rank" if scope == "band" else "best_rank"
+    rank_key = (
+        "best_rank" if scope == "band" else "all_layers_best_rank"
+    )
     for record in records:
         intermediates = [
             {"best_rank": intermediate[method][rank_key]}
@@ -164,7 +166,10 @@ def evaluate_direct_readout(
 ) -> dict[str, object]:
     """Rank audited intermediate tokens without generation or intervention."""
     layers = list(dict.fromkeys(int(layer) for layer in all_layers))
-    band = frozenset(int(layer) for layer in band_layers)
+    band_layer_list = list(
+        dict.fromkeys(int(layer) for layer in band_layers)
+    )
+    band = frozenset(band_layer_list)
     if not layers:
         raise ValueError("all_layers must not be empty")
     if not band or not band <= set(layers):
@@ -227,19 +232,22 @@ def evaluate_direct_readout(
                     }
                     for layer in layers
                 ]
-                best_rank, best_layer = _best_rank(ranks, frozenset(layers))
-                band_best_rank, band_best_layer = _best_rank(ranks, band)
+                best_rank, best_layer = _best_rank(ranks, band)
+                all_layers_best_rank, all_layers_best_layer = _best_rank(
+                    ranks,
+                    frozenset(layers),
+                )
                 intermediate[method] = {
                     "ranks": ranks,
                     "best_rank": best_rank,
                     "best_layer": best_layer,
-                    "band_best_rank": band_best_rank,
-                    "band_best_layer": band_best_layer,
+                    "all_layers_best_rank": all_layers_best_rank,
+                    "all_layers_best_layer": all_layers_best_layer,
                 }
             if item.name in detailed:
                 top_tokens[method] = _top_tokens(
                     logits_by_layer,
-                    layers,
+                    band_layer_list,
                     tokenizer,
                     top,
                 )
