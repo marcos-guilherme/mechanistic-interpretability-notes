@@ -278,7 +278,16 @@ def test_bootstrap_uses_locked_metadata_and_editable_install(tmp_path: Path) -> 
     assert ["uv", "export", "--locked"] == commands[1][:3]
     assert "--project" in commands[1]
     assert str(project) in commands[1]
-    assert ["uv", "pip", "install", "--system"] == commands[2][:4]
+    assert commands[2] == [
+        "uv",
+        "pip",
+        "install",
+        "--system",
+        "--reinstall-package",
+        "matplotlib",
+        "--requirement",
+        str(requirements),
+    ]
     assert commands[3][-2:] == ["--editable", str(project)]
 
 

@@ -24,6 +24,35 @@ LOCKED_REQUIREMENTS = Path("/tmp/jspace-locked-requirements.txt")
 SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
 UPGRADED_MODULE_ROOTS = frozenset({"matplotlib"})
+MATPLOTLIB_SMOKE_SCRIPT = """\
+import importlib.metadata
+import io
+
+import matplotlib
+
+matplotlib.use("svg")
+
+from matplotlib import ft2font
+from matplotlib.backends.backend_svg import FigureCanvasSVG
+from matplotlib.figure import Figure
+from matplotlib.text import Text
+
+installed_version = importlib.metadata.version("matplotlib")
+if matplotlib.__version__ != installed_version:
+    raise RuntimeError(
+        f"Matplotlib metadata mismatch: "
+        f"{matplotlib.__version__} != {installed_version}"
+    )
+_ = Text.get_fontfeatures
+_ = ft2font.CharacterCodeType
+figure = Figure()
+canvas = FigureCanvasSVG(figure)
+figure.text(0.5, 0.5, "bootstrap smoke")
+output = io.BytesIO()
+canvas.print_svg(output)
+if not output.getvalue():
+    raise RuntimeError("Matplotlib SVG smoke render was empty")
+"""
 
 
 def consume_success_nonce() -> str:
@@ -286,6 +315,8 @@ def dependency_commands(
             "pip",
             "install",
             "--system",
+            "--reinstall-package",
+            "matplotlib",
             "--requirement",
             str(requirements),
         ],
@@ -307,6 +338,14 @@ def dependency_commands(
             "torchaudio",
         ],
     ]
+
+
+def matplotlib_smoke_command() -> list[str]:
+    return [sys.executable, "-c", MATPLOTLIB_SMOKE_SCRIPT]
+
+
+def run_matplotlib_smoke_check() -> None:
+    run_checked(matplotlib_smoke_command())
 
 
 def print_runtime_diagnostics(torch_module: Any) -> None:
@@ -333,6 +372,7 @@ def main() -> int:
 
     print_runtime_diagnostics(torch)
     migrate_same_session(project, LEGACY_PROJECT)
+    run_matplotlib_smoke_check()
     print(f"{SUCCESS_MARKER}:{nonce}")
     return 0
 

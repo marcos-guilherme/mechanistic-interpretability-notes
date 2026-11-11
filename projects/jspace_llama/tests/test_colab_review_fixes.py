@@ -146,7 +146,7 @@ def test_bootstrap_marker_is_emitted_only_after_success(
 ) -> None:
     bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_main_marker")
     project = tmp_path / "jspace_llama"
-    migration_calls: list[tuple[Path, Path]] = []
+    events: list[str] = []
     monkeypatch.setattr(
         bootstrap,
         "replace_project_tree",
@@ -156,27 +156,54 @@ def test_bootstrap_marker_is_emitted_only_after_success(
     monkeypatch.setattr(
         bootstrap,
         "dependency_commands",
-        lambda project, requirements: [],
+        lambda project, requirements: [["locked-install"]],
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_checked",
+        lambda command: events.append("install"),
     )
     monkeypatch.setattr(
         bootstrap,
         "migrate_same_session",
-        lambda active_project, legacy: migration_calls.append(
-            (active_project, legacy)
-        ),
+        lambda active_project, legacy: events.append("migration"),
         raising=False,
     )
-    monkeypatch.setattr(bootstrap, "print_runtime_diagnostics", lambda torch: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "print_runtime_diagnostics",
+        lambda torch: events.append("diagnostics"),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "run_matplotlib_smoke_check",
+        lambda: events.append("smoke"),
+        raising=False,
+    )
     monkeypatch.setitem(sys.modules, "torch", object())
     nonce = "c" * 64
     monkeypatch.setenv(bootstrap.SUCCESS_NONCE_ENV, nonce)
 
     assert bootstrap.main() == 0
-    assert migration_calls == [(project, bootstrap.LEGACY_PROJECT)]
+    assert events == ["install", "diagnostics", "migration", "smoke"]
     assert (
         capsys.readouterr().out.strip()
         == f"{bootstrap.SUCCESS_MARKER}:{nonce}"
     )
+
+
+def test_bootstrap_matplotlib_smoke_check_uses_clean_child_process() -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_matplotlib_smoke")
+
+    command = bootstrap.matplotlib_smoke_command()
+
+    assert command[:2] == [sys.executable, "-c"]
+    script = command[2]
+    assert "importlib.metadata.version" in script
+    assert "matplotlib.__version__" in script
+    assert "Text.get_fontfeatures" in script
+    assert "ft2font.CharacterCodeType" in script
+    assert "FigureCanvasSVG" in script
 
 
 def test_local_runner_rejects_missing_remote_success_marker(
