@@ -92,7 +92,7 @@ observacionais no nível dos prompts, mas não contém saídas geradas nem
 continuações. O manifesto vincula seus bytes por SHA-256, e
 `validate_observation.py` usa o conteúdo para reconciliar de forma independente
 tokenização, ranks, painel e métricas com os JSONs compactos. O pack e o fetch
-aplicam parsing JSON estrito, caminho exato e limite de 1 MiB; o fetch também
+aplicam parsing JSON estrito, caminho exato e limite de 5 MiB; o fetch também
 faz a validação limitada do TAR em duas passagens. No destino, os nove arquivos
 entram na mesma operação transacional com backup e rollback.
 

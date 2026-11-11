@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import re
 import struct
@@ -456,6 +457,105 @@ def observation_payloads() -> dict[str, bytes]:
     return payloads
 
 
+def production_shaped_observation_raw_bytes() -> bytes:
+    layers = list(range(32))
+    panel_items = []
+    for item_index in range(12):
+        top_tokens = {
+            method: [
+                {
+                    "layer": layer,
+                    "tokens": [
+                        {
+                            "token_id": token_index,
+                            "token": (
+                                f"{method}-item-{item_index:02d}-"
+                                f"layer-{layer:02d}-token-{token_index:02d}"
+                            ),
+                            "rank": token_index + 1,
+                        }
+                        for token_index in range(40)
+                    ],
+                }
+                for layer in layers
+            ]
+            for method in ("jlens", "logit_lens")
+        }
+        intermediate = {
+            "text": f"intermediate-{item_index}",
+            "token_id": item_index,
+            "single_token": True,
+        }
+        for method in ("jlens", "logit_lens"):
+            intermediate[method] = {
+                "ranks": [
+                    {"layer": layer, "rank": item_index + 1}
+                    for layer in layers
+                ],
+                "best_rank": item_index + 1,
+                "best_layer": 12,
+            }
+        panel_items.append(
+            {
+                "name": f"panel-item-{item_index:02d}",
+                "prompt": f"production-shaped prompt {item_index}",
+                "target": f"target-{item_index}",
+                "intermediates": [intermediate],
+                "top_tokens": top_tokens,
+            }
+        )
+
+    direct_items = list(panel_items)
+    for item_index in range(12, 93):
+        intermediate = {
+            "text": f"intermediate-{item_index}",
+            "token_id": item_index,
+            "single_token": True,
+        }
+        for method in ("jlens", "logit_lens"):
+            intermediate[method] = {
+                "ranks": [
+                    {"layer": layer, "rank": item_index + 1}
+                    for layer in layers
+                ],
+                "best_rank": item_index + 1,
+                "best_layer": 12,
+            }
+        direct_items.append(
+            {
+                "name": f"ordinary-item-{item_index:02d}",
+                "prompt": f"production-shaped prompt {item_index}",
+                "target": f"target-{item_index}",
+                "intermediates": [intermediate],
+            }
+        )
+
+    document = {
+        "provenance": {"source": "production-shaped-transport-fixture"},
+        "tokenization_audit": [
+            {
+                "name": item["name"],
+                "intermediates": [
+                    {
+                        "text": item["intermediates"][0]["text"],
+                        "token_id": item["intermediates"][0]["token_id"],
+                        "token_ids": [item["intermediates"][0]["token_id"]],
+                        "variant": "leading_space",
+                        "single_token": True,
+                    }
+                ],
+            }
+            for item in direct_items
+        ],
+        "direct": {"items": direct_items},
+        "panel": {"items": panel_items},
+        "layers": {"band": list(range(12, 29)), "all_layers": layers},
+    }
+    payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    assert 2_400_000 < len(payload) < 5 * 1_048_576
+    return payload
+
+
 def matplotlib_svg_bytes() -> bytes:
     import matplotlib
 
@@ -533,8 +633,9 @@ def test_result_profiles_are_exact_and_independent() -> None:
     assert pack.RESULT_SETS == runner.RESULT_SETS
     assert runner.result_allowlist("causal") == CAUSAL_RESULTS
     assert runner.result_allowlist("observation") == OBSERVATION_RESULTS
-    assert pack.result_size_limit(OBSERVATION_RAW) == 1_048_576
-    assert runner.result_size_limit(OBSERVATION_RAW) == 1_048_576
+    assert pack.result_size_limit(OBSERVATION_RAW) == 5 * 1_048_576
+    assert runner.result_size_limit(OBSERVATION_RAW) == 5 * 1_048_576
+    assert runner.decompressed_tar_limit("observation") == 44_044_800
     with pytest.raises(ValueError, match="unknown result set"):
         runner.result_allowlist("unknown")
     with pytest.raises(ValueError, match="unknown result set"):
@@ -929,6 +1030,70 @@ def test_observation_raw_sidecar_round_trips_with_exact_hash(
     assert hashlib.sha256(fetched_raw).digest() == hashlib.sha256(
         raw_payload
     ).digest()
+
+
+def test_production_shaped_observation_raw_over_2_4_mib_round_trips(
+    tmp_path: Path,
+) -> None:
+    pack = load_module(PACK_PATH, "pack_jspace_production_raw")
+    runner = load_module(RUNNER_PATH, "run_jspace_production_raw")
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    payloads = observation_payloads()
+    raw_payload = production_shaped_observation_raw_bytes()
+    payloads[OBSERVATION_RAW] = raw_payload
+    for name, payload in payloads.items():
+        path = remote / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    archive = tmp_path / "production-observation-results.tar.gz"
+
+    pack.pack_results(remote, archive, "observation")
+    runner.extract_results_archive(archive, local, "observation")
+
+    fetched_raw = (local / OBSERVATION_RAW).read_bytes()
+    assert fetched_raw == raw_payload
+    pack._validate_artifact(OBSERVATION_RAW, fetched_raw)
+    runner._validate_result_bytes(OBSERVATION_RAW, fetched_raw)
+
+
+@pytest.mark.parametrize("target", ["pack", "fetch"])
+def test_observation_raw_over_5_mib_rejects_on_both_ends(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    oversized_raw = (
+        b'{"provenance":{"source":"oversized-fixture"},"padding":"'
+        + b"A" * (5 * 1_048_576)
+        + b'"}'
+    )
+    payloads = observation_payloads()
+    payloads[OBSERVATION_RAW] = oversized_raw
+
+    if target == "pack":
+        pack = load_module(PACK_PATH, "pack_jspace_oversized_raw")
+        remote = tmp_path / "remote"
+        for name, payload in payloads.items():
+            path = remote / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+
+        with pytest.raises(ValueError, match="too large"):
+            pack.pack_results(
+                remote,
+                tmp_path / "oversized-pack.tar.gz",
+                "observation",
+            )
+        assert not (tmp_path / "oversized-pack.tar.gz").exists()
+    else:
+        runner = load_module(RUNNER_PATH, "run_jspace_oversized_raw")
+        archive = tmp_path / "oversized-fetch.tar.gz"
+        project = tmp_path / "project"
+        write_tar_payloads(archive, payloads)
+
+        with pytest.raises(ValueError, match="too large"):
+            runner.extract_results_archive(archive, project, "observation")
+        assert not project.exists()
 
 
 def test_observation_extract_reads_no_payload_before_complete_membership(
