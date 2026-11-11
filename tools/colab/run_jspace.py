@@ -37,12 +37,14 @@ PACK_SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
 RESULT_SET_ENV = "JSPACE_RESULT_SET"
 MAX_RESULT_BYTES = 1_048_576
+MAX_OBSERVATION_RAW_BYTES = 1_048_576
 MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
 MAX_FIGURE_BYTES = 5 * 1_048_576
 MAX_ARCHIVE_BYTES = 40 * 1_048_576
 MAX_IMAGE_DIMENSION = 10_000
 MAX_TAR_HEADER_OVERHEAD_BYTES = 1_048_576
 TAR_BLOCK_BYTES = 512
+OBSERVATION_RAW = "artifacts/jspace_observation_raw.json"
 RESULT_SETS = {
     "causal": frozenset(
         {
@@ -52,6 +54,7 @@ RESULT_SETS = {
     ),
     "observation": frozenset(
         {
+            OBSERVATION_RAW,
             "results/jspace_observation_manifest.json",
             "results/jspace_observation.json",
             "results/jspace_observation_pass_at_k.png",
@@ -108,6 +111,8 @@ def result_allowlist(result_set: str) -> set[str]:
 
 
 def result_size_limit(name: str) -> int:
+    if name == OBSERVATION_RAW:
+        return MAX_OBSERVATION_RAW_BYTES
     if name == "results/jspace_observation.json":
         return MAX_OBSERVATION_JSON_BYTES
     if name.endswith((".png", ".svg")):
@@ -1056,14 +1061,27 @@ def _normalized_result_member(name: str) -> str:
     normalized = path.as_posix()
     if name != normalized:
         raise ValueError(f"unsafe result archive member: {name}")
-    if not normalized.startswith("results/"):
+    if (
+        not normalized.startswith("results/")
+        and normalized != OBSERVATION_RAW
+    ):
         raise ValueError(f"unsafe result archive member: {name}")
     return normalized
 
 
-def _validate_result_directories(project: Path) -> Path:
+def _validate_result_directories(
+    project: Path,
+    payloads: dict[str, bytes],
+) -> Path:
     results = project / "results"
-    for directory in (project, results):
+    directories = {
+        project,
+        *{
+            project / PurePosixPath(name).parent
+            for name in payloads
+        },
+    }
+    for directory in sorted(directories, key=lambda path: len(path.parts)):
         if os.path.lexists(directory):
             metadata = os.lstat(directory)
             if stat.S_ISLNK(metadata.st_mode):
@@ -1076,7 +1094,8 @@ def _validate_result_directories(project: Path) -> Path:
                 raise ValueError(
                     f"result destination is not a directory: {directory}"
                 )
-    results.mkdir(parents=True, exist_ok=True)
+    for directory in sorted(directories, key=lambda path: len(path.parts)):
+        directory.mkdir(parents=True, exist_ok=True)
     return results
 
 
@@ -1084,7 +1103,7 @@ def _replace_result_payloads(
     payloads: dict[str, bytes],
     project: Path,
 ) -> None:
-    results = _validate_result_directories(project)
+    results = _validate_result_directories(project, payloads)
     destinations: dict[str, Path] = {}
     metadata: dict[str, object | None] = {}
     for name in sorted(payloads):
@@ -1163,6 +1182,9 @@ def _scan_result_tar_members(
     members: list[tuple[str, int]] = []
     names: set[str] = set()
     total_size = 0
+    profile_payload_limit = sum(
+        result_size_limit(name) for name in allowlist
+    )
     for member in handle:
         name = _normalized_result_member(member.name)
         if name in names:
@@ -1179,7 +1201,7 @@ def _scan_result_tar_members(
         if member.size < 0 or member.size > size_limit:
             raise ValueError(f"result artifact is too large: {name}")
         total_size += member.size
-        if total_size > MAX_ARCHIVE_BYTES:
+        if total_size > profile_payload_limit:
             raise ValueError("result archive expands beyond size limit")
         names.add(name)
         members.append((name, member.size))

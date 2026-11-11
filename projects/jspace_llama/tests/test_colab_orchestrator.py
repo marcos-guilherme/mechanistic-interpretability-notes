@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 from pathlib import Path
@@ -403,7 +404,9 @@ CAUSAL_RESULTS = {
     "results/execution_manifest.json",
     "results/final_evaluation.json",
 }
+OBSERVATION_RAW = "artifacts/jspace_observation_raw.json"
 OBSERVATION_RESULTS = {
+    OBSERVATION_RAW,
     "results/jspace_observation_manifest.json",
     "results/jspace_observation.json",
     "results/jspace_observation_pass_at_k.png",
@@ -439,7 +442,9 @@ def png_with_invalid_compression_method() -> bytes:
 def observation_payloads() -> dict[str, bytes]:
     payloads: dict[str, bytes] = {}
     for name in OBSERVATION_RESULTS:
-        if name.endswith(".json"):
+        if name == OBSERVATION_RAW:
+            payloads[name] = b'{"raw_fixture":"observation"}'
+        elif name.endswith(".json"):
             payloads[name] = b"{}"
         elif name.endswith(".png"):
             payloads[name] = png_bytes()
@@ -528,6 +533,8 @@ def test_result_profiles_are_exact_and_independent() -> None:
     assert pack.RESULT_SETS == runner.RESULT_SETS
     assert runner.result_allowlist("causal") == CAUSAL_RESULTS
     assert runner.result_allowlist("observation") == OBSERVATION_RESULTS
+    assert pack.result_size_limit(OBSERVATION_RAW) == 1_048_576
+    assert runner.result_size_limit(OBSERVATION_RAW) == 1_048_576
     with pytest.raises(ValueError, match="unknown result set"):
         runner.result_allowlist("unknown")
     with pytest.raises(ValueError, match="unknown result set"):
@@ -548,8 +555,14 @@ def test_pack_observation_maps_pipeline_figures_to_canonical_names(
     pack = load_module(PACK_PATH, "pack_jspace_observation")
     root = tmp_path / "jspace_llama"
     results = root / "results"
+    artifacts = root / "artifacts"
     figures = results / "figures"
     figures.mkdir(parents=True)
+    artifacts.mkdir()
+    (artifacts / "jspace_observation_raw.json").write_text(
+        '{"raw_fixture":"observation"}',
+        encoding="utf-8",
+    )
     (results / "jspace_observation_manifest.json").write_text(
         "{}", encoding="utf-8"
     )
@@ -653,6 +666,7 @@ def test_observation_extract_rejects_hostile_artifact_without_replacement(
     sentinels = {}
     for result_name in OBSERVATION_RESULTS:
         destination = project / result_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(f"old:{result_name}".encode())
         sentinels[result_name] = destination.read_bytes()
     payloads = observation_payloads()
@@ -886,6 +900,37 @@ def test_result_extract_accepts_valid_bounded_profile_archive(
     } == payloads
 
 
+def test_observation_raw_sidecar_round_trips_with_exact_hash(
+    tmp_path: Path,
+) -> None:
+    pack = load_module(PACK_PATH, "pack_jspace_raw_round_trip")
+    runner = load_module(RUNNER_PATH, "run_jspace_raw_round_trip")
+    remote = tmp_path / "remote"
+    local = tmp_path / "local"
+    payloads = observation_payloads()
+    raw_payload = (
+        b'{"provenance":{"source":"fixture"},'
+        b'"tokenization_audit":[],"direct":{"items":[]},"panel":[]}'
+    )
+    payloads[OBSERVATION_RAW] = raw_payload
+    for name, payload in payloads.items():
+        path = remote / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    archive = tmp_path / "observation-results.tar.gz"
+
+    pack.pack_results(remote, archive, "observation")
+    runner.extract_results_archive(archive, local, "observation")
+
+    with tarfile.open(archive, "r:gz") as handle:
+        assert {member.name for member in handle} == OBSERVATION_RESULTS
+    fetched_raw = (local / OBSERVATION_RAW).read_bytes()
+    assert fetched_raw == raw_payload
+    assert hashlib.sha256(fetched_raw).digest() == hashlib.sha256(
+        raw_payload
+    ).digest()
+
+
 def test_observation_extract_reads_no_payload_before_complete_membership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -950,6 +995,7 @@ def test_observation_extract_rolls_back_replacement_failure(
     sentinels = {}
     for name in OBSERVATION_RESULTS:
         destination = project / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(f"old:{name}".encode())
         sentinels[name] = destination.read_bytes()
     archive = tmp_path / "results.tar.gz"

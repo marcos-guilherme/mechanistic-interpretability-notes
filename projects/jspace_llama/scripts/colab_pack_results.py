@@ -22,10 +22,12 @@ SUCCESS_MARKER = "JSPACE_RESULTS_PACK_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
 RESULT_SET_ENV = "JSPACE_RESULT_SET"
 MAX_RESULT_BYTES = 1_048_576
+MAX_OBSERVATION_RAW_BYTES = 1_048_576
 MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
 MAX_FIGURE_BYTES = 5 * 1_048_576
 MAX_ARCHIVE_BYTES = 40 * 1_048_576
 MAX_IMAGE_DIMENSION = 10_000
+OBSERVATION_RAW = "artifacts/jspace_observation_raw.json"
 RESULT_SETS = {
     "causal": frozenset(
         {
@@ -35,6 +37,7 @@ RESULT_SETS = {
     ),
     "observation": frozenset(
         {
+            OBSERVATION_RAW,
             "results/jspace_observation_manifest.json",
             "results/jspace_observation.json",
             "results/jspace_observation_pass_at_k.png",
@@ -63,6 +66,8 @@ def result_allowlist(result_set: str) -> set[str]:
 
 
 def result_size_limit(name: str) -> int:
+    if name == OBSERVATION_RAW:
+        return MAX_OBSERVATION_RAW_BYTES
     if name == "results/jspace_observation.json":
         return MAX_OBSERVATION_JSON_BYTES
     if name.endswith((".png", ".svg")):
@@ -483,15 +488,15 @@ def pack_results(
         )
 
     validate_result_directory(results)
-    resolved_results = results.resolve(strict=True)
+    resolved_root = root.resolve(strict=True)
     artifacts: list[tuple[str, object, bytes]] = []
     for name in sorted(allowlist):
         path = _result_source(root, name)
         try:
-            path.resolve(strict=True).relative_to(resolved_results)
+            path.resolve(strict=True).relative_to(resolved_root)
         except ValueError as error:
             raise ValueError(
-                f"result artifact resolves outside results: {path}"
+                f"result artifact resolves outside project: {path}"
             ) from error
         metadata, payload = _read_artifact(path, name)
         artifacts.append((name, metadata, payload))
