@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import jsonschema
@@ -223,6 +225,22 @@ def _published_observation_paths(root: Path) -> list[Path]:
     ]
 
 
+def _write_fake_figure_outputs(output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stem in (
+        "observation_pass_at_k",
+        "observation_rank_heatmap",
+        "observation_panel",
+    ):
+        (output_dir / f"{stem}.png").write_bytes(
+            b"\x89PNG\r\n\x1a\nfake"
+        )
+        (output_dir / f"{stem}.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
+            encoding="utf-8",
+        )
+
+
 def _rewrite_raw_and_hashes(
     raw_path: Path,
     raw: dict[str, object],
@@ -289,13 +307,15 @@ def test_prepublication_failure_preserves_all_prior_observation_outputs(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         before[path] = content
-    monkeypatch.setattr(
-        pipeline,
-        "write_observation_figures",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("render failed before publication")
-        ),
-    )
+    def fail_render(command: list[str], *, timeout: float):
+        return subprocess.CompletedProcess(
+            command,
+            returncode=1,
+            stdout=b"",
+            stderr=b"render failed before publication",
+        )
+
+    monkeypatch.setattr(pipeline, "_run_bounded_process", fail_render)
 
     with pytest.raises(RuntimeError, match="render failed"):
         pipeline.run_observation_pipeline(
@@ -305,6 +325,183 @@ def test_prepublication_failure_preserves_all_prior_observation_outputs(
 
     assert {path: path.read_bytes() for path in paths} == before
     assert list(tmp_path.glob(".observation-run-*")) == []
+
+
+def test_isolated_renderer_uses_controlled_command_timeout_and_cleans_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    observed: dict[str, object] = {}
+
+    def fake_run(command: list[str], *, timeout: float):
+        observed["command"] = command
+        observed["timeout"] = timeout
+        input_path = Path(command[command.index("--input") + 1])
+        output_dir = Path(command[command.index("--output-dir") + 1])
+        observed["input_path"] = input_path
+        assert input_path.is_file()
+        assert json.loads(input_path.read_text(encoding="utf-8"))[
+            "status"
+        ] == "success"
+        _write_fake_figure_outputs(output_dir)
+        return subprocess.CompletedProcess(
+            command,
+            returncode=0,
+            stdout=b"renderer output",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(pipeline, "_run_bounded_process", fake_run)
+    staging = tmp_path / "staging"
+    output_dir = staging / "figures"
+    staging.mkdir()
+
+    paths = pipeline._render_observation_figures_isolated(
+        {"status": "success"},
+        staging=staging,
+        output_dir=output_dir,
+    )
+
+    command = observed["command"]
+    assert command[:3] == [
+        sys.executable,
+        "-m",
+        "jspace_llama.observation_figure_cli",
+    ]
+    assert observed["timeout"] == pipeline.FIGURE_RENDER_TIMEOUT_SECONDS
+    assert Path(command[command.index("--input") + 1]).is_absolute()
+    assert Path(command[command.index("--output-dir") + 1]).is_absolute()
+    assert not observed["input_path"].exists()
+    assert len(paths) == 6
+
+
+def test_isolated_renderer_timeout_cleans_temporary_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    observed_input: Path | None = None
+
+    def time_out(command: list[str], *, timeout: float):
+        nonlocal observed_input
+        observed_input = Path(command[command.index("--input") + 1])
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(pipeline, "_run_bounded_process", time_out)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        pipeline._render_observation_figures_isolated(
+            {"status": "success"},
+            staging=staging,
+            output_dir=staging / "figures",
+        )
+
+    assert observed_input is not None
+    assert not observed_input.exists()
+
+
+def test_renderer_failure_diagnostics_are_bounded_and_input_is_cleaned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    observed_input: Path | None = None
+
+    def fail(command: list[str], *, timeout: float):
+        nonlocal observed_input
+        observed_input = Path(command[command.index("--input") + 1])
+        return subprocess.CompletedProcess(
+            command,
+            returncode=9,
+            stdout=b"o" * (pipeline.MAX_RENDER_OUTPUT_BYTES * 2),
+            stderr=b"e" * (pipeline.MAX_RENDER_OUTPUT_BYTES * 2),
+        )
+
+    monkeypatch.setattr(pipeline, "_run_bounded_process", fail)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    with pytest.raises(RuntimeError) as captured:
+        pipeline._render_observation_figures_isolated(
+            {"status": "success"},
+            staging=staging,
+            output_dir=staging / "figures",
+        )
+
+    assert len(str(captured.value)) < pipeline.MAX_RENDER_OUTPUT_BYTES * 3
+    assert "truncated" in str(captured.value)
+    assert observed_input is not None
+    assert not observed_input.exists()
+
+
+def test_renderer_subprocess_capture_is_bounded() -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    size = pipeline.MAX_RENDER_OUTPUT_BYTES * 2
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import os; "
+            f"os.write(1, b'o' * {size}); "
+            f"os.write(2, b'e' * {size})"
+        ),
+    ]
+
+    completed = pipeline._run_bounded_process(command, timeout=30)
+
+    assert completed.returncode == 0
+    assert len(completed.stdout) < pipeline.MAX_RENDER_OUTPUT_BYTES + 32
+    assert len(completed.stderr) < pipeline.MAX_RENDER_OUTPUT_BYTES + 32
+    assert completed.stdout.endswith(b"...[truncated]")
+    assert completed.stderr.endswith(b"...[truncated]")
+
+
+def test_poisoned_matplotlib_does_not_block_pipeline_import_or_prerender(
+    tmp_path: Path,
+) -> None:
+    script = r"""
+import sys
+from types import ModuleType
+
+poisoned = ModuleType("matplotlib")
+poisoned.__file__ = "poisoned-matplotlib.py"
+def fail_if_used(*args, **kwargs):
+    raise RuntimeError("poisoned matplotlib accessed")
+poisoned.use = fail_if_used
+sys.modules["matplotlib"] = poisoned
+from jspace_llama.observation_pipeline import run_observation_pipeline
+from jspace_llama.runtime import AssetLoadError
+assert "jspace_llama.observation_figures" not in sys.modules
+provenance = {
+    "source": {},
+    "model": {},
+    "lens": {},
+    "software": {},
+    "hardware": {},
+}
+result = run_observation_pipeline(
+    sys.argv[1],
+    execute=lambda: (_ for _ in ()).throw(AssetLoadError("stop before render")),
+    base_provenance=provenance,
+)
+assert result["reason"]["code"] == "asset_load_failed"
+assert "jspace_llama.observation_figures" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_observation_hashes_raw_and_validates_strict_schemas(
@@ -1035,6 +1232,7 @@ def test_observation_module_neither_imports_interventions_nor_generates() -> Non
         PROJECT / "src" / "jspace_llama" / "observation_pipeline.py"
     ).read_text(encoding="utf-8")
     assert "interventions" not in source
+    assert "from jspace_llama.observation_figures import" not in source
     assert ".generate(" not in source
 
 

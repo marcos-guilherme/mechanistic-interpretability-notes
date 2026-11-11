@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 from typing import Any, Callable
 import uuid
+import xml.etree.ElementTree as ET
 
 import torch
 
@@ -24,7 +28,6 @@ from jspace_llama.observation_data import (
     audit_tokenization,
     load_multihop_items,
 )
-from jspace_llama.observation_figures import write_observation_figures
 from jspace_llama.observation_panel import read_qualitative_panel
 from jspace_llama.observation_readout import evaluate_direct_readout
 from jspace_llama.pipeline import (
@@ -44,6 +47,15 @@ from jspace_llama.runtime import (
     ResourceExhaustionError,
     TokenizationError,
     require_cuda,
+)
+
+
+FIGURE_RENDER_TIMEOUT_SECONDS = 120.0
+MAX_RENDER_OUTPUT_BYTES = 64 * 1024
+FIGURE_STEMS = (
+    "observation_pass_at_k",
+    "observation_rank_heatmap",
+    "observation_panel",
 )
 
 
@@ -217,6 +229,150 @@ def _write_failure_raw(
     return _file_sha256(path)
 
 
+def _capture_bounded(stream: Any) -> bytes:
+    retained = bytearray()
+    truncated = False
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            break
+        remaining = MAX_RENDER_OUTPUT_BYTES - len(retained)
+        if remaining > 0:
+            retained.extend(chunk[:remaining])
+        if len(chunk) > remaining:
+            truncated = True
+    if truncated:
+        retained.extend(b"\n...[truncated]")
+    return bytes(retained)
+
+
+def _run_bounded_process(
+    command: list[str],
+    *,
+    timeout: float,
+) -> subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        bufsize=0,
+    )
+    assert process.stdout is not None
+    assert process.stderr is not None
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stdout_future = executor.submit(_capture_bounded, process.stdout)
+        stderr_future = executor.submit(_capture_bounded, process.stderr)
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            process.kill()
+            process.wait()
+            stdout = stdout_future.result()
+            stderr = stderr_future.result()
+            raise subprocess.TimeoutExpired(
+                command,
+                timeout,
+                output=stdout,
+                stderr=stderr,
+            ) from error
+        stdout = stdout_future.result()
+        stderr = stderr_future.result()
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _bounded_render_text(payload: object) -> str:
+    if isinstance(payload, bytes):
+        data = payload
+    else:
+        data = str(payload or "").encode("utf-8", errors="replace")
+    truncated = len(data) > MAX_RENDER_OUTPUT_BYTES
+    text = data[:MAX_RENDER_OUTPUT_BYTES].decode(
+        "utf-8",
+        errors="replace",
+    )
+    return text + ("\n...[truncated]" if truncated else "")
+
+
+def _expected_figure_paths(output_dir: Path) -> list[Path]:
+    return [
+        output_dir / f"{stem}{suffix}"
+        for stem in FIGURE_STEMS
+        for suffix in (".png", ".svg")
+    ]
+
+
+def _validate_staged_figures(output_dir: Path) -> list[Path]:
+    expected = _expected_figure_paths(output_dir)
+    if (
+        not output_dir.is_dir()
+        or output_dir.is_symlink()
+        or set(output_dir.iterdir()) != set(expected)
+    ):
+        raise RuntimeError("observational figure set is incomplete")
+    for path in expected:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+            raise RuntimeError("observational figure set is incomplete")
+        if path.suffix == ".png":
+            with path.open("rb") as handle:
+                if handle.read(8) != b"\x89PNG\r\n\x1a\n":
+                    raise RuntimeError("observational PNG output is invalid")
+        else:
+            text = path.read_text(encoding="utf-8")
+            if "<!DOCTYPE" in text or (
+                ET.fromstring(text).tag.rsplit("}", 1)[-1] != "svg"
+            ):
+                raise RuntimeError("observational SVG output is invalid")
+    return expected
+
+
+def _render_observation_figures_isolated(
+    result: dict[str, object],
+    *,
+    staging: Path,
+    output_dir: Path,
+) -> list[Path]:
+    input_path = (staging / ".observation-figure-input.json").resolve()
+    resolved_output = output_dir.resolve()
+    command = [
+        sys.executable,
+        "-m",
+        "jspace_llama.observation_figure_cli",
+        "--input",
+        str(input_path),
+        "--output-dir",
+        str(resolved_output),
+    ]
+    try:
+        atomic_write_json(input_path, result)
+        try:
+            completed = _run_bounded_process(
+                command,
+                timeout=FIGURE_RENDER_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                "observational figure renderer timed out"
+            ) from error
+        if completed.returncode != 0:
+            stdout = _bounded_render_text(completed.stdout)
+            stderr = _bounded_render_text(completed.stderr)
+            raise RuntimeError(
+                "observational figure renderer failed "
+                f"with exit code {completed.returncode}; "
+                f"stdout={stdout!r}; stderr={stderr!r}"
+            )
+        return _validate_staged_figures(resolved_output)
+    finally:
+        input_path.unlink(missing_ok=True)
+
+
 def _publication_map(
     *,
     raw_path: Path,
@@ -233,11 +389,7 @@ def _publication_map(
         (manifest_path, staged_manifest),
         (result_path, staged_result),
     ]
-    for stem in (
-        "observation_pass_at_k",
-        "observation_rank_heatmap",
-        "observation_panel",
-    ):
+    for stem in FIGURE_STEMS:
         for suffix in (".png", ".svg"):
             publications.append(
                 (
@@ -363,17 +515,11 @@ def run_observation_pipeline(
             atomic_write_json(staged_result, result)
             published_figures = None
             if result["status"] == "success":
-                published_figures = write_observation_figures(
+                published_figures = _render_observation_figures_isolated(
                     result,
-                    staged_figure_dir,
+                    staging=staging,
+                    output_dir=staged_figure_dir,
                 )
-                if len(published_figures) != 6 or not all(
-                    path.is_file() and path.stat().st_size > 0
-                    for path in published_figures
-                ):
-                    raise RuntimeError(
-                        "observational figure set is incomplete"
-                    )
             _publish_files(
                 _publication_map(
                     raw_path=raw_path,

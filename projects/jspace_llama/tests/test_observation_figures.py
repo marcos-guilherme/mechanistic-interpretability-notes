@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+import subprocess
+import sys
 
 import matplotlib
 import pytest
@@ -9,6 +11,7 @@ import pytest
 matplotlib.use("Agg")
 
 from jspace_llama.observation_data import PANEL_NAMES
+from jspace_llama.jsonio import atomic_write_json
 
 
 def compact_result() -> dict[str, object]:
@@ -190,6 +193,77 @@ def test_all_figure_families_write_png_and_svg(tmp_path: Path) -> None:
     assert all(path.stat().st_size > 0 for path in paths)
     assert all("<!DOCTYPE" not in path.read_text() for path in paths if path.suffix == ".svg")
     assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_figure_cli_renders_in_current_interpreter_child(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_figures import write_observation_figures
+
+    input_path = tmp_path / "compact.json"
+    output_dir = tmp_path / "figures"
+    direct_dir = tmp_path / "direct"
+    result = compact_result()
+    atomic_write_json(input_path, result)
+    direct_paths = write_observation_figures(result, direct_dir)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jspace_llama.observation_figure_cli",
+            "--input",
+            str(input_path.resolve()),
+            "--output-dir",
+            str(output_dir.resolve()),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    paths = sorted(output_dir.iterdir())
+    assert len(paths) == 6
+    assert {path.suffix for path in paths} == {".png", ".svg"}
+    assert all(path.stat().st_size > 0 for path in paths)
+    assert {
+        path.name: path.read_bytes() for path in paths
+    } == {
+        path.name: path.read_bytes() for path in direct_paths
+    }
+
+
+def test_figure_cli_rejects_non_strict_json_before_render(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "duplicate.json"
+    output_dir = tmp_path / "figures"
+    input_path.write_text(
+        '{"status":"success","status":"success"}',
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jspace_llama.observation_figure_cli",
+            "--input",
+            str(input_path.resolve()),
+            "--output-dir",
+            str(output_dir.resolve()),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert completed.returncode != 0
+    assert "duplicate JSON key" in completed.stderr
+    assert not output_dir.exists()
 
 
 def test_figure_generation_failure_preserves_all_existing_destinations(
