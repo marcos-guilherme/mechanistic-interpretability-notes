@@ -254,6 +254,99 @@ def test_direct_readout_rejects_malformed_numerical_outputs(
         )
 
 
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        None,
+        (),
+        ({"unused": torch.tensor([0.0])},),
+        (
+            {1: torch.tensor([[0.0, 1.0]])},
+            torch.empty(0),
+            torch.empty(0),
+            torch.empty(0),
+        ),
+        [
+            {1: torch.tensor([[0.0, 1.0]])},
+            torch.empty(0),
+            torch.empty(0),
+        ],
+    ],
+    ids=["none", "empty-tuple", "one-tuple", "four-tuple", "list"],
+)
+def test_direct_readout_maps_malformed_lens_envelopes(
+    envelope: object,
+) -> None:
+    model = GenerateForbiddenModel()
+    dictionary = FakeDictionary()
+    dictionary.lens.apply = lambda *args, **kwargs: envelope
+    item = MultihopItem("one", "raw final space ", "target", ("middle",))
+    audit = (
+        {
+            "name": "one",
+            "prompt": item.prompt,
+            "prompt_token_ids": [1, 2],
+            "intermediates": [
+                {
+                    "text": "middle",
+                    "token_id": 1,
+                    "single_token": True,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(
+        ObservationReadoutError,
+        match="lens output envelope",
+    ):
+        evaluate_direct_readout(
+            model,
+            dictionary,
+            (item,),
+            audit,
+            band_layers=(1,),
+            all_layers=(1,),
+            detail_names=frozenset(),
+        )
+
+
+def test_direct_readout_does_not_wrap_lens_apply_exceptions() -> None:
+    model = GenerateForbiddenModel()
+    dictionary = FakeDictionary()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("lens programming failure")
+
+    dictionary.lens.apply = fail
+    item = MultihopItem("one", "raw final space ", "target", ("middle",))
+    audit = (
+        {
+            "name": "one",
+            "prompt": item.prompt,
+            "prompt_token_ids": [1, 2],
+            "intermediates": [
+                {
+                    "text": "middle",
+                    "token_id": 1,
+                    "single_token": True,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="lens programming failure"):
+        evaluate_direct_readout(
+            model,
+            dictionary,
+            (item,),
+            audit,
+            band_layers=(1,),
+            all_layers=(1,),
+            detail_names=frozenset(),
+        )
+
+
 def test_direct_readout_rejects_lens_prompt_tokenization_drift() -> None:
     model = GenerateForbiddenModel()
     dictionary = FakeDictionary()

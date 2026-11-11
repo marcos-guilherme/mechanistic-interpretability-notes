@@ -284,7 +284,7 @@ def evaluate_direct_readout(
         }
         top_tokens: dict[str, object] = {}
         for method, use_jacobian in (("jlens", True), ("logit_lens", False)):
-            logits_by_layer, _, _ = dictionary.lens.apply(
+            lens_output = dictionary.lens.apply(
                 model,
                 item.prompt,
                 layers=layers,
@@ -292,6 +292,11 @@ def evaluate_direct_readout(
                 max_seq_len=512,
                 use_jacobian=use_jacobian,
             )
+            if not isinstance(lens_output, tuple) or len(lens_output) != 3:
+                raise ObservationReadoutError(
+                    "lens output envelope must be a three-item tuple"
+                )
+            logits_by_layer = lens_output[0]
             logits_by_layer = _validate_logits_by_layer(
                 logits_by_layer,
                 layers,
