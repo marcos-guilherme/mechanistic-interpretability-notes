@@ -74,6 +74,16 @@ REASON_MESSAGES = {
     "unexpected_error": "unexpected programming error; see traceback",
 }
 MAX_JSON_BYTES = 2_000_000
+AUDIT_ITEM_FIELDS = {"name", "intermediates"}
+AUDIT_INTERMEDIATE_FIELDS = {
+    "text",
+    "token_id",
+    "token_ids",
+    "variant",
+    "single_token",
+    "prompt_sha256",
+    "token_ids_sha256",
+}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -359,6 +369,90 @@ def _raw_tokenization_summary(
     }
 
 
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _token_ids_sha256(token_ids: list[int]) -> str:
+    canonical = "[" + ",".join(str(token_id) for token_id in token_ids) + "]"
+    return _text_sha256(canonical)
+
+
+def _validate_tokenization_audit(
+    audit: Any,
+    direct_records: list[dict[str, Any]],
+) -> None:
+    if not isinstance(audit, list) or len(audit) != len(direct_records):
+        raise ObservationValidationError(
+            "raw tokenization audit count is invalid"
+        )
+    for audit_item, direct_item in zip(audit, direct_records, strict=True):
+        if (
+            not isinstance(audit_item, dict)
+            or set(audit_item) != AUDIT_ITEM_FIELDS
+            or audit_item["name"] != direct_item["name"]
+            or not isinstance(audit_item["intermediates"], list)
+            or len(audit_item["intermediates"])
+            != len(direct_item["intermediates"])
+        ):
+            raise ObservationValidationError(
+                "raw tokenization audit item is invalid"
+            )
+        for audited, direct in zip(
+            audit_item["intermediates"],
+            direct_item["intermediates"],
+            strict=True,
+        ):
+            if (
+                not isinstance(audited, dict)
+                or set(audited) != AUDIT_INTERMEDIATE_FIELDS
+                or not isinstance(audited["text"], str)
+                or not audited["text"]
+                or not isinstance(audited["token_id"], int)
+                or isinstance(audited["token_id"], bool)
+                or audited["token_id"] < 0
+                or not isinstance(audited["token_ids"], list)
+                or not audited["token_ids"]
+                or any(
+                    not isinstance(token_id, int)
+                    or isinstance(token_id, bool)
+                    or token_id < 0
+                    for token_id in audited["token_ids"]
+                )
+                or audited["variant"] not in {"leading_space", "raw"}
+                or not isinstance(audited["single_token"], bool)
+            ):
+                raise ObservationValidationError(
+                    "raw tokenization audit fields are invalid"
+                )
+            prompt = (
+                " " + audited["text"].lstrip()
+                if audited["variant"] == "leading_space"
+                else audited["text"]
+            )
+            if (
+                audited["token_id"] != audited["token_ids"][0]
+                or audited["single_token"]
+                is not (len(audited["token_ids"]) == 1)
+                or audited["prompt_sha256"] != _text_sha256(prompt)
+                or audited["token_ids_sha256"]
+                != _token_ids_sha256(audited["token_ids"])
+                or (
+                    audited["text"],
+                    audited["token_id"],
+                    audited["single_token"],
+                )
+                != (
+                    direct["text"],
+                    direct["token_id"],
+                    direct["single_token"],
+                )
+            ):
+                raise ObservationValidationError(
+                    "raw tokenization audit hashes or claims do not recompute"
+                )
+
+
 def _project_raw_records(
     records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -440,38 +534,17 @@ def _reconcile_raw(
             raise ObservationValidationError(
                 "raw panel differs from raw direct records"
             )
+    _validate_tokenization_audit(
+        raw["tokenization_audit"],
+        raw["direct"]["items"],
+    )
     if (
-        [entry["name"] for entry in raw["tokenization_audit"]]
-        != [entry["name"] for entry in projected]
-        or _raw_tokenization_summary(raw["tokenization_audit"])
+        _raw_tokenization_summary(raw["tokenization_audit"])
         != result["tokenization_summary"]
     ):
         raise ObservationValidationError(
             "raw tokenization differs from compact result"
         )
-    for audit_item, direct_item in zip(
-        raw["tokenization_audit"],
-        raw["direct"]["items"],
-        strict=True,
-    ):
-        if [
-            (
-                intermediate["text"],
-                intermediate["token_id"],
-                intermediate["single_token"],
-            )
-            for intermediate in audit_item["intermediates"]
-        ] != [
-            (
-                intermediate["text"],
-                intermediate["token_id"],
-                intermediate["single_token"],
-            )
-            for intermediate in direct_item["intermediates"]
-        ]:
-            raise ObservationValidationError(
-                "raw tokenization differs from raw direct records"
-            )
     for method in METHODS:
         for scope in SCOPES:
             recomputed = _metric(projected, method, scope)
@@ -503,6 +576,47 @@ def _reconcile_raw(
                 raise ObservationValidationError(
                     "raw single-token metrics do not recompute"
                 )
+
+
+def _reconcile_raw_checked(
+    raw: dict[str, Any],
+    manifest: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    try:
+        _reconcile_raw(raw, manifest, result)
+    except ObservationValidationError:
+        raise
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        raise ObservationValidationError(
+            "raw observation structure is invalid"
+        ) from error
+
+
+def _validate_failure_raw(
+    raw: dict[str, Any],
+    manifest: dict[str, Any],
+    reason: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    failure = raw.get("failure")
+    if (
+        set(raw) != {"provenance", "failure"}
+        or raw.get("provenance") != manifest["provenance"]
+        or not isinstance(failure, dict)
+        or set(failure) != {"reason_code", "error_type"}
+        or failure["reason_code"] != reason["code"]
+        or not isinstance(failure["error_type"], str)
+        or not failure["error_type"]
+        or bool(result["per_item_best_ranks"])
+        or bool(result["panel"])
+        or bool(result["layers"]["band"])
+        or bool(result["layers"]["all_layers"])
+        or result["tokenization_summary"]["item_count"] != 0
+    ):
+        raise ObservationValidationError(
+            "raw failure differs from compact result"
+        )
 
 
 def validate_documents(
@@ -539,6 +653,7 @@ def validate_documents(
         manifest,
         raw_path=Path(raw_path),
     )
+    _reject_forbidden(raw, "$raw")
     complete = _validate_counts_and_claims(result)
     provenance_complete = _provenance_complete(manifest["provenance"])
     expected_status = (
@@ -572,7 +687,7 @@ def validate_documents(
                 raise ObservationValidationError(
                     "raw observation is incomplete"
                 )
-            _reconcile_raw(raw, manifest, result)
+            _reconcile_raw_checked(raw, manifest, result)
         except (IndexError, KeyError, TypeError):
             raise ObservationValidationError(
                 "raw observation is incomplete"
@@ -582,19 +697,13 @@ def validate_documents(
             "inconclusive observation requires a reason"
         )
     elif "failure" in raw:
-        if (
-            set(raw) != {"provenance", "failure"}
-            or raw["provenance"] != manifest["provenance"]
-            or set(raw["failure"]) != {"reason_code", "error_type"}
-            or raw["failure"]["reason_code"] != reason["code"]
-            or not isinstance(raw["failure"]["error_type"], str)
-            or not raw["failure"]["error_type"]
-        ):
-            raise ObservationValidationError(
-                "raw failure differs from compact result"
-            )
-    elif result["per_item_best_ranks"]:
-        _reconcile_raw(raw, manifest, result)
+        _validate_failure_raw(raw, manifest, reason, result)
+    elif reason["code"] == "incomplete_provenance":
+        _reconcile_raw_checked(raw, manifest, result)
+    else:
+        raise ObservationValidationError(
+            "raw failure is required for inconclusive observation"
+        )
 
 
 def validate_result_files(

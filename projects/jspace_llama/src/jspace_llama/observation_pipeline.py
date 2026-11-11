@@ -43,6 +43,7 @@ from jspace_llama.runtime import (
     LensIntegrityError,
     ResourceExhaustionError,
     TokenizationError,
+    require_cuda,
 )
 
 
@@ -66,6 +67,7 @@ def execute_real_observation(
     provenance: dict[str, Any],
 ) -> dict[str, object]:
     """Run direct and pursuit readouts without constructing generation requests."""
+    require_cuda()
     dataset_path = (
         project_root
         / "data"
@@ -195,6 +197,26 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _write_failure_raw(
+    path: Path,
+    *,
+    provenance: dict[str, Any],
+    reason_code: str,
+    error_type: str,
+) -> str:
+    atomic_write_json(
+        path,
+        {
+            "provenance": provenance,
+            "failure": {
+                "reason_code": reason_code,
+                "error_type": error_type,
+            },
+        },
+    )
+    return _file_sha256(path)
+
+
 def _publication_map(
     *,
     raw_path: Path,
@@ -318,6 +340,25 @@ def run_observation_pipeline(
                 raw_artifact_sha256=raw_hash,
                 payload=payload,
             )
+            if (
+                result["status"] == "inconclusive"
+                and result["reason"]["code"] == "incomplete_observation"
+            ):
+                raw_hash = _write_failure_raw(
+                    staged_raw,
+                    provenance=provenance,
+                    reason_code="incomplete_observation",
+                    error_type="ObservationDataError",
+                )
+                manifest, result = build_observation_artifacts(
+                    run_id=run_id,
+                    started_at=started_at,
+                    ended_at=_utc_now(),
+                    provenance=provenance,
+                    raw_artifact_sha256=raw_hash,
+                    payload=None,
+                    reason_code="incomplete_observation",
+                )
             atomic_write_json(staged_manifest, manifest)
             atomic_write_json(staged_result, result)
             published_figures = None
@@ -353,22 +394,18 @@ def run_observation_pipeline(
             return result
         except EXPECTED_ERRORS as error:
             reason_code = _reason_code(error)
-            atomic_write_json(
+            raw_hash = _write_failure_raw(
                 staged_raw,
-                {
-                    "provenance": provenance,
-                    "failure": {
-                        "reason_code": reason_code,
-                        "error_type": type(error).__name__,
-                    },
-                },
+                provenance=provenance,
+                reason_code=reason_code,
+                error_type=type(error).__name__,
             )
             manifest, result = build_observation_artifacts(
                 run_id=run_id,
                 started_at=started_at,
                 ended_at=_utc_now(),
                 provenance=provenance,
-                raw_artifact_sha256=_file_sha256(staged_raw),
+                raw_artifact_sha256=raw_hash,
                 payload=None,
                 reason_code=reason_code,
             )

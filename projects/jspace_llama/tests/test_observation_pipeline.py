@@ -16,7 +16,7 @@ from jspace_llama.observation_data import (
     PANEL_NAMES,
     MultihopItem,
 )
-from jspace_llama.runtime import AssetLoadError
+from jspace_llama.runtime import AssetLoadError, CudaRequiredError
 
 
 PROJECT = Path(__file__).parents[1]
@@ -346,6 +346,43 @@ def test_incomplete_run_is_inconclusive_and_validator_recomputes_claims(
     )
     assert outcome["status"] == "inconclusive"
     assert outcome["reason"]["code"] == "incomplete_observation"
+    incomplete_manifest = json.loads(
+        (
+            tmp_path
+            / "results"
+            / "jspace_observation_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    incomplete_raw_path = (
+        tmp_path / "artifacts" / "jspace_observation_raw.json"
+    )
+    validator = _load_validator()
+    validator.validate_documents(
+        incomplete_manifest,
+        outcome,
+        schema_dir=SCHEMAS,
+        raw_path=incomplete_raw_path,
+    )
+    contradictory_raw = json.loads(
+        incomplete_raw_path.read_text(encoding="utf-8")
+    )
+    contradictory_raw["failure"]["reason_code"] = "dataset_invalid"
+    _rewrite_raw_and_hashes(
+        incomplete_raw_path,
+        contradictory_raw,
+        incomplete_manifest,
+        outcome,
+    )
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="raw failure differs",
+    ):
+        validator.validate_documents(
+            incomplete_manifest,
+            outcome,
+            schema_dir=SCHEMAS,
+            raw_path=incomplete_raw_path,
+        )
 
     complete = run_observation_pipeline(
         project_root=tmp_path / "complete",
@@ -376,6 +413,72 @@ def test_incomplete_run_is_inconclusive_and_validator_recomputes_claims(
                 / "artifacts"
                 / "jspace_observation_raw.json"
             ),
+        )
+
+
+def test_incomplete_provenance_still_reconciles_complete_raw(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    payload = complete_payload()
+    payload["provenance"]["source"]["scoped_dirty"] = True
+    result = run_observation_pipeline(
+        tmp_path,
+        execute=lambda: payload,
+    )
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    validator = _load_validator()
+
+    assert result["status"] == "inconclusive"
+    assert result["reason"]["code"] == "incomplete_provenance"
+    validator.validate_documents(
+        manifest,
+        result,
+        schema_dir=SCHEMAS,
+        raw_path=raw_path,
+    )
+
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    failure_forgery = {
+        "provenance": manifest["provenance"],
+        "failure": {
+            "reason_code": "incomplete_provenance",
+            "error_type": "ForgedFailure",
+        },
+    }
+    _rewrite_raw_and_hashes(
+        raw_path,
+        failure_forgery,
+        manifest,
+        result,
+    )
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="raw failure.*measurements|raw failure differs",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+    raw["tokenization_audit"][0]["intermediates"][0][
+        "token_ids_sha256"
+    ] = "0" * 64
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="tokenization.*hash|hashes.*recompute",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
         )
 
 
@@ -461,6 +564,87 @@ def test_validator_rejects_arbitrary_posix_absolute_path(
         )
 
 
+def test_validator_rejects_forged_raw_for_incomplete_observation(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    payload = complete_payload()
+    payload["direct"]["items"].pop()
+    result = run_observation_pipeline(
+        tmp_path,
+        execute=lambda: payload,
+    )
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    forged = {
+        "provenance": manifest["provenance"],
+        "arbitrary": {"safe_value": "not a real observation"},
+    }
+    _rewrite_raw_and_hashes(raw_path, forged, manifest, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="raw.*unexpected|raw.*failure|raw.*observation",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda entry: entry.update(text="tampered text"),
+        lambda entry: entry.update(token_id=999),
+        lambda entry: entry.update(token_ids=[999]),
+        lambda entry: entry.update(variant="raw"),
+        lambda entry: entry.update(single_token=False),
+        lambda entry: entry.update(prompt_sha256="0" * 64),
+        lambda entry: entry.update(token_ids_sha256="0" * 64),
+    ],
+    ids=[
+        "text",
+        "token-id",
+        "token-ids",
+        "variant",
+        "single-token",
+        "prompt-hash",
+        "token-ids-hash",
+    ],
+)
+def test_validator_recomputes_complete_tokenization_audit_contract(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    mutate(raw["tokenization_audit"][0]["intermediates"][0])
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="tokenization|audit|hash",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
 def test_expected_errors_write_inconclusive_but_programming_errors_reraise(
     tmp_path: Path,
 ) -> None:
@@ -517,6 +701,15 @@ def test_missing_dataset_is_expected_before_asset_loading(
 
     monkeypatch.setattr(
         pipeline,
+        "require_cuda",
+        lambda: SimpleNamespace(
+            gpu_name="NVIDIA L4",
+            dtype="bfloat16",
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pipeline,
         "load_pinned_runtime",
         lambda *args, **kwargs: pytest.fail(
             "dataset must be checked before loading assets"
@@ -530,6 +723,44 @@ def test_missing_dataset_is_expected_before_asset_loading(
 
     assert outcome["status"] == "inconclusive"
     assert outcome["reason"]["code"] == "dataset_invalid"
+
+
+def test_cuda_guard_precedes_missing_dataset_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jspace_llama.observation_pipeline as pipeline
+
+    monkeypatch.setattr(
+        pipeline,
+        "require_cuda",
+        lambda: (_ for _ in ()).throw(
+            CudaRequiredError("CUDA unavailable")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_multihop_items",
+        lambda path: pytest.fail(
+            "dataset validation must follow the CUDA guard"
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "load_pinned_runtime",
+        lambda *args, **kwargs: pytest.fail(
+            "asset loading must not run without CUDA"
+        ),
+    )
+
+    outcome = pipeline.run_observation_pipeline(
+        tmp_path,
+        base_provenance=_provenance(),
+    )
+
+    assert outcome["status"] == "inconclusive"
+    assert outcome["reason"]["code"] == "cuda_required"
 
 
 def test_empty_tokenization_is_expected_failure(
@@ -557,6 +788,12 @@ def test_empty_tokenization_is_expected_failure(
         pipeline,
         "load_multihop_items",
         lambda path: (item,),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "require_cuda",
+        lambda: object(),
+        raising=False,
     )
     monkeypatch.setattr(
         pipeline,
@@ -595,6 +832,12 @@ def test_unrelated_tokenization_programming_error_is_reraised(
         pipeline,
         "load_multihop_items",
         lambda path: (item,),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "require_cuda",
+        lambda: object(),
+        raising=False,
     )
     monkeypatch.setattr(
         pipeline,
@@ -647,6 +890,12 @@ def test_real_observation_wiring_never_calls_model_generation(
         pipeline,
         "load_pinned_runtime",
         lambda config, provenance: SimpleNamespace(bundle=bundle),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "require_cuda",
+        lambda: object(),
+        raising=False,
     )
     monkeypatch.setattr(
         pipeline,
