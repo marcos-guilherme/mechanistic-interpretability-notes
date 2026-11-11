@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import matplotlib
 import pytest
@@ -264,6 +267,85 @@ def test_figure_cli_rejects_non_strict_json_before_render(
     assert completed.returncode != 0
     assert "duplicate JSON key" in completed.stderr
     assert not output_dir.exists()
+
+
+def test_figure_cli_rejects_input_above_five_mib(tmp_path: Path) -> None:
+    from jspace_llama import observation_figure_cli as cli
+
+    input_path = tmp_path / "oversized.json"
+    input_path.write_bytes(
+        b'{"artifact":"jspace_observation","status":"success","padding":"'
+        + b"x" * (5 * 1_048_576)
+        + b'"}'
+    )
+
+    with pytest.raises(ValueError, match="too large"):
+        cli._load_compact_result(input_path)
+
+
+def test_figure_cli_uses_bounded_file_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jspace_llama import observation_figure_cli as cli
+
+    input_path = tmp_path / "compact.json"
+    atomic_write_json(input_path, compact_result())
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda path: pytest.fail(f"unbounded read used for {path}"),
+    )
+
+    assert cli._load_compact_result(input_path)["status"] == "success"
+
+
+def test_figure_cli_rejects_file_changed_during_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jspace_llama import jsonio, observation_figure_cli as cli
+
+    input_path = tmp_path / "compact.json"
+    atomic_write_json(input_path, compact_result())
+    real_fstat = jsonio.os.fstat
+    calls = 0
+
+    def changed_fstat(descriptor: int):
+        nonlocal calls
+        calls += 1
+        actual = real_fstat(descriptor)
+        if calls == 1:
+            return actual
+        values = list(actual)
+        values[1] = actual.st_ino + 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(jsonio.os, "fstat", changed_fstat)
+
+    with pytest.raises(ValueError, match="changed during validation"):
+        cli._load_compact_result(input_path)
+
+
+def test_figure_cli_rejects_symlink_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jspace_llama import jsonio, observation_figure_cli as cli
+
+    input_path = tmp_path / "compact.json"
+    atomic_write_json(input_path, compact_result())
+    monkeypatch.setattr(
+        jsonio.os,
+        "lstat",
+        lambda path: SimpleNamespace(
+            st_mode=stat.S_IFLNK,
+            st_size=input_path.stat().st_size,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="regular file"):
+        cli._load_compact_result(input_path)
 
 
 def test_figure_generation_failure_preserves_all_existing_destinations(

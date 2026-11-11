@@ -13,7 +13,7 @@ import jsonschema
 import pytest
 import torch
 
-from jspace_llama.jsonio import document_sha256
+from jspace_llama.jsonio import atomic_write_json, document_sha256
 from jspace_llama.observation_data import (
     DATASET_SHA256,
     DatasetValidationError,
@@ -200,6 +200,119 @@ def complete_payload(*, all_pass_at_k_zero: bool = False) -> dict[str, object]:
     }
 
 
+def production_sized_payload() -> dict[str, object]:
+    from jspace_llama.observation_artifacts import recompute_metrics
+
+    payload = complete_payload()
+    all_layers = list(range(32))
+    band = list(range(12, 29))
+    records = payload["direct"]["items"]
+    audit = payload["tokenization_audit"]
+    for item_index, (record, audit_item) in enumerate(
+        zip(records, audit, strict=True)
+    ):
+        intermediates = []
+        audited_intermediates = []
+        for hop in range(3):
+            text = f"production-intermediate-{item_index:02d}-hop-{hop}"
+            token_id = item_index * 3 + hop
+            intermediate = {
+                "text": text,
+                "token_id": token_id,
+                "single_token": True,
+                "jlens": _rank_detail(item_index + hop + 1, all_layers),
+                "logit_lens": _rank_detail(
+                    item_index + hop + 2,
+                    all_layers,
+                ),
+            }
+            intermediates.append(intermediate)
+            audited_intermediates.append(
+                {
+                    "text": text,
+                    "token_id": token_id,
+                    "token_ids": [token_id],
+                    "variant": "leading_space",
+                    "single_token": True,
+                    "prompt_sha256": hashlib.sha256(
+                        f" {text}".encode()
+                    ).hexdigest(),
+                    "token_ids_sha256": hashlib.sha256(
+                        f"[{token_id}]".encode()
+                    ).hexdigest(),
+                }
+            )
+        record["intermediates"] = intermediates
+        audit_item["intermediates"] = audited_intermediates
+        if record["name"] in PANEL_NAMES:
+            record["top_tokens"] = {
+                method: [
+                    {
+                        "layer": layer,
+                        "tokens": [
+                            {
+                                "token_id": (
+                                    item_index * 10_000
+                                    + layer * 10
+                                    + token_index
+                                ),
+                                "token": (
+                                    f"{method}-item-{item_index:02d}-"
+                                    f"layer-{layer:02d}-"
+                                    f"token-{token_index:02d}"
+                                ),
+                                "rank": token_index + 1,
+                            }
+                            for token_index in range(10)
+                        ],
+                    }
+                    for layer in band
+                ]
+                for method in ("jlens", "logit_lens")
+            }
+    payload["direct"]["metrics"] = recompute_metrics(records)
+    payload["direct"]["single_token_metrics"] = copy.deepcopy(
+        payload["direct"]["metrics"]
+    )
+    by_name = {record["name"]: record for record in records}
+    payload["panel"]["items"] = [
+        {
+            "name": name,
+            "prompt": by_name[name]["prompt"],
+            "target": by_name[name]["target"],
+            "intermediates": copy.deepcopy(by_name[name]["intermediates"]),
+            "top_tokens": copy.deepcopy(by_name[name]["top_tokens"]),
+            "pursuit": [
+                {
+                    "layer": layer,
+                    "tokens": [
+                        {
+                            "token_id": (
+                                panel_index * 100_000
+                                + layer * 100
+                                + token_index
+                            ),
+                            "token": (
+                                f"pursuit-item-{panel_index:02d}-"
+                                f"layer-{layer:02d}-"
+                                f"token-{token_index:02d}"
+                            ),
+                            "rank": token_index + 1,
+                            "coefficient": 1.0 / (token_index + 1),
+                        }
+                        for token_index in range(25)
+                    ],
+                    "variance_explained": 0.5,
+                }
+                for layer in band
+            ],
+        }
+        for panel_index, name in enumerate(PANEL_NAMES)
+    ]
+    payload["layers"] = {"band": band, "all_layers": all_layers}
+    return payload
+
+
 def _load_validator():
     spec = importlib.util.spec_from_file_location("validate_observation", VALIDATOR)
     assert spec is not None and spec.loader is not None
@@ -271,6 +384,31 @@ def test_observation_success_depends_on_completeness_not_hits(
     assert outcome["metrics"]["jlens"]["band"]["pass@1"] == 0.0
     assert len(outcome["per_item_best_ranks"]) == 93
     assert outcome["panel_names"] == list(PANEL_NAMES)
+
+
+def test_production_sized_compact_and_raw_render_and_validate(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(
+        tmp_path,
+        execute=production_sized_payload,
+    )
+    compact_path = tmp_path / "results" / "jspace_observation.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    limit = 5 * 1_048_576
+
+    assert 2_000_000 < compact_path.stat().st_size <= limit
+    assert 2_000_000 < raw_path.stat().st_size <= limit
+    _load_validator().validate_result_files(
+        tmp_path / "results",
+        SCHEMAS,
+        raw_path,
+    )
+    assert len(list((tmp_path / "results" / "figures").iterdir())) == 6
 
 
 def test_observation_pipeline_preserves_both_causal_results(
@@ -861,6 +999,68 @@ def test_validator_requires_raw_artifact(tmp_path: Path) -> None:
     with pytest.raises(
         validator.ObservationValidationError,
         match="raw artifact|required|regular file",
+    ):
+        validator.validate_result_files(
+            tmp_path / "results",
+            SCHEMAS,
+            raw_path,
+        )
+
+
+def test_validator_uses_bounded_file_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    compact_path = tmp_path / "results" / "jspace_observation.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    validator = _load_validator()
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda path: pytest.fail(f"unbounded read used for {path}"),
+    )
+
+    assert validator._read_json(compact_path)["run_id"] == result["run_id"]
+    assert validator._validate_raw(
+        manifest,
+        raw_path=raw_path,
+    )["provenance"] == manifest["provenance"]
+
+
+@pytest.mark.parametrize("oversized_artifact", ["compact", "raw"])
+def test_validator_rejects_observation_json_above_five_mib(
+    tmp_path: Path,
+    oversized_artifact: str,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    compact_path = tmp_path / "results" / "jspace_observation.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = compact_path if oversized_artifact == "compact" else raw_path
+    target.write_bytes(
+        target.read_bytes()
+        + b" " * (5 * 1_048_576 - target.stat().st_size + 1)
+    )
+    if oversized_artifact == "raw":
+        manifest["raw_artifact_sha256"] = hashlib.sha256(
+            raw_path.read_bytes()
+        ).hexdigest()
+        result["manifest_sha256"] = document_sha256(manifest)
+        atomic_write_json(manifest_path, manifest)
+        atomic_write_json(compact_path, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="too large",
     ):
         validator.validate_result_files(
             tmp_path / "results",

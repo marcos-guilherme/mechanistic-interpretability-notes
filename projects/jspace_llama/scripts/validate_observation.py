@@ -18,8 +18,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from jspace_llama.jsonio import (
+    BoundedFileError,
     StrictJSONError,
     document_sha256,
+    read_regular_file_bounded,
     strict_json_loads,
 )
 from jspace_llama.observation_data import (
@@ -86,7 +88,8 @@ FAILURE_ERROR_TYPES = {
     "lens_integrity_failed": frozenset({"LensIntegrityError"}),
     "dataset_invalid": frozenset({"DatasetValidationError"}),
 }
-MAX_JSON_BYTES = 2_000_000
+MAX_METADATA_JSON_BYTES = 2_000_000
+MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
 AUDIT_ITEM_FIELDS = {"name", "intermediates"}
 AUDIT_INTERMEDIATE_FIELDS = {
     "text",
@@ -99,18 +102,15 @@ AUDIT_INTERMEDIATE_FIELDS = {
 }
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def _read_json(
+    path: Path,
+    *,
+    max_bytes: int = MAX_METADATA_JSON_BYTES,
+) -> dict[str, Any]:
     try:
-        if path.is_symlink() or not path.is_file():
-            raise ObservationValidationError(
-                f"JSON path is not a regular file: {path.name}"
-            )
-        if path.stat().st_size > MAX_JSON_BYTES:
-            raise ObservationValidationError(
-                f"JSON file is too large: {path.name}"
-            )
-        document = strict_json_loads(path.read_bytes())
-    except (OSError, StrictJSONError) as error:
+        payload = read_regular_file_bounded(path, max_bytes=max_bytes)
+        document = strict_json_loads(payload)
+    except (BoundedFileError, OSError, StrictJSONError) as error:
         raise ObservationValidationError(
             f"invalid JSON file {path.name}: {error}"
         ) from error
@@ -341,13 +341,16 @@ def _validate_raw(
     raw_path: Path,
 ) -> dict[str, Any]:
     claimed = manifest["raw_artifact_sha256"]
-    if not raw_path.is_file():
-        raise ObservationValidationError("raw artifact is required")
     try:
-        payload = raw_path.read_bytes()
-    except OSError as error:
+        payload = read_regular_file_bounded(
+            raw_path,
+            max_bytes=MAX_OBSERVATION_JSON_BYTES,
+        )
+    except FileNotFoundError as error:
+        raise ObservationValidationError("raw artifact is required") from error
+    except (BoundedFileError, OSError) as error:
         raise ObservationValidationError(
-            "raw artifact cannot be read"
+            f"raw artifact cannot be read: {error}"
         ) from error
     if hashlib.sha256(payload).hexdigest() != claimed:
         raise ObservationValidationError(
@@ -738,7 +741,10 @@ def validate_result_files(
     raw_path: Path,
 ) -> None:
     manifest = _read_json(results_dir / "jspace_observation_manifest.json")
-    result = _read_json(results_dir / "jspace_observation.json")
+    result = _read_json(
+        results_dir / "jspace_observation.json",
+        max_bytes=MAX_OBSERVATION_JSON_BYTES,
+    )
     validate_documents(
         manifest,
         result,

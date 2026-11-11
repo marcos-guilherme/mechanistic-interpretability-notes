@@ -7,18 +7,25 @@ import os
 from pathlib import Path
 from typing import Any
 
-from jspace_llama.jsonio import strict_json_loads
+from jspace_llama.jsonio import (
+    BoundedFileError,
+    read_regular_file_bounded,
+    strict_json_loads,
+)
 
 
-MAX_COMPACT_RESULT_BYTES = 2_000_000
+MAX_COMPACT_RESULT_BYTES = 5 * 1_048_576
 
 
 def _load_compact_result(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("figure input must be a regular file")
-    if path.stat().st_size > MAX_COMPACT_RESULT_BYTES:
-        raise ValueError("figure input is too large")
-    document = strict_json_loads(path.read_bytes())
+    try:
+        payload = read_regular_file_bounded(
+            path,
+            max_bytes=MAX_COMPACT_RESULT_BYTES,
+        )
+    except BoundedFileError as error:
+        raise ValueError(f"figure input {error}") from error
+    document = strict_json_loads(payload)
     if (
         not isinstance(document, dict)
         or document.get("artifact") != "jspace_observation"
