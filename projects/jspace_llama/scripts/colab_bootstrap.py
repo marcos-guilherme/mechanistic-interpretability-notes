@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import gzip
 import importlib
 import os
 from pathlib import Path
@@ -24,6 +26,17 @@ LOCKED_REQUIREMENTS = Path("/tmp/jspace-locked-requirements.txt")
 SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
 UPGRADED_MODULE_ROOTS = frozenset({"matplotlib"})
+MAX_PROJECT_ARCHIVE_BYTES = 16 * 1_048_576
+MAX_PROJECT_MEMBER_BYTES = 8 * 1_048_576
+MAX_PROJECT_TOTAL_BYTES = 16 * 1_048_576
+MAX_PROJECT_MEMBERS = 1_024
+MAX_TAR_METADATA_OVERHEAD_BYTES = 1_048_576
+TAR_BLOCK_BYTES = 512
+MAX_DECOMPRESSED_TAR_BYTES = (
+    MAX_PROJECT_TOTAL_BYTES
+    + MAX_PROJECT_MEMBERS * TAR_BLOCK_BYTES
+    + MAX_TAR_METADATA_OVERHEAD_BYTES
+)
 MATPLOTLIB_SMOKE_SCRIPT = """\
 import importlib.metadata
 import io
@@ -84,6 +97,8 @@ def _validate_archive_metadata(path: Path, metadata: object) -> None:
         raise ValueError(f"project archive is not a regular file: {path}")
     if getattr(metadata, "st_nlink", 1) != 1:
         raise ValueError(f"project archive is hard-linked: {path}")
+    if getattr(metadata, "st_size", 0) > MAX_PROJECT_ARCHIVE_BYTES:
+        raise ValueError(f"project archive is too large: {path}")
 
 
 def _open_validated_archive(path: Path, metadata: object):
@@ -109,13 +124,44 @@ def _open_validated_archive(path: Path, metadata: object):
         raise
 
 
+class _BoundedDecompressedReader:
+    def __init__(self, source, limit: int) -> None:
+        self._source = source
+        self._limit = limit
+        self._count = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        remaining = self._limit - self._count
+        requested = remaining + 1 if size < 0 else min(size, remaining + 1)
+        payload = self._source.read(requested)
+        if len(payload) > remaining:
+            raise ValueError(
+                "decompressed TAR exceeds project archive limit"
+            )
+        self._count += len(payload)
+        return payload
+
+
+@contextmanager
+def _open_bounded_project_tar(archive_source):
+    with gzip.GzipFile(fileobj=archive_source, mode="rb") as decompressed:
+        bounded = _BoundedDecompressedReader(
+            decompressed,
+            MAX_DECOMPRESSED_TAR_BYTES,
+        )
+        with tarfile.open(fileobj=bounded, mode="r|") as handle:
+            yield handle
+
+
 def _validated_member_path(
     member: tarfile.TarInfo,
     destination: Path,
 ) -> Path:
-    if not member.isfile() or member.issym() or member.islnk():
+    if member.type not in {tarfile.REGTYPE, tarfile.AREGTYPE}:
         raise ValueError("project archive must contain regular files only")
-    if "\\" in member.name:
+    if "\x00" in member.name or "\\" in member.name:
         raise ValueError(f"unsafe archive member: {member.name}")
     member_path = PurePosixPath(member.name)
     if member_path.is_absolute():
@@ -135,34 +181,135 @@ def _validated_member_path(
     return target
 
 
+def _scan_project_tar_members(
+    handle: tarfile.TarFile,
+    destination: Path,
+) -> list[tuple[str, int, int]]:
+    members: list[tuple[str, int, int]] = []
+    names: set[str] = set()
+    targets: set[Path] = set()
+    total_size = 0
+    for member in handle:
+        if len(members) >= MAX_PROJECT_MEMBERS:
+            raise ValueError("too many project archive members")
+        if member.name in names:
+            raise ValueError("duplicate archive member")
+        target = _validated_member_path(member, destination)
+        if target in targets:
+            raise ValueError("duplicate archive member destination")
+        normalized = PurePosixPath(member.name).as_posix()
+        if member.name != normalized:
+            raise ValueError(f"unsafe archive member: {member.name}")
+        if member.size < 0 or member.size > MAX_PROJECT_MEMBER_BYTES:
+            raise ValueError(
+                f"project archive member is too large: {member.name}"
+            )
+        total_size += member.size
+        if total_size > MAX_PROJECT_TOTAL_BYTES:
+            raise ValueError("project archive expands beyond size limit")
+        names.add(member.name)
+        targets.add(target)
+        members.append(
+            (
+                member.name,
+                member.size,
+                stat.S_IMODE(member.mode),
+            )
+        )
+    if not members:
+        raise ValueError("project archive is empty")
+    return members
+
+
+def _copy_member_payload(
+    source,
+    output,
+    declared_size: int,
+    name: str,
+) -> None:
+    remaining = declared_size
+    while remaining:
+        payload = source.read(min(64 * 1_024, remaining))
+        if not payload or len(payload) > remaining:
+            raise ValueError(
+                f"project archive member differs from declared size: {name}"
+            )
+        output.write(payload)
+        remaining -= len(payload)
+    if source.read(1):
+        raise ValueError(
+            f"project archive member differs from declared size: {name}"
+        )
+
+
+def _extract_project_tar_members(
+    handle: tarfile.TarFile,
+    destination: Path,
+    expected: list[tuple[str, int, int]],
+) -> None:
+    index = 0
+    for member in handle:
+        if index >= len(expected):
+            raise ValueError("project archive changed after validation")
+        expected_name, expected_size, expected_mode = expected[index]
+        target = _validated_member_path(member, destination)
+        if (
+            member.name != expected_name
+            or member.size != expected_size
+            or stat.S_IMODE(member.mode) != expected_mode
+        ):
+            raise ValueError("project archive changed after validation")
+        source = handle.extractfile(member)
+        if source is None:
+            raise ValueError(f"cannot read archive member: {member.name}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("xb") as output:
+            _copy_member_payload(
+                source,
+                output,
+                expected_size,
+                expected_name,
+            )
+        target.chmod(expected_mode)
+        index += 1
+    if index != len(expected):
+        raise ValueError("project archive changed after validation")
+
+
 def safe_extract(archive: Path, destination: Path) -> Path:
-    destination.mkdir(parents=True, exist_ok=True)
     archive_metadata = os.lstat(archive)
     _validate_archive_metadata(archive, archive_metadata)
-    with _open_validated_archive(archive, archive_metadata) as archive_source:
-        with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
-            members = handle.getmembers()
-            names = [member.name for member in members]
-            if len(names) != len(set(names)):
-                raise ValueError("duplicate archive member")
-            targets = [
-                (member, _validated_member_path(member, destination))
-                for member in members
-            ]
-            target_paths = [target for _, target in targets]
-            if len(target_paths) != len(set(target_paths)):
-                raise ValueError("duplicate archive member destination")
-            for member, target in targets:
-                source = handle.extractfile(member)
-                if source is None:
-                    raise ValueError(
-                        f"cannot read archive member: {member.name}"
-                    )
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
-                target.chmod(stat.S_IMODE(member.mode))
-    return destination / ARCHIVE_ROOT
+    destination.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=".jspace-extract-", dir=destination)
+    )
+    final_project = destination / ARCHIVE_ROOT
+    try:
+        with _open_validated_archive(
+            archive,
+            archive_metadata,
+        ) as archive_source:
+            with _open_bounded_project_tar(archive_source) as handle:
+                expected = _scan_project_tar_members(handle, staging)
+        with _open_validated_archive(
+            archive,
+            archive_metadata,
+        ) as archive_source:
+            with _open_bounded_project_tar(archive_source) as handle:
+                _extract_project_tar_members(handle, staging, expected)
+        extracted_project = staging / ARCHIVE_ROOT
+        if not extracted_project.is_dir():
+            raise ValueError(
+                f"project archive did not create {ARCHIVE_ROOT}"
+            )
+        if os.path.lexists(final_project):
+            raise FileExistsError(
+                f"project archive destination exists: {final_project}"
+            )
+        extracted_project.replace(final_project)
+        return final_project
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _is_reparse_point(metadata: object) -> bool:

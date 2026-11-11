@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import io
@@ -133,6 +134,7 @@ def test_execute_requires_notebook_and_timeout() -> None:
 
 def test_archive_contains_only_remote_project_inputs(tmp_path: Path) -> None:
     runner = load_module(RUNNER_PATH, "run_jspace_archive")
+    bootstrap = load_module(BOOTSTRAP_PATH, "bootstrap_jspace_archive")
     project = tmp_path / "projects" / "jspace_llama"
     files = {
         "pyproject.toml": "project",
@@ -195,6 +197,19 @@ def test_archive_contains_only_remote_project_inputs(tmp_path: Path) -> None:
         "jspace_llama/notebooks/01_readout_and_causal_swap.ipynb",
         "jspace_llama/source_provenance.json",
     }
+    extracted = bootstrap.safe_extract(
+        archive,
+        tmp_path / "remote-content",
+    )
+    assert (extracted / "src" / "jspace_llama" / "core.py").read_text(
+        encoding="utf-8"
+    ) == "source"
+    assert (
+        bootstrap.MAX_DECOMPRESSED_TAR_BYTES
+        == bootstrap.MAX_PROJECT_TOTAL_BYTES
+        + bootstrap.MAX_PROJECT_MEMBERS * bootstrap.TAR_BLOCK_BYTES
+        + bootstrap.MAX_TAR_METADATA_OVERHEAD_BYTES
+    )
 
 
 def test_archive_rejects_other_extensionless_data_files(tmp_path: Path) -> None:
@@ -428,16 +443,24 @@ OBSERVATION_RESULTS = {
 }
 
 
-def png_bytes(width: int = 1, height: int = 1) -> bytes:
-    payload = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    chunk_type = b"IHDR"
+def png_chunk(chunk_type: bytes, payload: bytes = b"") -> bytes:
     crc = zlib.crc32(chunk_type + payload) & 0xFFFFFFFF
     return (
-        b"\x89PNG\r\n\x1a\n"
-        + struct.pack(">I", len(payload))
+        struct.pack(">I", len(payload))
         + chunk_type
         + payload
         + struct.pack(">I", crc)
+    )
+
+
+def png_bytes(width: int = 1, height: int = 1) -> bytes:
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    scanline = b"\x00" + b"\x00\x00\x00" * max(width, 1)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(scanline * max(height, 1)))
+        + png_chunk(b"IEND")
     )
 
 
@@ -587,6 +610,22 @@ def matplotlib_svg_bytes() -> bytes:
         flags=re.DOTALL,
     )
     return text.encode("utf-8")
+
+
+def matplotlib_png_bytes() -> bytes:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    buffer = io.BytesIO()
+    figure, axes = plt.subplots()
+    axes.imshow([[0.0, 1.0], [1.0, 0.0]])
+    try:
+        figure.savefig(buffer, format="png")
+    finally:
+        plt.close(figure)
+    return buffer.getvalue()
 
 
 def write_tar_payloads(
@@ -797,12 +836,123 @@ def test_observation_extract_rejects_bad_ihdr_crc(tmp_path: Path) -> None:
     runner = load_module(RUNNER_PATH, "run_jspace_bad_png_crc")
     payloads = observation_payloads()
     name = "results/jspace_observation_panel.png"
-    payloads[name] = payloads[name][:-1] + bytes([payloads[name][-1] ^ 0xFF])
+    payload = bytearray(payloads[name])
+    payload[32] ^= 0xFF
+    payloads[name] = bytes(payload)
     archive = tmp_path / "results.tar.gz"
     write_tar_payloads(archive, payloads)
 
     with pytest.raises(ValueError, match="IHDR"):
         runner.extract_results_archive(archive, tmp_path / "project", "observation")
+
+
+@pytest.mark.parametrize("target", ["pack", "fetch"])
+@pytest.mark.parametrize(
+    ("case", "payload"),
+    [
+        (
+            "missing-idat",
+            (
+                b"\x89PNG\r\n\x1a\n"
+                + png_bytes()[8:33]
+                + png_chunk(b"IEND")
+            ),
+        ),
+        ("missing-iend", png_bytes()[:-12]),
+        ("truncated", png_bytes()[:-1]),
+        (
+            "bad-idat-crc",
+            png_bytes()[:-13] + bytes([png_bytes()[-13] ^ 0xFF]) + png_bytes()[-12:],
+        ),
+        (
+            "duplicate-ihdr",
+            png_bytes()[:33] + png_bytes()[8:],
+        ),
+        (
+            "idat-before-ihdr",
+            (
+                b"\x89PNG\r\n\x1a\n"
+                + png_bytes()[33:-12]
+                + png_bytes()[8:33]
+                + png_chunk(b"IEND")
+            ),
+        ),
+        (
+            "unknown-critical",
+            png_bytes()[:33]
+            + png_chunk(b"ABCD")
+            + png_bytes()[33:],
+        ),
+        (
+            "oversized-chunk-length",
+            png_bytes()[:33] + struct.pack(">I", 0xFFFFFFFF) + b"IDAT",
+        ),
+        ("trailing-bytes", png_bytes() + b"trailing"),
+    ],
+)
+def test_png_validators_reject_malformed_full_files(
+    target: str,
+    case: str,
+    payload: bytes,
+) -> None:
+    if target == "pack":
+        module = load_module(PACK_PATH, f"pack_png_{case}")
+        validator = module._validate_png
+    else:
+        module = load_module(RUNNER_PATH, f"fetch_png_{case}")
+        validator = module._validate_png_bytes
+
+    with pytest.raises(ValueError, match="PNG"):
+        validator("results/observation.png", payload)
+
+
+@pytest.mark.parametrize("target", ["pack", "fetch"])
+def test_png_validators_accept_generated_matplotlib_png(target: str) -> None:
+    payload = matplotlib_png_bytes()
+    if target == "pack":
+        module = load_module(PACK_PATH, "pack_png_matplotlib")
+        validator = module._validate_png
+    else:
+        module = load_module(RUNNER_PATH, "fetch_png_matplotlib")
+        validator = module._validate_png_bytes
+
+    validator("results/observation.png", payload)
+
+
+@pytest.mark.parametrize("target", ["pack", "fetch"])
+def test_svg_validators_reject_malformed_embedded_png(target: str) -> None:
+    malformed_png = (
+        b"\x89PNG\r\n\x1a\n" + png_bytes()[8:33] + png_chunk(b"IEND")
+    )
+    encoded = base64.b64encode(malformed_png)
+    payload = (
+        b'<svg xmlns="http://www.w3.org/2000/svg">'
+        b'<image href="data:image/png;base64,'
+        + encoded
+        + b'"/></svg>'
+    )
+    if target == "pack":
+        module = load_module(PACK_PATH, "pack_svg_malformed_png")
+        validator = module._validate_svg
+    else:
+        module = load_module(RUNNER_PATH, "fetch_svg_malformed_png")
+        validator = module._validate_svg_bytes
+
+    with pytest.raises(ValueError, match="PNG"):
+        validator("results/observation.svg", payload)
+
+
+@pytest.mark.parametrize("target", ["pack", "fetch"])
+def test_svg_validators_reject_oversized_embedded_png(target: str) -> None:
+    oversized = b"\x89PNG\r\n\x1a\n" + b"\x00" * (5 * 1_048_576)
+    value = "data:image/png;base64," + base64.b64encode(oversized).decode()
+    if target == "pack":
+        module = load_module(PACK_PATH, "pack_svg_oversized_png")
+    else:
+        module = load_module(RUNNER_PATH, "fetch_svg_oversized_png")
+
+    with pytest.raises(ValueError, match="too large"):
+        module._validate_embedded_png("results/observation.svg", value)
 
 
 @pytest.mark.parametrize("target", ["pack", "fetch"])

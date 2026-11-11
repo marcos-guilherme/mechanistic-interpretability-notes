@@ -27,6 +27,9 @@ MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
 MAX_FIGURE_BYTES = 5 * 1_048_576
 MAX_ARCHIVE_BYTES = 40 * 1_048_576
 MAX_IMAGE_DIMENSION = 10_000
+MAX_PNG_CHUNKS = 4_096
+MAX_EMBEDDED_PNG_BYTES = 4 * 1_048_576
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 OBSERVATION_RAW = "artifacts/jspace_observation_raw.json"
 RESULT_SETS = {
     "causal": frozenset(
@@ -166,39 +169,131 @@ def open_validated_file(
 
 
 def _validate_png(name: str, payload: bytes) -> None:
-    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+    if len(payload) > MAX_FIGURE_BYTES:
+        raise ValueError(f"result PNG is too large: {name}")
+    if not payload.startswith(PNG_SIGNATURE):
         raise ValueError(f"result artifact is not a valid PNG: {name}")
-    if len(payload) < 33:
-        raise ValueError(f"result PNG has an invalid IHDR: {name}")
-    length = struct.unpack(">I", payload[8:12])[0]
-    if length != 13 or payload[12:16] != b"IHDR":
-        raise ValueError(f"result PNG has an invalid IHDR: {name}")
-    ihdr = payload[16:29]
-    expected_crc = struct.unpack(">I", payload[29:33])[0]
-    actual_crc = zlib.crc32(b"IHDR" + ihdr) & 0xFFFFFFFF
-    if expected_crc != actual_crc:
-        raise ValueError(f"result PNG has an invalid IHDR checksum: {name}")
-    width, height = struct.unpack(">II", ihdr[:8])
-    if not (
-        0 < width <= MAX_IMAGE_DIMENSION
-        and 0 < height <= MAX_IMAGE_DIMENSION
-    ):
-        raise ValueError(f"result PNG has invalid dimensions: {name}")
-    bit_depth, color_type, compression, filter_method, interlace = ihdr[8:]
-    valid_bit_depths = {
-        0: {1, 2, 4, 8, 16},
-        2: {8, 16},
-        3: {1, 2, 4, 8},
-        4: {8, 16},
-        6: {8, 16},
-    }
-    if (
-        bit_depth not in valid_bit_depths.get(color_type, set())
-        or compression != 0
-        or filter_method != 0
-        or interlace not in {0, 1}
-    ):
-        raise ValueError(f"result PNG has invalid IHDR fields: {name}")
+    offset = len(PNG_SIGNATURE)
+    chunk_count = 0
+    seen_ihdr = False
+    seen_plte = False
+    seen_idat = False
+    idat_finished = False
+    seen_iend = False
+    idat_bytes = 0
+    plte_entries = 0
+    bit_depth = -1
+    color_type = -1
+    while offset < len(payload):
+        if seen_iend:
+            raise ValueError(f"result PNG has trailing bytes: {name}")
+        if len(payload) - offset < 12:
+            raise ValueError(f"result PNG is truncated: {name}")
+        length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        chunk_type = payload[offset + 4 : offset + 8]
+        if (
+            length > MAX_FIGURE_BYTES
+            or length > len(payload) - offset - 12
+        ):
+            raise ValueError(f"result PNG has an invalid chunk length: {name}")
+        if (
+            not all(
+                65 <= byte <= 90 or 97 <= byte <= 122
+                for byte in chunk_type
+            )
+            or not 65 <= chunk_type[2] <= 90
+        ):
+            raise ValueError(f"result PNG has an invalid chunk type: {name}")
+        data_start = offset + 8
+        data_end = data_start + length
+        chunk_data = payload[data_start:data_end]
+        expected_crc = struct.unpack(">I", payload[data_end : data_end + 4])[0]
+        actual_crc = zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF
+        if expected_crc != actual_crc:
+            if chunk_type == b"IHDR":
+                raise ValueError(
+                    f"result PNG has an invalid IHDR checksum: {name}"
+                )
+            raise ValueError(f"result PNG has an invalid chunk checksum: {name}")
+        offset = data_end + 4
+        chunk_count += 1
+        if chunk_count > MAX_PNG_CHUNKS:
+            raise ValueError(f"result PNG has too many chunks: {name}")
+        if chunk_count == 1 and chunk_type != b"IHDR":
+            raise ValueError(f"result PNG does not start with IHDR: {name}")
+
+        if chunk_type == b"IHDR":
+            if seen_ihdr or chunk_count != 1 or length != 13:
+                raise ValueError(f"result PNG has an invalid IHDR: {name}")
+            seen_ihdr = True
+            width, height = struct.unpack(">II", chunk_data[:8])
+            if not (
+                0 < width <= MAX_IMAGE_DIMENSION
+                and 0 < height <= MAX_IMAGE_DIMENSION
+            ):
+                raise ValueError(f"result PNG has invalid dimensions: {name}")
+            (
+                bit_depth,
+                color_type,
+                compression,
+                filter_method,
+                interlace,
+            ) = chunk_data[8:]
+            valid_bit_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if (
+                bit_depth not in valid_bit_depths.get(color_type, set())
+                or compression != 0
+                or filter_method != 0
+                or interlace not in {0, 1}
+            ):
+                raise ValueError(
+                    f"result PNG has invalid IHDR fields: {name}"
+                )
+        elif chunk_type == b"PLTE":
+            if (
+                not seen_ihdr
+                or seen_plte
+                or seen_idat
+                or length == 0
+                or length % 3 != 0
+                or length > 768
+            ):
+                raise ValueError(f"result PNG has an invalid PLTE: {name}")
+            seen_plte = True
+            plte_entries = length // 3
+        elif chunk_type == b"IDAT":
+            if not seen_ihdr or idat_finished:
+                raise ValueError(f"result PNG has a misordered IDAT: {name}")
+            seen_idat = True
+            idat_bytes += length
+        elif chunk_type == b"IEND":
+            if not seen_ihdr or not seen_idat or length != 0:
+                raise ValueError(f"result PNG has an invalid IEND: {name}")
+            seen_iend = True
+            if offset != len(payload):
+                raise ValueError(f"result PNG has trailing bytes: {name}")
+        elif 65 <= chunk_type[0] <= 90:
+            raise ValueError(
+                f"result PNG has an unknown critical chunk: {name}"
+            )
+
+        if seen_idat and chunk_type not in {b"IDAT", b"IEND"}:
+            idat_finished = True
+
+    if not seen_ihdr or not seen_idat or idat_bytes == 0 or not seen_iend:
+        raise ValueError(f"result PNG is incomplete: {name}")
+    if color_type == 3 and not seen_plte:
+        raise ValueError(f"result PNG is missing PLTE: {name}")
+    if color_type in {0, 4} and seen_plte:
+        raise ValueError(f"result PNG has a forbidden PLTE: {name}")
+    if color_type == 3 and plte_entries > 2**bit_depth:
+        raise ValueError(f"result PNG has an oversized PLTE: {name}")
 
 
 def _local_xml_name(value: str) -> str:
@@ -316,12 +411,16 @@ def _validate_embedded_png(name: str, value: str) -> None:
     if not value.lower().startswith(prefix):
         raise ValueError(f"result SVG contains external content: {name}")
     encoded = "".join(value[len(prefix) :].split())
+    max_encoded = ((MAX_EMBEDDED_PNG_BYTES + 2) // 3) * 4
+    if len(encoded) > max_encoded:
+        raise ValueError(f"result SVG embedded PNG is too large: {name}")
     try:
         decoded = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error) as error:
         raise ValueError(f"result SVG contains invalid embedded image: {name}") from error
-    if not decoded.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise ValueError(f"result SVG embedded image is not PNG: {name}")
+    if len(decoded) > MAX_EMBEDDED_PNG_BYTES:
+        raise ValueError(f"result SVG embedded PNG is too large: {name}")
+    _validate_png(name, decoded)
 
 
 def _validate_svg(name: str, payload: bytes) -> None:

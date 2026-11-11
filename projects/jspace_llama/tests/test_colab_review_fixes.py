@@ -46,6 +46,35 @@ def add_tar_bytes(
     handle.addfile(info, io.BytesIO(payload))
 
 
+def write_bootstrap_metadata_bomb(
+    archive: Path,
+    extension: str,
+    metadata_bytes: int,
+) -> None:
+    if extension == "pax":
+        with tarfile.open(
+            archive,
+            "w:gz",
+            format=tarfile.PAX_FORMAT,
+            pax_headers={"comment": "A" * metadata_bytes},
+        ) as handle:
+            add_tar_bytes(handle, "jspace_llama/src/pkg.py", b"source")
+        return
+    if extension == "gnu-longname":
+        with tarfile.open(
+            archive,
+            "w:gz",
+            format=tarfile.GNU_FORMAT,
+        ) as handle:
+            add_tar_bytes(
+                handle,
+                "jspace_llama/" + "A" * metadata_bytes,
+                b"",
+            )
+        return
+    raise AssertionError(f"unknown extension fixture: {extension}")
+
+
 def write_result_files(root: Path) -> None:
     results = root / "results"
     results.mkdir(parents=True)
@@ -442,18 +471,172 @@ def test_bootstrap_rejects_duplicate_normalized_destinations(
         bootstrap.safe_extract(archive, tmp_path / "destination")
 
 
-def test_bootstrap_rejects_special_archive_members(tmp_path: Path) -> None:
-    bootstrap = load_module(BOOTSTRAP_PATH, "review_bootstrap_special")
+@pytest.mark.parametrize(
+    "member_type",
+    [
+        tarfile.SYMTYPE,
+        tarfile.LNKTYPE,
+        tarfile.FIFOTYPE,
+        tarfile.CHRTYPE,
+        tarfile.BLKTYPE,
+        tarfile.GNUTYPE_SPARSE,
+    ],
+)
+def test_bootstrap_rejects_special_archive_members(
+    tmp_path: Path,
+    member_type: bytes,
+) -> None:
+    bootstrap = load_module(
+        BOOTSTRAP_PATH,
+        f"review_bootstrap_special_{member_type!r}",
+    )
     archive = tmp_path / "special.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:
         add_tar_bytes(
             handle,
             "jspace_llama/src/pipe.py",
             b"",
-            member_type=tarfile.FIFOTYPE,
+            member_type=member_type,
         )
 
     with pytest.raises(ValueError, match="regular files"):
+        bootstrap.safe_extract(archive, tmp_path / "destination")
+
+
+@pytest.mark.parametrize("extension", ["pax", "gnu-longname"])
+def test_bootstrap_bounds_extension_metadata_before_tarfile_parse(
+    tmp_path: Path,
+    extension: str,
+) -> None:
+    bootstrap = load_module(
+        BOOTSTRAP_PATH,
+        f"bounded_bootstrap_{extension.replace('-', '_')}",
+    )
+    archive = tmp_path / f"{extension}.tar.gz"
+    destination = tmp_path / "destination"
+    write_bootstrap_metadata_bomb(
+        archive,
+        extension,
+        metadata_bytes=20 * 1_048_576,
+    )
+
+    assert archive.stat().st_size < 200_000
+    with pytest.raises(ValueError, match="decompressed TAR exceeds"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_many_members_without_materializing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_members")
+    archive = tmp_path / "many-members.tar.gz"
+    destination = tmp_path / "destination"
+    with tarfile.open(archive, "w:gz") as handle:
+        for index in range(1_025):
+            add_tar_bytes(
+                handle,
+                f"jspace_llama/src/item-{index}.py",
+                b"",
+            )
+    next_calls = 0
+    real_next = bootstrap.tarfile.TarFile.next
+
+    def counted_next(handle):
+        nonlocal next_calls
+        next_calls += 1
+        return real_next(handle)
+
+    monkeypatch.setattr(bootstrap.tarfile.TarFile, "next", counted_next)
+    monkeypatch.setattr(
+        bootstrap.tarfile.TarFile,
+        "getmembers",
+        lambda handle: pytest.fail("getmembers materialized the archive"),
+    )
+
+    with pytest.raises(ValueError, match="too many project archive members"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert next_calls <= 1_026
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_oversized_declared_member(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_declared")
+    archive = tmp_path / "oversized-member.tar.gz"
+    destination = tmp_path / "destination"
+    payload = b"\x00" * (8 * 1_048_576 + 1)
+    with tarfile.open(archive, "w:gz") as handle:
+        add_tar_bytes(handle, "jspace_llama/src/large.py", payload)
+
+    with pytest.raises(ValueError, match="project archive member is too large"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_oversized_total_payload(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_total")
+    archive = tmp_path / "oversized-total.tar.gz"
+    destination = tmp_path / "destination"
+    with tarfile.open(archive, "w:gz") as handle:
+        for index, size in enumerate((6, 6, 5)):
+            add_tar_bytes(
+                handle,
+                f"jspace_llama/src/large-{index}.py",
+                b"\x00" * (size * 1_048_576),
+            )
+
+    assert archive.stat().st_size < 100_000
+    with pytest.raises(ValueError, match="expands beyond size limit"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_bounded_copy_rejects_actual_size_above_declared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_actual")
+    archive = tmp_path / "actual-size.tar.gz"
+    destination = tmp_path / "destination"
+    with tarfile.open(archive, "w:gz") as handle:
+        add_tar_bytes(handle, "jspace_llama/src/pkg.py", b"A")
+    monkeypatch.setattr(
+        bootstrap.tarfile.TarFile,
+        "extractfile",
+        lambda handle, member: io.BytesIO(b"AB"),
+    )
+
+    with pytest.raises(ValueError, match="declared size"):
+        bootstrap.safe_extract(archive, destination)
+
+    assert not (destination / "jspace_llama").exists()
+    assert list(destination.glob(".jspace-extract-*")) == []
+
+
+def test_bootstrap_rejects_oversized_compressed_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "bounded_bootstrap_compressed")
+    archive = tmp_path / "archive.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        add_tar_bytes(handle, "jspace_llama/src/pkg.py", b"source")
+    monkeypatch.setattr(bootstrap, "MAX_PROJECT_ARCHIVE_BYTES", 1, raising=False)
+
+    with pytest.raises(ValueError, match="project archive is too large"):
         bootstrap.safe_extract(archive, tmp_path / "destination")
 
 
