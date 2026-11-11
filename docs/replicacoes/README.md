@@ -60,6 +60,14 @@ não edita ativações. Seus futuros `pass@1/5/10`, ranks por camada, painel e
 *band* serão evidência observacional; sucesso operacional significará
 artefatos completos e validados, não métricas altas.
 
+Para permitir essa validação depois da execução remota, o perfil observacional
+transporta nove membros: dois JSONs compactos, seis figuras canônicas e
+`artifacts/jspace_observation_raw.json`. Esse sidecar contém registros
+observacionais no nível dos prompts, não gerações ou continuações, e é
+validado e publicado localmente na mesma transação dos arquivos canônicos. Ele
+serve apenas para reconciliar hashes e conteúdo, continua ignorado pelo Git e
+não fará parte do commit de evidência canônica.
+
 Uma terceira etapa, se for realizada, será uma nova confirmação causal. Ela
 precisará de hipótese, prompts e controles pré-declarados próprios, sem
 selecionar retrospectivamente conceito, direção ou `alpha` a partir desta

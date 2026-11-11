@@ -287,10 +287,14 @@ python tools/colab/run_jspace.py fetch --result-set observation
 python tools/colab/run_jspace.py stop
 ```
 
-O perfil `observation` publica dois JSONs compactos e seis figuras, sem
-sobrescrever os resultados causais. O artefato bruto usado para reconciliar
-hashes e conteúdo permanece fora do Git. Para validar um conjunto
-observacional completo:
+O perfil `observation` transporta exatamente nove membros, sem sobrescrever os
+resultados causais: dois JSONs compactos, seis figuras canônicas PNG/SVG e o
+sidecar ignorado `artifacts/jspace_observation_raw.json`. O sidecar contém os
+registros observacionais no nível de cada prompt usados para reconciliar
+hashes, ranks, painel, tokenização e conteúdo; ele não contém saídas geradas
+nem continuações. Tanto o empacotamento quanto o download validam o JSON, o
+caminho permitido e o limite de tamanho, e o fetch publica os nove membros na
+mesma transação com rollback. Para validar o conjunto completo:
 
 ```powershell
 cd projects/jspace_llama
@@ -301,6 +305,10 @@ Antes da execução remota, esse comando termina com status 1 e informa
 explicitamente que `jspace_observation_manifest.json` não existe. Esse é o
 estado esperado nesta etapa: o validador não confunde
 `execution_manifest.json` e `final_evaluation.json` com resultados do atlas.
+Depois da execução remota, o mesmo fetch traz o sidecar necessário para que
+essa validação independente possa terminar com sucesso. Ele continua
+gitignored e não faz parte do commit de evidência canônica, que conterá apenas
+os dois JSONs compactos e as seis figuras.
 
 ## Evidência canônica
 
@@ -320,6 +328,8 @@ O artefato final registra um prompt principal, duas paráfrases e um valor de
 `alpha` efetivamente avaliados. Nenhuma combinação passou por todos os
 critérios primários. Ainda não há JSONs nem figuras canônicos do atlas; seus
 valores só poderão ser documentados depois da execução remota e da validação.
+O sidecar observacional será transportado para tornar essa validação
+reproduzível localmente, mas permanecerá fora da evidência canônica versionada.
 
 ## Desvios e limitações
 

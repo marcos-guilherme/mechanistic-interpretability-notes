@@ -15,8 +15,10 @@ expõe em um conjunto fixo de prompts, sem gerar texto e sem editar ativações.
 
 Planejei a execução para uma NVIDIA L4 no Colab, com acesso autenticado ao
 modelo *gated* do Hugging Face. Pesos e lente são baixados apenas para caches
-ignorados, enquanto o Git recebe somente JSONs agregados e compactos. A lente
-pré-ajustada usada pelo projeto é
+ignorados. Na etapa observacional, o perfil de transporte traz os JSONs
+compactos e as figuras canônicas, além de um sidecar bruto usado só na
+validação local; esse sidecar continua ignorado pelo Git. A lente pré-ajustada
+usada pelo projeto é
 `llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt`.
 
 Implementei configuração fixada, validação de CUDA e runtime, readout e
@@ -130,10 +132,16 @@ python tools/colab/run_jspace.py fetch --result-set observation
 python tools/colab/run_jspace.py stop
 ```
 
-O perfil `observation` é separado do perfil causal padrão. Ele busca os dois
-JSONs compactos e as seis figuras PNG/SVG do atlas; não substitui
-`execution_manifest.json` nem `final_evaluation.json`. O artefato bruto usado
-na reconciliação de integridade permanece ignorado pelo Git.
+O perfil `observation` é separado do perfil causal padrão e tem exatamente
+nove membros: dois JSONs compactos, seis figuras canônicas PNG/SVG e
+`artifacts/jspace_observation_raw.json`. Esse sidecar bruto contém os registros
+observacionais no nível dos prompts — não saídas geradas nem continuações — e
+serve somente para o validador local recalcular hashes e reconciliar o conteúdo
+compacto. O empacotamento e o download validam o JSON, o caminho e o limite de
+tamanho; a publicação local dos nove membros é transacional. O sidecar
+permanece ignorado pelo Git e não integra o commit de evidência canônica. O
+perfil também não substitui `execution_manifest.json` nem
+`final_evaluation.json`.
 
 ## A execução que consegui realizar
 
@@ -200,7 +208,10 @@ uv run python scripts/validate_observation.py
 Neste estágio pré-execução, os artefatos observacionais ainda não existem.
 Portanto, o resultado correto desse comando é `FAIL` com a ausência explícita
 de `jspace_observation_manifest.json`; ele não deve aceitar os dois JSONs
-causais como se fossem o atlas.
+causais como se fossem o atlas. Depois de uma execução e de
+`fetch --result-set observation`, os nove membros chegam juntos, inclusive o
+sidecar necessário para a validação independente; somente os dois JSONs
+compactos e as seis figuras formam a futura evidência canônica versionada.
 
 O estado `success` exige proveniência limpa e verificada por digest, integridade
 da lente e readout explicitamente avaliados e pelo menos um `alpha` que passe
