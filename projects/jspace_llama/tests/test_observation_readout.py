@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
 from jspace_llama.observation_data import MultihopItem
 from jspace_llama.observation_readout import (
     aggregate_pass_at_k,
     evaluate_direct_readout,
     rank_one_based,
+    ObservationReadoutError,
 )
+from jspace_llama.runtime import TokenizationError
 
 
 def test_rank_is_one_based_and_uses_competition_ranking() -> None:
@@ -39,6 +42,13 @@ class FakeTokenizer:
 
 class GenerateForbiddenModel:
     tokenizer = FakeTokenizer()
+
+    def encode(self, prompt: str, *, max_length: int) -> torch.Tensor:
+        assert max_length == 512
+        return torch.tensor(
+            [[1, 2] if prompt.endswith(" ") else [1, 3]],
+            dtype=torch.long,
+        )
 
     def generate(self, *args, **kwargs):
         raise AssertionError("direct readout must not generate")
@@ -113,6 +123,8 @@ def test_direct_readout_keeps_prompts_methods_and_scopes_distinct() -> None:
     audit = (
         {
             "name": "carnival-ocean",
+            "prompt": "raw final space ",
+            "prompt_token_ids": [1, 2],
             "intermediates": [
                 {
                     "text": "first",
@@ -123,6 +135,8 @@ def test_direct_readout_keeps_prompts_methods_and_scopes_distinct() -> None:
         },
         {
             "name": "ordinary",
+            "prompt": 'preserved delimiter "',
+            "prompt_token_ids": [1, 3],
             "intermediates": [
                 {
                     "text": "second",
@@ -191,3 +205,82 @@ def test_direct_readout_keeps_prompts_methods_and_scopes_distinct() -> None:
     assert result["metrics"]["jlens"]["band"]["pass@1"] == 0.5
     assert result["metrics"]["logit_lens"]["band"]["pass@1"] == 0.0
     assert result["single_token_metrics"]["jlens"]["band"]["n_items"] == 1
+
+
+@pytest.mark.parametrize(
+    ("logits", "token_id"),
+    [
+        (torch.tensor([[0.0, float("nan")]]), 1),
+        (torch.tensor([[[0.0, 1.0]]]), 1),
+        (torch.tensor([[0.0, 1.0]]), 9),
+    ],
+)
+def test_direct_readout_rejects_malformed_numerical_outputs(
+    logits: torch.Tensor,
+    token_id: int,
+) -> None:
+    model = GenerateForbiddenModel()
+    dictionary = FakeDictionary()
+    dictionary.lens.apply = lambda *args, **kwargs: (
+        {1: logits},
+        torch.empty(0),
+        torch.empty(0),
+    )
+    item = MultihopItem("one", "raw final space ", "target", ("middle",))
+    audit = (
+        {
+            "name": "one",
+            "prompt": item.prompt,
+            "prompt_token_ids": [1, 2],
+            "intermediates": [
+                {
+                    "text": "middle",
+                    "token_id": token_id,
+                    "single_token": True,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ObservationReadoutError):
+        evaluate_direct_readout(
+            model,
+            dictionary,
+            (item,),
+            audit,
+            band_layers=(1,),
+            all_layers=(1,),
+            detail_names=frozenset(),
+        )
+
+
+def test_direct_readout_rejects_lens_prompt_tokenization_drift() -> None:
+    model = GenerateForbiddenModel()
+    dictionary = FakeDictionary()
+    item = MultihopItem("one", "raw final space ", "target", ("middle",))
+    audit = (
+        {
+            "name": "one",
+            "prompt": item.prompt,
+            "prompt_token_ids": [999],
+            "intermediates": [
+                {
+                    "text": "middle",
+                    "token_id": 1,
+                    "single_token": True,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(TokenizationError, match="tokens differ from audit"):
+        evaluate_direct_readout(
+            model,
+            dictionary,
+            (item,),
+            audit,
+            band_layers=(1,),
+            all_layers=(1,),
+        )
+
+    assert dictionary.lens.calls == []

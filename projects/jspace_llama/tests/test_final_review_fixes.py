@@ -328,12 +328,39 @@ def test_archive_digest_and_dirty_state_ignore_nonruntime_files(
     repository = tmp_path / "repo"
     project = _write_runtime_fixture(repository)
     status_commands: list[list[str]] = []
+    committed = {
+        path.relative_to(repository).as_posix(): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    }
 
     def fake_git(command, **kwargs):
         if "rev-parse" in command:
             return subprocess.CompletedProcess(command, 0, "9" * 40 + "\n", "")
+        if "ls-tree" in command:
+            paths = "\n".join(sorted(committed)) + "\n"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                paths.encode(),
+                b"",
+            )
+        if "show" in command:
+            label = command[-1].split(":", 1)[1]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                committed[label],
+                b"",
+            )
         status_commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
+        dirty = (
+            " M projects/jspace_llama/src/jspace_llama/core.py\n"
+            if (project / "src" / "jspace_llama" / "core.py").read_text()
+            == "VALUE = 2\n"
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, dirty, "")
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git)
     archive = runner.build_archive(
@@ -351,6 +378,7 @@ def test_archive_digest_and_dirty_state_ignore_nonruntime_files(
     first = archived_source()
     assert first["scoped_dirty"] is False
     assert first["archive_sha256"]
+    assert first["runtime_source_sha256"]
     status_command = status_commands[-1]
     joined = " ".join(status_command)
     assert "--" in status_command
@@ -365,6 +393,10 @@ def test_archive_digest_and_dirty_state_ignore_nonruntime_files(
         repository_root=repository,
     )
     assert archived_source()["archive_sha256"] == first["archive_sha256"]
+    assert (
+        archived_source()["runtime_source_sha256"]
+        == first["runtime_source_sha256"]
+    )
 
     (project / "src" / "jspace_llama" / "core.py").write_text(
         "VALUE = 2\n",
@@ -375,7 +407,10 @@ def test_archive_digest_and_dirty_state_ignore_nonruntime_files(
         staging=tmp_path / "staging",
         repository_root=repository,
     )
-    assert archived_source()["archive_sha256"] != first["archive_sha256"]
+    final = archived_source()
+    assert final["archive_sha256"] != first["archive_sha256"]
+    assert final["runtime_source_sha256"] == first["runtime_source_sha256"]
+    assert final["scoped_dirty"] is True
 
 
 def test_validator_independently_recomputes_runtime_source_digest() -> None:

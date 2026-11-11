@@ -35,6 +35,7 @@ class FakeTokenizer:
             "Brazil": [12, 13],
             " multiword": [20, 21],
             "multiword": [22, 23],
+            'Raw prompt "': [30, 31],
         }[text]
 
 
@@ -108,6 +109,7 @@ def test_audit_marks_only_the_selected_variant_as_single_token() -> None:
             (),
             {
                 "name": "one",
+                "prompt": 'Raw prompt "',
                 "intermediates": ("Brazil", "multiword"),
             },
         )(),
@@ -116,6 +118,15 @@ def test_audit_marks_only_the_selected_variant_as_single_token() -> None:
     audit = audit_tokenization(items, FakeTokenizer())
 
     assert audit[0]["name"] == "one"
+    assert audit[0]["prompt"] == 'Raw prompt "'
+    assert audit[0]["prompt_token_count"] == 2
+    assert audit[0]["prompt_token_ids"] == (30, 31)
+    assert audit[0]["prompt_sha256"] == hashlib.sha256(
+        b'Raw prompt "'
+    ).hexdigest()
+    assert audit[0]["prompt_token_ids_sha256"] == hashlib.sha256(
+        b"[30,31]"
+    ).hexdigest()
     assert audit[0]["intermediates"][0] == {
         "text": "Brazil",
         "token_id": 11,
@@ -128,6 +139,38 @@ def test_audit_marks_only_the_selected_variant_as_single_token() -> None:
     assert audit[0]["intermediates"][1]["single_token"] is False
     assert audit[0]["intermediates"][1]["token_ids"] == (20, 21)
     assert "path" not in json.dumps(audit).lower()
+
+
+def test_audit_aligns_all_93_raw_prompts_and_trailing_delimiters() -> None:
+    items = load_multihop_items(DATASET)
+    encoded_prompts: list[str] = []
+
+    class Tokenizer:
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            return [len(text), ord(text[-1])]
+
+    def encode_prompt(prompt: str):
+        encoded_prompts.append(prompt)
+        return [[128000, len(prompt), ord(prompt[-1])]]
+
+    audit = audit_tokenization(
+        items,
+        Tokenizer(),
+        prompt_encoder=encode_prompt,
+    )
+
+    assert len(audit) == len(items) == 93
+    assert encoded_prompts == [item.prompt for item in items]
+    assert [entry["name"] for entry in audit] == [
+        item.name for item in items
+    ]
+    assert all(
+        entry["prompt_token_ids"][-1] == ord(item.prompt[-1])
+        for entry, item in zip(audit, items, strict=True)
+    )
+    assert any(item.prompt.endswith(" ") for item in items)
+    assert any(item.prompt.endswith(' "') for item in items)
 
 
 def test_loader_accepts_exact_pinned_dataset() -> None:

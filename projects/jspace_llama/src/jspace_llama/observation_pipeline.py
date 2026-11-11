@@ -25,18 +25,22 @@ from jspace_llama.observation_artifacts import (
 from jspace_llama.observation_data import (
     DatasetValidationError,
     PANEL_NAMES,
+    TokenizationAuditError,
     audit_tokenization,
     load_multihop_items,
 )
 from jspace_llama.observation_panel import read_qualitative_panel
-from jspace_llama.observation_readout import evaluate_direct_readout
+from jspace_llama.observation_readout import (
+    ObservationReadoutError,
+    evaluate_direct_readout,
+)
 from jspace_llama.pipeline import (
     _partial_provenance,
     load_pinned_runtime,
 )
 from jspace_llama.provenance import (
     collect_software_provenance,
-    read_source_provenance,
+    read_observation_source_provenance,
 )
 from jspace_llama.runtime import (
     AssetLoadError,
@@ -98,18 +102,24 @@ def execute_real_observation(
     runtime = load_pinned_runtime(config, provenance)
     bundle = runtime.bundle
     try:
-        audit = audit_tokenization(items, bundle.model.tokenizer)
-    except ValueError as error:
-        if not (
-            str(error) == "tokenization produced no token IDs"
-            or str(error).startswith("invalid literal for int()")
-        ):
-            raise
+        audit = audit_tokenization(
+            items,
+            bundle.model.tokenizer,
+            prompt_encoder=lambda prompt: bundle.model.encode(
+                prompt,
+                max_length=512,
+            ),
+        )
+    except TokenizationAuditError as error:
         raise TokenizationError(
             "observational tokenization audit failed"
         ) from error
     if len(audit) != len(items) or any(
         not isinstance(entry, dict)
+        or not isinstance(entry.get("prompt"), str)
+        or not isinstance(entry.get("prompt_token_ids"), (list, tuple))
+        or not entry["prompt_token_ids"]
+        or entry.get("prompt_token_count") != len(entry["prompt_token_ids"])
         or not isinstance(entry.get("intermediates"), (list, tuple))
         or not entry["intermediates"]
         or any(
@@ -147,13 +157,14 @@ def execute_real_observation(
         bundle.dictionary,
         items,
         direct["items"],
+        audit,
         layers=bundle.layers,
         k=25,
         top=10,
     )
     provenance.update(
         {
-            "source": read_source_provenance(project_root),
+            "source": read_observation_source_provenance(project_root),
             "software": collect_software_provenance(),
         }
     )
@@ -178,6 +189,7 @@ EXPECTED_ERRORS = (
     LayerBandError,
     LensIntegrityError,
     DatasetValidationError,
+    ObservationReadoutError,
     torch.OutOfMemoryError,
 )
 
@@ -190,6 +202,7 @@ ERROR_REASON_CODES = {
     LayerBandError: "layer_band_invalid",
     LensIntegrityError: "lens_integrity_failed",
     DatasetValidationError: "dataset_invalid",
+    ObservationReadoutError: "readout_failed",
     torch.OutOfMemoryError: "resource_exhausted",
 }
 
@@ -450,6 +463,16 @@ def run_observation_pipeline(
     started_at = _utc_now()
     initial = base_provenance or _partial_provenance(root, resolved_config)
     provenance = _observation_provenance(initial)
+    if "runtime_source_sha256" not in provenance["source"]:
+        try:
+            provenance["source"] = read_observation_source_provenance(root)
+        except (FileNotFoundError, ValueError):
+            provenance["source"] = {
+                "commit": None,
+                "dirty": None,
+                "scoped_dirty": None,
+                "runtime_source_sha256": None,
+            }
     results_dir = root / "results"
     raw_path = root / "artifacts" / "jspace_observation_raw.json"
     manifest_path = results_dir / "jspace_observation_manifest.json"

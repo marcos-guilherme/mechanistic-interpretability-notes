@@ -136,9 +136,11 @@ def read_source_provenance(project_root: str | Path) -> dict[str, Any]:
     payload = strict_json_loads(path.read_bytes())
     legacy_fields = {"schema_version", "commit", "dirty"}
     current_fields = legacy_fields | {"scoped_dirty", "archive_sha256"}
+    observation_fields = current_fields | {"runtime_source_sha256"}
     if not isinstance(payload, dict) or set(payload) not in {
         frozenset(legacy_fields),
         frozenset(current_fields),
+        frozenset(observation_fields),
     }:
         raise ValueError("source provenance has unexpected fields")
     if payload["schema_version"] != 1:
@@ -162,6 +164,46 @@ def read_source_provenance(project_root: str | Path) -> dict[str, Any]:
             archive_sha256=archive_sha256,
         )
     return source
+
+
+def read_observation_source_provenance(
+    project_root: str | Path,
+) -> dict[str, Any]:
+    path = Path(project_root) / SOURCE_PROVENANCE_FILENAME
+    payload = strict_json_loads(path.read_bytes())
+    expected = {
+        "schema_version",
+        "commit",
+        "dirty",
+        "scoped_dirty",
+        "archive_sha256",
+        "runtime_source_sha256",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise ValueError("observation source provenance has unexpected fields")
+    if payload["schema_version"] != 1:
+        raise ValueError("source provenance schema_version must be 1")
+    commit = payload["commit"]
+    dirty = payload["dirty"]
+    scoped_dirty = payload["scoped_dirty"]
+    archive_digest = payload["archive_sha256"]
+    runtime_digest = payload["runtime_source_sha256"]
+    if not isinstance(commit, str) or HEX_40.fullmatch(commit) is None:
+        raise ValueError("source provenance commit must be a 40-character hash")
+    if not isinstance(dirty, bool) or not isinstance(scoped_dirty, bool):
+        raise ValueError("source provenance dirty fields must be boolean")
+    if not _is_concrete_hex(archive_digest, HEX_64):
+        raise ValueError("source provenance archive_sha256 must be concrete")
+    if not _is_concrete_hex(runtime_digest, HEX_64):
+        raise ValueError(
+            "source provenance runtime_source_sha256 must be concrete"
+        )
+    return {
+        "commit": commit,
+        "dirty": dirty,
+        "scoped_dirty": scoped_dirty,
+        "runtime_source_sha256": runtime_digest,
+    }
 
 
 def package_version(distribution: str) -> str:

@@ -759,10 +759,23 @@ def test_archive_embeds_source_commit_and_dirty_state(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative, encoding="utf-8")
     commands = []
+    repository = tmp_path / "repo"
+    committed = {
+        path.relative_to(repository).as_posix(): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file()
+    }
 
     def fake_git(command, **kwargs):
         commands.append(command)
-        stdout = "9" * 40 + "\n" if "rev-parse" in command else ""
+        if "rev-parse" in command:
+            stdout = "9" * 40 + "\n"
+        elif "ls-tree" in command:
+            stdout = ("\n".join(sorted(committed)) + "\n").encode()
+        elif "show" in command:
+            stdout = committed[command[-1].split(":", 1)[1]]
+        else:
+            stdout = ""
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git)
@@ -783,6 +796,7 @@ def test_archive_embeds_source_commit_and_dirty_state(
         "dirty": False,
         "scoped_dirty": False,
         "archive_sha256": source["archive_sha256"],
+        "runtime_source_sha256": source["runtime_source_sha256"],
     }
     assert "jspace_llama/source_provenance.json" in names
     assert any("status" in command for command in commands)

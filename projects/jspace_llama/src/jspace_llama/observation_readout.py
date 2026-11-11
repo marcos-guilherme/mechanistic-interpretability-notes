@@ -7,11 +7,28 @@ from typing import Any
 
 import torch
 
-from jspace_llama.observation_data import MultihopItem, PANEL_NAMES
+from jspace_llama.observation_data import (
+    MultihopItem,
+    PANEL_NAMES,
+    normalize_prompt_token_ids,
+)
+from jspace_llama.runtime import TokenizationError
+
+
+class ObservationReadoutError(ValueError):
+    """Expected malformed or non-finite numerical readout output."""
 
 
 def rank_one_based(logits: torch.Tensor, token_id: int) -> int:
     """Return a one-based competition rank for ``token_id``."""
+    logits = _logit_vector(logits)
+    if (
+        not isinstance(token_id, int)
+        or isinstance(token_id, bool)
+        or token_id < 0
+        or token_id >= logits.numel()
+    ):
+        raise ObservationReadoutError("target token ID is outside logits")
     score = logits[int(token_id)]
     return 1 + int((logits > score).sum().item())
 
@@ -48,11 +65,25 @@ def aggregate_pass_at_k(
 
 
 def _logit_vector(logits: torch.Tensor) -> torch.Tensor:
+    if not isinstance(logits, torch.Tensor):
+        raise ObservationReadoutError("lens logits must be a tensor")
     if logits.ndim == 1:
-        return logits
-    if logits.ndim == 2 and logits.shape[0] == 1:
-        return logits[0]
-    raise ValueError("lens logits must contain exactly one selected position")
+        vector = logits
+    elif logits.ndim == 2 and logits.shape[0] == 1:
+        vector = logits[0]
+    else:
+        raise ObservationReadoutError(
+            "lens logits must contain exactly one selected position"
+        )
+    if (
+        vector.numel() == 0
+        or not vector.dtype.is_floating_point
+        or not torch.isfinite(vector).all().item()
+    ):
+        raise ObservationReadoutError(
+            "lens logits must be non-empty and finite"
+        )
+    return vector
 
 
 def _best_rank(
@@ -64,6 +95,28 @@ def _best_rank(
         raise ValueError("rank scope must contain at least one layer")
     best = min(selected, key=lambda entry: entry["rank"])
     return best["rank"], best["layer"]
+
+
+def _validate_logits_by_layer(
+    logits_by_layer: Any,
+    layers: list[int],
+) -> dict[int, torch.Tensor]:
+    if not isinstance(logits_by_layer, dict):
+        raise ObservationReadoutError("lens output must map layers to logits")
+    vectors: dict[int, torch.Tensor] = {}
+    vocabulary_size: int | None = None
+    for layer in layers:
+        if layer not in logits_by_layer:
+            raise ObservationReadoutError("lens output is missing a layer")
+        vector = _logit_vector(logits_by_layer[layer])
+        if vocabulary_size is None:
+            vocabulary_size = vector.numel()
+        elif vector.numel() != vocabulary_size:
+            raise ObservationReadoutError(
+                "lens vocabulary dimension differs across layers"
+            )
+        vectors[layer] = vector
+    return vectors
 
 
 def _top_tokens(
@@ -187,6 +240,25 @@ def evaluate_direct_readout(
         if audit_entry is None:
             raise ValueError(f"missing tokenization audit for {item.name}")
         audit_intermediates = audit_entry.get("intermediates")
+        prompt_ids = audit_entry.get("prompt_token_ids")
+        if (
+            audit_entry.get("prompt") != item.prompt
+            or not isinstance(prompt_ids, (list, tuple))
+            or not prompt_ids
+        ):
+            raise ValueError(f"prompt tokenization audit mismatch for {item.name}")
+        try:
+            lens_prompt_ids = normalize_prompt_token_ids(
+                model.encode(item.prompt, max_length=512)
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise TokenizationError(
+                f"lens prompt tokenization failed for {item.name}"
+            ) from error
+        if tuple(prompt_ids) != lens_prompt_ids:
+            raise TokenizationError(
+                f"lens prompt tokens differ from audit for {item.name}"
+            )
         if not isinstance(audit_intermediates, (list, tuple)) or len(
             audit_intermediates
         ) != len(item.intermediates):
@@ -219,6 +291,10 @@ def evaluate_direct_readout(
                 positions=[-1],
                 max_seq_len=512,
                 use_jacobian=use_jacobian,
+            )
+            logits_by_layer = _validate_logits_by_layer(
+                logits_by_layer,
+                layers,
             )
             for intermediate in intermediates:
                 token_id = int(intermediate["token_id"])

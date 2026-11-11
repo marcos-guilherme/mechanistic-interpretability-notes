@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from copy import deepcopy
+import math
 from typing import Any
 
 import torch
 
 from jspace_llama.observation_data import MultihopItem, PANEL_NAMES
+from jspace_llama.observation_readout import ObservationReadoutError
 
 
 def select_panel(
@@ -35,26 +37,64 @@ def read_final_activations(
     model: Any,
     items: Sequence[MultihopItem],
     layers: Sequence[int],
+    audit: Sequence[dict[str, object]],
 ) -> dict[str, dict[int, torch.Tensor]]:
     """Capture each prompt's final-position residuals and move them to CPU."""
     from jspace.hooks import ActivationRecorder
 
     selected_layers = _unique_layers(layers)
+    audited = {
+        entry.get("name"): entry
+        for entry in audit
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    }
+    if len(audited) != len(audit):
+        raise ValueError("prompt tokenization audit names are invalid")
     activations: dict[str, dict[int, torch.Tensor]] = {}
     for item in items:
-        input_ids = model.encode(item.prompt, max_length=512)
+        entry = audited.get(item.name)
+        token_ids = None if entry is None else entry.get("prompt_token_ids")
+        if (
+            not isinstance(token_ids, (list, tuple))
+            or not token_ids
+            or any(
+                not isinstance(token_id, int)
+                or isinstance(token_id, bool)
+                or token_id < 0
+                for token_id in token_ids
+            )
+        ):
+            raise ValueError(f"missing prompt token audit for {item.name}")
+        input_ids = torch.tensor(
+            [list(token_ids)],
+            dtype=torch.long,
+            device=model.input_device,
+        )
         with ActivationRecorder(
             model.layers,
             at=selected_layers,
         ) as recorder:
             model.forward(input_ids)
-        activations[item.name] = {
-            layer: recorder.activations[layer][0, -1]
-            .detach()
-            .float()
-            .cpu()
-            for layer in selected_layers
-        }
+        by_layer: dict[int, torch.Tensor] = {}
+        for layer in selected_layers:
+            activation = recorder.activations[layer]
+            if (
+                not isinstance(activation, torch.Tensor)
+                or activation.ndim != 3
+                or activation.shape[0] != 1
+                or activation.shape[1] != len(token_ids)
+                or activation.shape[2] <= 0
+            ):
+                raise ObservationReadoutError(
+                    "captured activation has invalid shape"
+                )
+            final = activation[0, -1].detach().float().cpu()
+            if not torch.isfinite(final).all().item():
+                raise ObservationReadoutError(
+                    "captured activation is non-finite"
+                )
+            by_layer[layer] = final
+        activations[item.name] = by_layer
     return activations
 
 
@@ -160,6 +200,47 @@ def append_pursuit_slot(
         for candidate in output_items
         if candidate["name"] == item.name
     )
+    try:
+        indices = pursuit.indices
+        coeffs = pursuit.coeffs
+        variance = pursuit.var_explained
+    except AttributeError as error:
+        raise ObservationReadoutError(
+            "pursuit output is missing required fields"
+        ) from error
+    if (
+        not isinstance(indices, torch.Tensor)
+        or not isinstance(coeffs, torch.Tensor)
+        or indices.ndim != 1
+        or coeffs.ndim != 1
+        or indices.numel() != coeffs.numel()
+        or indices.dtype not in {
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        }
+        or not coeffs.dtype.is_floating_point
+        or not torch.isfinite(coeffs).all().item()
+        or (indices < 0).any().item()
+    ):
+        raise ObservationReadoutError(
+            "pursuit indices or coefficients are invalid"
+        )
+    if isinstance(variance, torch.Tensor):
+        if variance.numel() != 1:
+            raise ObservationReadoutError("pursuit variance has invalid shape")
+        variance_value = float(variance.item())
+    else:
+        try:
+            variance_value = float(variance)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ObservationReadoutError(
+                "pursuit variance is invalid"
+            ) from error
+    if not math.isfinite(variance_value):
+        raise ObservationReadoutError("pursuit variance must be finite")
     order = torch.argsort(
         pursuit.coeffs,
         descending=True,
@@ -181,7 +262,7 @@ def append_pursuit_slot(
         {
             "layer": int(layer),
             "tokens": tokens,
-            "variance_explained": float(pursuit.var_explained),
+            "variance_explained": variance_value,
         }
     )
 
@@ -192,6 +273,7 @@ def read_qualitative_panel(
     dictionary: Any,
     items: Sequence[MultihopItem],
     direct_records: Sequence[dict[str, object]],
+    audit: Sequence[dict[str, object]],
     *,
     layers: Sequence[int],
     k: int = 25,
@@ -204,7 +286,7 @@ def read_qualitative_panel(
     selected = select_panel(items)
     selected_layers = _unique_layers(layers)
     reader = activation_reader or read_final_activations
-    activations = reader(model, selected, selected_layers)
+    activations = reader(model, selected, selected_layers, audit)
     output = index_direct_top_tokens(
         direct_records,
         selected,
@@ -220,9 +302,48 @@ def read_qualitative_panel(
         vectors = None
         try:
             vectors = dictionary.unit(layer)
+            if (
+                not isinstance(vectors, torch.Tensor)
+                or vectors.ndim != 2
+                or min(vectors.shape) <= 0
+                or not vectors.dtype.is_floating_point
+                or not torch.isfinite(vectors).all().item()
+            ):
+                raise ObservationReadoutError(
+                    "dictionary vectors must be a finite matrix"
+                )
             for item in selected:
-                hidden = activations[item.name].pop(layer).to(vectors.device)
-                pursuit = pursuit_fn(hidden, vectors, k=k)
+                try:
+                    hidden = activations[item.name].pop(layer).to(
+                        vectors.device
+                    )
+                except (KeyError, AttributeError) as error:
+                    raise ObservationReadoutError(
+                        "panel activation output is incomplete"
+                    ) from error
+                if (
+                    hidden.ndim != 1
+                    or hidden.shape[0] != vectors.shape[1]
+                    or not hidden.dtype.is_floating_point
+                    or not torch.isfinite(hidden).all().item()
+                ):
+                    raise ObservationReadoutError(
+                        "panel activation is malformed or non-finite"
+                    )
+                try:
+                    pursuit = pursuit_fn(hidden, vectors, k=k)
+                except torch.linalg.LinAlgError as error:
+                    raise ObservationReadoutError(
+                        "pursuit numerical decomposition failed"
+                    ) from error
+                if (
+                    isinstance(getattr(pursuit, "indices", None), torch.Tensor)
+                    and pursuit.indices.numel() > 0
+                    and (pursuit.indices >= vectors.shape[0]).any().item()
+                ):
+                    raise ObservationReadoutError(
+                        "pursuit token ID is outside dictionary vectors"
+                    )
                 append_pursuit_slot(
                     output,
                     item,

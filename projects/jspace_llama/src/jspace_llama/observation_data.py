@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from jspace_llama.jsonio import strict_json_loads
 
@@ -18,6 +18,10 @@ EXPECTED_ITEM_COUNT = 93
 
 
 class DatasetValidationError(ValueError):
+    pass
+
+
+class TokenizationAuditError(ValueError):
     pass
 
 
@@ -122,21 +126,56 @@ def canonical_first_token(
         ("raw", text),
     )
     for variant, prompt in variants:
-        token_ids = tuple(
-            int(token_id)
-            for token_id in tokenizer.encode(
-                prompt,
-                add_special_tokens=False,
+        try:
+            token_ids = tuple(
+                int(token_id)
+                for token_id in tokenizer.encode(
+                    prompt,
+                    add_special_tokens=False,
+                )
             )
-        )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise TokenizationAuditError(
+                "tokenization produced invalid token IDs"
+            ) from error
         if token_ids:
             return token_ids[0], token_ids, variant
-    raise ValueError("tokenization produced no token IDs")
+    raise TokenizationAuditError("tokenization produced no token IDs")
+
+
+def normalize_prompt_token_ids(encoded: Any) -> tuple[int, ...]:
+    if hasattr(encoded, "detach"):
+        encoded = encoded.detach().cpu().tolist()
+    if isinstance(encoded, tuple):
+        encoded = list(encoded)
+    if (
+        isinstance(encoded, list)
+        and len(encoded) == 1
+        and isinstance(encoded[0], (list, tuple))
+    ):
+        encoded = list(encoded[0])
+    if not isinstance(encoded, list) or not encoded:
+        raise TokenizationAuditError(
+            "prompt tokenization produced no token IDs"
+        )
+    try:
+        token_ids = tuple(int(token_id) for token_id in encoded)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise TokenizationAuditError(
+            "prompt tokenization produced invalid token IDs"
+        ) from error
+    if any(token_id < 0 for token_id in token_ids):
+        raise TokenizationAuditError(
+            "prompt tokenization produced invalid token IDs"
+        )
+    return token_ids
 
 
 def audit_tokenization(
     items: tuple[MultihopItem, ...],
     tokenizer: Any,
+    *,
+    prompt_encoder: Callable[[str], Any] | None = None,
 ) -> tuple[dict[str, object], ...]:
     audit: list[dict[str, object]] = []
     for item in items:
@@ -158,9 +197,25 @@ def audit_tokenization(
                     "token_ids_sha256": _token_ids_sha256(token_ids),
                 }
             )
+        encoded_prompt = (
+            prompt_encoder(item.prompt)
+            if prompt_encoder is not None
+            else tokenizer.encode(
+                item.prompt,
+                add_special_tokens=False,
+            )
+        )
+        prompt_token_ids = normalize_prompt_token_ids(encoded_prompt)
         audit.append(
             {
                 "name": item.name,
+                "prompt": item.prompt,
+                "prompt_token_ids": prompt_token_ids,
+                "prompt_token_count": len(prompt_token_ids),
+                "prompt_sha256": _text_sha256(item.prompt),
+                "prompt_token_ids_sha256": _token_ids_sha256(
+                    prompt_token_ids
+                ),
                 "intermediates": intermediates,
             }
         )

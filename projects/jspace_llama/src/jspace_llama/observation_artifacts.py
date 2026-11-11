@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import re
 from typing import Any
 
@@ -65,7 +66,7 @@ def observation_provenance_is_complete(provenance: object) -> bool:
             is_hex(source["commit"], 40)
             and isinstance(source["dirty"], bool)
             and source["scoped_dirty"] is False
-            and is_hex(source["archive_sha256"], 64)
+            and is_hex(source["runtime_source_sha256"], 64)
             and model["id"] == "meta-llama/Llama-3.1-8B-Instruct"
             and is_hex(model["resolved_revision"], 40)
             and model["layer_count"] == 32
@@ -159,15 +160,24 @@ def recompute_metrics(
 
 def _compact_records(
     records: list[dict[str, object]],
+    audit: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     compact: list[dict[str, object]] = []
-    for record in records:
+    for record, audited in zip(records, audit, strict=True):
         compact.append(
             {
                 "name": record["name"],
+                "prompt": audited["prompt"],
+                "prompt_token_ids": list(audited["prompt_token_ids"]),
+                "prompt_token_count": audited["prompt_token_count"],
+                "prompt_sha256": audited["prompt_sha256"],
+                "prompt_token_ids_sha256": audited[
+                    "prompt_token_ids_sha256"
+                ],
                 "intermediates": [
                     {
                         "text": intermediate["text"],
+                        "token_id": intermediate["token_id"],
                         "single_token": intermediate["single_token"],
                         **{
                             method: deepcopy(intermediate[method])
@@ -250,15 +260,51 @@ def _validate_complete_payload(
         if not isinstance(intermediates, list) or not intermediates:
             raise ObservationDataError("each direct item needs intermediates")
         audited = audit_entry.get("intermediates")
+        prompt_ids = audit_entry.get("prompt_token_ids")
+        canonical_prompt_ids = (
+            "["
+            + ",".join(str(token_id) for token_id in prompt_ids)
+            + "]"
+            if isinstance(prompt_ids, (list, tuple))
+            else ""
+        )
         if (
-            not isinstance(audited, list)
+            audit_entry.get("prompt") != record.get("prompt")
+            or not isinstance(
+                audit_entry.get("prompt_token_ids"),
+                (list, tuple),
+            )
+            or not audit_entry["prompt_token_ids"]
+            or any(
+                not isinstance(token_id, int)
+                or isinstance(token_id, bool)
+                or token_id < 0
+                for token_id in audit_entry["prompt_token_ids"]
+            )
+            or audit_entry.get("prompt_token_count")
+            != len(audit_entry["prompt_token_ids"])
+            or audit_entry.get("prompt_sha256")
+            != hashlib.sha256(record["prompt"].encode("utf-8")).hexdigest()
+            or audit_entry.get("prompt_token_ids_sha256")
+            != hashlib.sha256(
+                canonical_prompt_ids.encode("utf-8")
+            ).hexdigest()
+            or not isinstance(audited, list)
             or len(audited) != len(intermediates)
             or [
-                (entry.get("text"), entry.get("single_token"))
+                (
+                    entry.get("text"),
+                    entry.get("token_id"),
+                    entry.get("single_token"),
+                )
                 for entry in audited
             ]
             != [
-                (entry.get("text"), entry.get("single_token"))
+                (
+                    entry.get("text"),
+                    entry.get("token_id"),
+                    entry.get("single_token"),
+                )
                 for entry in intermediates
             ]
         ):
@@ -387,7 +433,7 @@ def build_observation_artifacts(
             reason_code or ("unexpected_error" if unexpected else "incomplete_observation")
         )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact": "jspace_observation_manifest",
         "run_id": run_id,
         "status": status,
@@ -404,7 +450,7 @@ def build_observation_artifacts(
         "reason": reason,
     }
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact": "jspace_observation",
         "run_id": run_id,
         "status": status,
@@ -423,7 +469,7 @@ def build_observation_artifacts(
             }
         ),
         "per_item_best_ranks": (
-            _compact_records(records) if payload_complete else []
+            _compact_records(records, audit) if payload_complete else []
         ),
         "panel": deepcopy(panel) if payload_complete else [],
         "layers": layers,

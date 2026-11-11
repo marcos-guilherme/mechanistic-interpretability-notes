@@ -19,7 +19,7 @@
     "manifest_sha256"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "artifact": {"const": "jspace_observation"},
     "run_id": {"type": "string", "minLength": 1},
     "status": {"enum": ["success", "inconclusive"]},
@@ -206,6 +206,7 @@
       "additionalProperties": false,
       "required": [
         "text",
+        "token_id",
         "single_token",
         "jlens",
         "logit_lens"
@@ -221,9 +222,26 @@
     "rankItem": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "intermediates"],
+      "required": [
+        "name",
+        "prompt",
+        "prompt_token_ids",
+        "prompt_token_count",
+        "prompt_sha256",
+        "prompt_token_ids_sha256",
+        "intermediates"
+      ],
       "properties": {
         "name": {"type": "string", "minLength": 1},
+        "prompt": {"type": "string", "minLength": 1},
+        "prompt_token_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "integer", "minimum": 0}
+        },
+        "prompt_token_count": {"type": "integer", "minimum": 1},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "prompt_token_ids_sha256": {"$ref": "#/$defs/sha256"},
         "intermediates": {
           "type": "array",
           "minItems": 1,

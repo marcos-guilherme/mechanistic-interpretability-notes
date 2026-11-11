@@ -12,6 +12,7 @@ from jspace_llama.observation_panel import (
     read_qualitative_panel,
     select_panel,
 )
+from jspace_llama.observation_readout import ObservationReadoutError
 
 
 def _item(name: str) -> MultihopItem:
@@ -27,6 +28,16 @@ def fake_93_items() -> tuple[MultihopItem, ...]:
     ordinary = [_item(f"ordinary-{index}") for index in range(81)]
     panel = [_item(name) for name in reversed(PANEL_NAMES)]
     return tuple(ordinary[:40] + panel + ordinary[40:])
+
+
+def _audit(items):
+    return tuple(
+        {
+            "name": item.name,
+            "prompt_token_ids": [1, 2, 3],
+        }
+        for item in items
+    )
 
 
 def _direct_records(
@@ -103,15 +114,16 @@ class FakeDictionary:
 
     def unit(self, layer: int) -> torch.Tensor:
         self.unit_calls.append(layer)
-        return torch.eye(4)
+        return torch.zeros(16, 4)
 
     def evict(self, layer: int) -> None:
         self.evicted.append(layer)
 
 
-def _activation_reader(model, items, layers):
+def _activation_reader(model, items, layers, audit):
     assert tuple(item.name for item in items) == PANEL_NAMES
     assert tuple(layers) == (12, 13)
+    assert len(audit) >= len(items)
     return {
         item.name: {
             layer: torch.tensor([float(layer), 1.0, 2.0, 3.0])
@@ -160,6 +172,7 @@ def test_dictionary_is_materialized_once_and_evicted_per_layer() -> None:
         dictionary=dictionary,
         items=fake_93_items(),
         direct_records=_direct_records(panel),
+        audit=_audit(fake_93_items()),
         layers=(12, 13),
         k=25,
         top=10,
@@ -222,6 +235,7 @@ def test_pursuit_failure_still_evicts_current_dictionary_layer() -> None:
             dictionary=dictionary,
             items=panel,
             direct_records=_direct_records(panel),
+            audit=_audit(panel),
             layers=(12, 13),
             activation_reader=_activation_reader,
             pursuit_fn=failing_pursuit,
@@ -229,6 +243,70 @@ def test_pursuit_failure_still_evicts_current_dictionary_layer() -> None:
 
     assert dictionary.unit_calls == [12]
     assert dictionary.evicted == [12]
+
+
+@pytest.mark.parametrize(
+    "pursuit",
+    [
+        SimpleNamespace(
+            indices=torch.tensor([1]),
+            coeffs=torch.tensor([float("nan")]),
+            var_explained=torch.tensor(0.5),
+        ),
+        SimpleNamespace(
+            indices=torch.tensor([1.0]),
+            coeffs=torch.tensor([0.5]),
+            var_explained=torch.tensor(0.5),
+        ),
+        SimpleNamespace(
+            indices=torch.tensor([99]),
+            coeffs=torch.tensor([0.5]),
+            var_explained=torch.tensor(0.5),
+        ),
+        SimpleNamespace(
+            indices=torch.tensor([1]),
+            coeffs=torch.tensor([0.5]),
+            var_explained=torch.tensor(float("inf")),
+        ),
+    ],
+)
+def test_panel_rejects_malformed_pursuit_outputs(pursuit) -> None:
+    panel = tuple(_item(name) for name in PANEL_NAMES)
+    dictionary = FakeDictionary()
+
+    with pytest.raises(ObservationReadoutError):
+        read_qualitative_panel(
+            model=object(),
+            dictionary=dictionary,
+            items=panel,
+            direct_records=_direct_records(panel),
+            audit=_audit(panel),
+            layers=(12, 13),
+            activation_reader=_activation_reader,
+            pursuit_fn=lambda *args, **kwargs: pursuit,
+        )
+
+
+def test_panel_accepts_finite_empty_pursuit_decomposition() -> None:
+    panel = tuple(_item(name) for name in PANEL_NAMES)
+    empty = SimpleNamespace(
+        indices=torch.tensor([], dtype=torch.long),
+        coeffs=torch.tensor([], dtype=torch.float32),
+        var_explained=0.0,
+    )
+
+    result = read_qualitative_panel(
+        model=object(),
+        dictionary=FakeDictionary(),
+        items=panel,
+        direct_records=_direct_records(panel),
+        audit=_audit(panel),
+        layers=(12, 13),
+        activation_reader=_activation_reader,
+        pursuit_fn=lambda *args, **kwargs: empty,
+    )
+
+    assert result["items"][0]["pursuit"][0]["tokens"] == []
 
 
 class RecordingModel:
@@ -260,12 +338,14 @@ def test_final_activations_capture_only_last_position_on_cpu() -> None:
     model = RecordingModel()
     items = (_item(PANEL_NAMES[0]), _item(PANEL_NAMES[1]))
 
-    activations = read_final_activations(model, items, layers=(0, 1))
+    activations = read_final_activations(
+        model,
+        items,
+        layers=(0, 1),
+        audit=_audit(items),
+    )
 
-    assert model.encoded == [
-        (items[0].prompt, 512),
-        (items[1].prompt, 512),
-    ]
+    assert model.encoded == []
     assert set(activations) == {items[0].name, items[1].name}
     for by_layer in activations.values():
         assert set(by_layer) == {0, 1}

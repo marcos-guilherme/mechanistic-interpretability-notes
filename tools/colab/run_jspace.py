@@ -635,6 +635,78 @@ def _runtime_git_pathspecs(
     ]
 
 
+def _is_runtime_git_path(path: str, project_relative: str) -> bool:
+    relative = path.removeprefix(f"{project_relative}/")
+    if relative == path:
+        return path == "tools/colab/run_jspace.py"
+    if relative in {"pyproject.toml", "uv.lock"}:
+        return True
+    if relative.startswith("data/"):
+        suffix = Path(relative).suffix.lower()
+        return (
+            suffix in {".json", ".md"}
+            or relative == "data/anthropic-jlens/LICENSE"
+        )
+    if relative.startswith(("src/", "scripts/")):
+        return relative.endswith(".py")
+    if relative.startswith("schemas/"):
+        return relative.endswith(".json")
+    if relative.startswith("notebooks/"):
+        return (
+            relative.endswith(".ipynb")
+            and not relative.endswith("_output.ipynb")
+        )
+    return False
+
+
+def runtime_source_sha256_at_commit(
+    project: Path,
+    repository_root: Path,
+    commit: str,
+) -> str:
+    try:
+        project_relative = project.resolve().relative_to(
+            repository_root.resolve()
+        ).as_posix()
+    except ValueError:
+        project_relative = "projects/jspace_llama"
+    tree = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+            "--",
+            *_runtime_git_pathspecs(project, repository_root),
+        ],
+        cwd=repository_root,
+        capture_output=True,
+        check=True,
+    ).stdout
+    paths = [
+        path
+        for path in tree.decode("utf-8").splitlines()
+        if _is_runtime_git_path(path, project_relative)
+    ]
+    if not paths:
+        raise ValueError("source commit has no runtime-critical files")
+    digest = hashlib.sha256()
+    for label in sorted(paths):
+        content = subprocess.run(
+            ["git", "show", f"{commit}:{label}"],
+            cwd=repository_root,
+            capture_output=True,
+            check=True,
+        ).stdout
+        label_bytes = label.encode("utf-8")
+        digest.update(len(label_bytes).to_bytes(8, "big"))
+        digest.update(label_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def capture_source_provenance(
     repository_root: Path = ROOT,
     project: Path = PROJECT,
@@ -671,6 +743,11 @@ def capture_source_provenance(
         "archive_sha256": runtime_source_sha256(
             project,
             repository_root,
+        ),
+        "runtime_source_sha256": runtime_source_sha256_at_commit(
+            project,
+            repository_root,
+            revision,
         ),
     }
 

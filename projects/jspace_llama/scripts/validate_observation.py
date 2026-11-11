@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+from functools import lru_cache
 import hashlib
 import math
 import os
 from pathlib import Path
 import re
+import subprocess
+import struct
 import sys
 from typing import Any
+import xml.etree.ElementTree as ET
+import zlib
 
 import jsonschema
 
@@ -87,10 +94,29 @@ FAILURE_ERROR_TYPES = {
     "layer_band_invalid": frozenset({"LayerBandError"}),
     "lens_integrity_failed": frozenset({"LensIntegrityError"}),
     "dataset_invalid": frozenset({"DatasetValidationError"}),
+    "readout_failed": frozenset({"ObservationReadoutError"}),
 }
 MAX_METADATA_JSON_BYTES = 2_000_000
 MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
-AUDIT_ITEM_FIELDS = {"name", "intermediates"}
+MAX_FIGURE_BYTES = 5 * 1_048_576
+MAX_IMAGE_DIMENSION = 10_000
+MAX_PNG_CHUNKS = 4_096
+MAX_EMBEDDED_PNG_BYTES = 4 * 1_048_576
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+FIGURE_NAMES = tuple(
+    f"jspace_observation_{stem}{suffix}"
+    for stem in ("pass_at_k", "rank_heatmap", "panel")
+    for suffix in (".png", ".svg")
+)
+AUDIT_ITEM_FIELDS = {
+    "name",
+    "prompt",
+    "prompt_token_ids",
+    "prompt_token_count",
+    "prompt_sha256",
+    "prompt_token_ids_sha256",
+    "intermediates",
+}
 AUDIT_INTERMEDIATE_FIELDS = {
     "text",
     "token_id",
@@ -249,7 +275,7 @@ def _provenance_complete(provenance: dict[str, Any]) -> bool:
                 _is_hex(source["commit"], 40),
                 isinstance(source["dirty"], bool),
                 source["scoped_dirty"] is False,
-                _is_hex(source["archive_sha256"], 64),
+                _is_hex(source["runtime_source_sha256"], 64),
                 model["id"] == "meta-llama/Llama-3.1-8B-Instruct",
                 _is_hex(model["resolved_revision"], 40),
                 model["layer_count"] == 32,
@@ -284,6 +310,397 @@ def _provenance_complete(provenance: dict[str, Any]) -> bool:
         )
     except (KeyError, TypeError, AttributeError):
         return False
+
+
+def _runtime_git_pathspecs(project: Path, repository: Path) -> list[str]:
+    try:
+        relative = project.resolve().relative_to(repository.resolve()).as_posix()
+    except ValueError as error:
+        raise ObservationValidationError(
+            "project root is outside its source repository"
+        ) from error
+    return [
+        f"{relative}/data",
+        f"{relative}/src",
+        f"{relative}/notebooks",
+        f"{relative}/schemas",
+        f"{relative}/scripts",
+        f"{relative}/pyproject.toml",
+        f"{relative}/uv.lock",
+        "tools/colab/run_jspace.py",
+    ]
+
+
+def _is_runtime_git_path(path: str, project_relative: str) -> bool:
+    relative = path.removeprefix(f"{project_relative}/")
+    if relative == path:
+        return path == "tools/colab/run_jspace.py"
+    if relative in {"pyproject.toml", "uv.lock"}:
+        return True
+    if relative.startswith("data/"):
+        suffix = Path(relative).suffix.lower()
+        return (
+            suffix in {".json", ".md"}
+            or relative == "data/anthropic-jlens/LICENSE"
+        )
+    if relative.startswith(("src/", "scripts/")):
+        return relative.endswith(".py")
+    if relative.startswith("schemas/"):
+        return relative.endswith(".json")
+    if relative.startswith("notebooks/"):
+        return (
+            relative.endswith(".ipynb")
+            and not relative.endswith("_output.ipynb")
+        )
+    return False
+
+
+def _git_bytes(
+    repository: Path,
+    command: list[str],
+    *,
+    error_message: str,
+) -> bytes:
+    completed = subprocess.run(
+        command,
+        cwd=repository,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ObservationValidationError(error_message)
+    return completed.stdout
+
+
+@lru_cache(maxsize=8)
+def _runtime_source_sha256_at_commit(
+    project: Path,
+    commit: str,
+) -> str:
+    repository = project.resolve().parents[1]
+    project_relative = project.resolve().relative_to(repository).as_posix()
+    tree = _git_bytes(
+        repository,
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+            "--",
+            *_runtime_git_pathspecs(project, repository),
+        ],
+        error_message="source commit is unavailable from local repository",
+    )
+    paths = [
+        path
+        for path in tree.decode("utf-8").splitlines()
+        if _is_runtime_git_path(path, project_relative)
+    ]
+    if not paths:
+        raise ObservationValidationError(
+            "source commit contains no runtime-critical files"
+        )
+    digest = hashlib.sha256()
+    for label in sorted(paths):
+        content = _git_bytes(
+            repository,
+            ["git", "show", f"{commit}:{label}"],
+            error_message=f"source commit cannot read runtime file: {label}",
+        )
+        label_bytes = label.encode("utf-8")
+        digest.update(len(label_bytes).to_bytes(8, "big"))
+        digest.update(label_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _validate_source_provenance(
+    source: dict[str, Any],
+    *,
+    project: Path,
+) -> None:
+    commit = source.get("commit")
+    digest = source.get("runtime_source_sha256")
+    if commit is None and digest is None:
+        return
+    if not _is_hex(commit, 40) or not _is_hex(digest, 64):
+        raise ObservationValidationError(
+            "source commit and runtime digest must be concrete together"
+        )
+    actual = _runtime_source_sha256_at_commit(project, commit)
+    if digest != actual:
+        raise ObservationValidationError(
+            "runtime source SHA-256 does not match source commit"
+        )
+
+
+def _validate_png(name: str, payload: bytes) -> None:
+    if len(payload) > MAX_FIGURE_BYTES or not payload.startswith(PNG_SIGNATURE):
+        raise ObservationValidationError(f"invalid PNG figure: {name}")
+    offset = len(PNG_SIGNATURE)
+    chunks = 0
+    seen_ihdr = seen_plte = seen_idat = seen_iend = False
+    idat_finished = False
+    idat_bytes = 0
+    bit_depth = color_type = -1
+    plte_entries = 0
+    while offset < len(payload):
+        if seen_iend or len(payload) - offset < 12:
+            raise ObservationValidationError(f"truncated/trailing PNG: {name}")
+        length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        chunk_type = payload[offset + 4 : offset + 8]
+        if length > MAX_FIGURE_BYTES or length > len(payload) - offset - 12:
+            raise ObservationValidationError(f"invalid PNG chunk length: {name}")
+        if (
+            not all(65 <= byte <= 90 or 97 <= byte <= 122 for byte in chunk_type)
+            or not 65 <= chunk_type[2] <= 90
+        ):
+            raise ObservationValidationError(f"invalid PNG chunk type: {name}")
+        start = offset + 8
+        end = start + length
+        data = payload[start:end]
+        expected_crc = struct.unpack(">I", payload[end : end + 4])[0]
+        if expected_crc != zlib.crc32(chunk_type + data) & 0xFFFFFFFF:
+            raise ObservationValidationError(f"invalid PNG checksum: {name}")
+        offset = end + 4
+        chunks += 1
+        if chunks > MAX_PNG_CHUNKS or (chunks == 1 and chunk_type != b"IHDR"):
+            raise ObservationValidationError(f"invalid PNG chunk order: {name}")
+        if chunk_type == b"IHDR":
+            if seen_ihdr or chunks != 1 or length != 13:
+                raise ObservationValidationError(f"invalid PNG IHDR: {name}")
+            seen_ihdr = True
+            width, height = struct.unpack(">II", data[:8])
+            if not (
+                0 < width <= MAX_IMAGE_DIMENSION
+                and 0 < height <= MAX_IMAGE_DIMENSION
+            ):
+                raise ObservationValidationError(f"invalid PNG dimensions: {name}")
+            bit_depth, color_type, compression, filter_method, interlace = data[8:]
+            valid_depths = {
+                0: {1, 2, 4, 8, 16},
+                2: {8, 16},
+                3: {1, 2, 4, 8},
+                4: {8, 16},
+                6: {8, 16},
+            }
+            if (
+                bit_depth not in valid_depths.get(color_type, set())
+                or compression != 0
+                or filter_method != 0
+                or interlace not in {0, 1}
+            ):
+                raise ObservationValidationError(f"invalid PNG IHDR fields: {name}")
+        elif chunk_type == b"PLTE":
+            if (
+                not seen_ihdr
+                or seen_plte
+                or seen_idat
+                or length == 0
+                or length % 3
+                or length > 768
+            ):
+                raise ObservationValidationError(f"invalid PNG PLTE: {name}")
+            seen_plte = True
+            plte_entries = length // 3
+        elif chunk_type == b"IDAT":
+            if not seen_ihdr or idat_finished:
+                raise ObservationValidationError(f"misordered PNG IDAT: {name}")
+            seen_idat = True
+            idat_bytes += length
+        elif chunk_type == b"IEND":
+            if not seen_ihdr or not seen_idat or length != 0 or offset != len(payload):
+                raise ObservationValidationError(f"invalid PNG IEND: {name}")
+            seen_iend = True
+        elif 65 <= chunk_type[0] <= 90:
+            raise ObservationValidationError(f"unknown critical PNG chunk: {name}")
+        if seen_idat and chunk_type not in {b"IDAT", b"IEND"}:
+            idat_finished = True
+    if not (seen_ihdr and seen_idat and idat_bytes and seen_iend):
+        raise ObservationValidationError(f"incomplete PNG: {name}")
+    if color_type == 3 and (not seen_plte or plte_entries > 2**bit_depth):
+        raise ObservationValidationError(f"invalid indexed PNG palette: {name}")
+    if color_type in {0, 4} and seen_plte:
+        raise ObservationValidationError(f"forbidden PNG palette: {name}")
+
+
+SAFE_SVG_ELEMENTS = frozenset(
+    {
+        "agent", "clippath", "creator", "date", "defs", "format", "g",
+        "image", "metadata", "path", "rdf", "rect", "style", "svg",
+        "title", "type", "use", "work",
+    }
+)
+SAFE_SVG_ATTRIBUTES = frozenset(
+    {
+        "clip-path", "d", "height", "href", "id", "resource", "style",
+        "transform", "type", "version", "viewbox", "width", "x", "y",
+    }
+)
+SAFE_STYLE_PROPERTIES = frozenset(
+    {
+        "fill", "opacity", "stroke", "stroke-linecap", "stroke-linejoin",
+        "stroke-opacity", "stroke-width",
+    }
+)
+CSS_ESCAPE = re.compile(
+    r"\\(?:([0-9a-fA-F]{1,6})[ \t\r\n\f]?|([^0-9a-fA-F\r\n\f])|(\r\n|[\r\n\f]))"
+)
+SVG_FRAGMENT = re.compile(r"#[A-Za-z_][A-Za-z0-9_.:-]*\Z")
+SVG_CLIP_PATH = re.compile(
+    r"url\(\s*#[A-Za-z_][A-Za-z0-9_.:-]*\s*\)\Z",
+    flags=re.IGNORECASE,
+)
+
+
+def _decode_css_escapes(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        hexadecimal, escaped, newline = match.groups()
+        if hexadecimal is not None:
+            codepoint = int(hexadecimal, 16)
+            if codepoint == 0 or codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+                return "\N{REPLACEMENT CHARACTER}"
+            return chr(codepoint)
+        if escaped is not None:
+            return escaped
+        if newline is not None:
+            return ""
+        raise AssertionError("unreachable CSS escape")
+
+    return CSS_ESCAPE.sub(replace, value)
+
+
+def _validate_style(name: str, value: str) -> None:
+    normalized = _decode_css_escapes(value)
+    if (
+        "url" in normalized.lower()
+        or "@import" in normalized.lower()
+        or "\\" in normalized
+        or "@" in normalized
+    ):
+        raise ObservationValidationError(f"unsafe SVG CSS: {name}")
+    for declaration in normalized.split(";"):
+        if not declaration.strip():
+            continue
+        if ":" not in declaration:
+            raise ObservationValidationError(f"unsafe SVG CSS: {name}")
+        prop, prop_value = declaration.split(":", 1)
+        if (
+            prop.strip().lower() not in SAFE_STYLE_PROPERTIES
+            or re.fullmatch(r"[-#A-Za-z0-9.,%+ ]+", prop_value.strip()) is None
+        ):
+            raise ObservationValidationError(f"unsafe SVG CSS: {name}")
+
+
+def _validate_embedded_png(name: str, value: str) -> None:
+    prefix = "data:image/png;base64,"
+    if not value.lower().startswith(prefix):
+        raise ObservationValidationError(f"external SVG content: {name}")
+    encoded = "".join(value[len(prefix) :].split())
+    if len(encoded) > ((MAX_EMBEDDED_PNG_BYTES + 2) // 3) * 4:
+        raise ObservationValidationError(f"embedded PNG too large: {name}")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ObservationValidationError(f"invalid embedded PNG: {name}") from error
+    if len(payload) > MAX_EMBEDDED_PNG_BYTES:
+        raise ObservationValidationError(f"embedded PNG too large: {name}")
+    _validate_png(name, payload)
+
+
+def _local_xml_name(value: str) -> str:
+    return value.rsplit("}", 1)[-1].lower()
+
+
+def _validate_svg(name: str, payload: bytes) -> None:
+    if len(payload) > MAX_FIGURE_BYTES:
+        raise ObservationValidationError(f"SVG figure is too large: {name}")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ObservationValidationError(f"invalid UTF-8 SVG: {name}") from error
+    upper = text.upper()
+    if "<!DOCTYPE" in upper or "<!ENTITY" in upper or "<?XML-STYLESHEET" in upper:
+        raise ObservationValidationError(f"active SVG content: {name}")
+    without_declaration = re.sub(
+        r"^\s*<\?xml[^?]*\?>", "", text, count=1, flags=re.IGNORECASE
+    )
+    if "<?" in without_declaration:
+        raise ObservationValidationError(f"active SVG content: {name}")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as error:
+        raise ObservationValidationError(f"invalid XML SVG: {name}") from error
+    if _local_xml_name(root.tag) != "svg":
+        raise ObservationValidationError(f"SVG root is not svg: {name}")
+    for element in root.iter():
+        element_name = _local_xml_name(element.tag)
+        if element_name not in SAFE_SVG_ELEMENTS:
+            raise ObservationValidationError(f"unsafe SVG element: {name}")
+        if element_name == "style":
+            normalized = re.sub(
+                r"\s+", "", _decode_css_escapes(element.text or "")
+            ).lower()
+            if normalized != "*{stroke-linejoin:round;stroke-linecap:butt}":
+                raise ObservationValidationError(f"unsafe SVG style: {name}")
+        for attribute, value in element.attrib.items():
+            local = _local_xml_name(attribute)
+            normalized = _decode_css_escapes(value.strip())
+            if local not in SAFE_SVG_ATTRIBUTES or local.startswith("on"):
+                raise ObservationValidationError(f"unsafe SVG attribute: {name}")
+            if local == "style":
+                _validate_style(name, normalized)
+            elif local == "clip-path" and SVG_CLIP_PATH.fullmatch(normalized) is None:
+                raise ObservationValidationError(f"external SVG content: {name}")
+            elif local == "href":
+                if element_name == "use":
+                    if SVG_FRAGMENT.fullmatch(normalized) is None:
+                        raise ObservationValidationError(f"external SVG content: {name}")
+                elif element_name == "image":
+                    _validate_embedded_png(name, normalized)
+                else:
+                    raise ObservationValidationError(f"external SVG content: {name}")
+            elif local == "resource" and normalized != "http://purl.org/dc/dcmitype/StillImage":
+                raise ObservationValidationError(f"external SVG content: {name}")
+            elif local == "type" and normalized != "text/css":
+                raise ObservationValidationError(f"unsafe SVG type: {name}")
+
+
+def _validate_figures(results_dir: Path, *, success: bool) -> None:
+    existing = {
+        path.name
+        for path in results_dir.iterdir()
+        if path.name.startswith("jspace_observation_")
+        and path.suffix.lower() in {".png", ".svg"}
+    }
+    expected = set(FIGURE_NAMES)
+    if not success:
+        if existing & expected:
+            raise ObservationValidationError(
+                "non-success observation must not publish success figures"
+            )
+        return
+    if existing != expected:
+        raise ObservationValidationError(
+            "canonical observation figure set is incomplete or substituted"
+        )
+    for name in FIGURE_NAMES:
+        path = results_dir / name
+        try:
+            payload = read_regular_file_bounded(
+                path,
+                max_bytes=MAX_FIGURE_BYTES,
+            )
+        except (BoundedFileError, OSError) as error:
+            raise ObservationValidationError(
+                f"invalid figure file {name}: {error}"
+            ) from error
+        if path.suffix == ".png":
+            _validate_png(name, payload)
+        else:
+            _validate_svg(name, payload)
 
 
 def _metric(
@@ -354,9 +771,31 @@ def _validate_counts_and_claims(result: dict[str, Any]) -> bool:
     if complete and (not band or not all_layers or not set(band) <= set(all_layers)):
         raise ObservationValidationError("layer scopes are incomplete")
     for record in records:
+        prompt_ids = record["prompt_token_ids"]
+        if (
+            not isinstance(record["prompt"], str)
+            or not record["prompt"].endswith((" ", ' "'))
+            or not isinstance(prompt_ids, list)
+            or not prompt_ids
+            or record["prompt_token_count"] != len(prompt_ids)
+            or record["prompt_sha256"] != _text_sha256(record["prompt"])
+            or record["prompt_token_ids_sha256"]
+            != _token_ids_sha256(prompt_ids)
+        ):
+            raise ObservationValidationError(
+                "compact prompt tokenization audit is invalid"
+            )
         if not record["intermediates"]:
             raise ObservationValidationError("item has no intermediates")
         for intermediate in record["intermediates"]:
+            if (
+                not isinstance(intermediate["token_id"], int)
+                or isinstance(intermediate["token_id"], bool)
+                or intermediate["token_id"] < 0
+            ):
+                raise ObservationValidationError(
+                    "compact intermediate token ID is invalid"
+                )
             for method in METHODS:
                 detail = intermediate[method]
                 if [rank["layer"] for rank in detail["ranks"]] != all_layers:
@@ -471,6 +910,21 @@ def _validate_tokenization_audit(
             not isinstance(audit_item, dict)
             or set(audit_item) != AUDIT_ITEM_FIELDS
             or audit_item["name"] != direct_item["name"]
+            or audit_item["prompt"] != direct_item["prompt"]
+            or not isinstance(audit_item["prompt_token_ids"], list)
+            or not audit_item["prompt_token_ids"]
+            or any(
+                not isinstance(token_id, int)
+                or isinstance(token_id, bool)
+                or token_id < 0
+                for token_id in audit_item["prompt_token_ids"]
+            )
+            or audit_item["prompt_token_count"]
+            != len(audit_item["prompt_token_ids"])
+            or audit_item["prompt_sha256"]
+            != _text_sha256(audit_item["prompt"])
+            or audit_item["prompt_token_ids_sha256"]
+            != _token_ids_sha256(audit_item["prompt_token_ids"])
             or not isinstance(audit_item["intermediates"], list)
             or len(audit_item["intermediates"])
             != len(direct_item["intermediates"])
@@ -535,13 +989,22 @@ def _validate_tokenization_audit(
 
 def _project_raw_records(
     records: list[dict[str, Any]],
+    audit: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     return [
         {
             "name": record["name"],
+            "prompt": audited["prompt"],
+            "prompt_token_ids": audited["prompt_token_ids"],
+            "prompt_token_count": audited["prompt_token_count"],
+            "prompt_sha256": audited["prompt_sha256"],
+            "prompt_token_ids_sha256": audited[
+                "prompt_token_ids_sha256"
+            ],
             "intermediates": [
                 {
                     "text": intermediate["text"],
+                    "token_id": intermediate["token_id"],
                     "single_token": intermediate["single_token"],
                     **{
                         method: intermediate[method]
@@ -551,7 +1014,7 @@ def _project_raw_records(
                 for intermediate in record["intermediates"]
             ],
         }
-        for record in records
+        for record, audited in zip(records, audit, strict=True)
     ]
 
 
@@ -578,7 +1041,14 @@ def _reconcile_raw(
         raise ObservationValidationError(
             "raw layer scopes differ from compact result"
         )
-    projected = _project_raw_records(raw["direct"]["items"])
+    _validate_tokenization_audit(
+        raw["tokenization_audit"],
+        raw["direct"]["items"],
+    )
+    projected = _project_raw_records(
+        raw["direct"]["items"],
+        raw["tokenization_audit"],
+    )
     if projected != result["per_item_best_ranks"]:
         raise ObservationValidationError(
             "raw direct records differ from compact result"
@@ -614,10 +1084,6 @@ def _reconcile_raw(
             raise ObservationValidationError(
                 "raw panel differs from raw direct records"
             )
-    _validate_tokenization_audit(
-        raw["tokenization_audit"],
-        raw["direct"]["items"],
-    )
     if (
         _raw_tokenization_summary(raw["tokenization_audit"])
         != result["tokenization_summary"]
@@ -728,6 +1194,10 @@ def validate_documents(
     )
     if manifest["run_id"] != result["run_id"]:
         raise ObservationValidationError("run_id differs across artifacts")
+    _validate_source_provenance(
+        manifest["provenance"]["source"],
+        project=schemas.parent,
+    )
     if result["manifest_sha256"] != document_sha256(manifest):
         raise ObservationValidationError(
             "manifest_sha256 does not match manifest"
@@ -814,6 +1284,10 @@ def validate_result_files(
         result,
         schema_dir=schema_dir,
         raw_path=raw_path,
+    )
+    _validate_figures(
+        results_dir,
+        success=result["status"] == "success",
     )
 
 

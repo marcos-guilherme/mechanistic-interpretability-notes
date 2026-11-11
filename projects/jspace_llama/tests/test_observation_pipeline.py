@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -20,6 +22,7 @@ from jspace_llama.observation_data import (
     PANEL_NAMES,
     MultihopItem,
 )
+from jspace_llama.observation_readout import ObservationReadoutError
 from jspace_llama.runtime import (
     AssetLoadError,
     CudaRequiredError,
@@ -36,13 +39,30 @@ SCHEMAS = PROJECT / "schemas"
 VALIDATOR = PROJECT / "scripts" / "validate_observation.py"
 
 
+@lru_cache(maxsize=1)
+def _source_claim() -> tuple[str, str]:
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    digest = _load_validator()._runtime_source_sha256_at_commit(
+        PROJECT,
+        commit,
+    )
+    return commit, digest
+
+
 def _provenance() -> dict[str, object]:
+    commit, runtime_digest = _source_claim()
     return {
         "source": {
-            "commit": "1" * 40,
+            "commit": commit,
             "dirty": False,
             "scoped_dirty": False,
-            "archive_sha256": "2" * 64,
+            "runtime_source_sha256": runtime_digest,
         },
         "model": {
             "id": "meta-llama/Llama-3.1-8B-Instruct",
@@ -125,9 +145,20 @@ def complete_payload(*, all_pass_at_k_zero: bool = False) -> dict[str, object]:
             }
         records.append(record)
         token_ids = [index]
+        prompt_token_ids = [1000, index]
+        prompt = record["prompt"]
         audit.append(
             {
                 "name": name,
+                "prompt": prompt,
+                "prompt_token_ids": prompt_token_ids,
+                "prompt_token_count": len(prompt_token_ids),
+                "prompt_sha256": hashlib.sha256(
+                    prompt.encode()
+                ).hexdigest(),
+                "prompt_token_ids_sha256": hashlib.sha256(
+                    f"[1000,{index}]".encode()
+                ).hexdigest(),
                 "intermediates": [
                     {
                         "text": f"intermediate-{index}",
@@ -313,6 +344,7 @@ def production_sized_payload() -> dict[str, object]:
     return payload
 
 
+@lru_cache(maxsize=1)
 def _load_validator():
     spec = importlib.util.spec_from_file_location("validate_observation", VALIDATOR)
     assert spec is not None and spec.loader is not None
@@ -352,6 +384,149 @@ def _write_fake_figure_outputs(output_dir: Path) -> None:
             '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
             encoding="utf-8",
         )
+
+
+def _copy_canonical_figures(root: Path) -> None:
+    figure_dir = root / "results" / "figures"
+    for path in figure_dir.iterdir():
+        shutil.copy2(path, root / "results" / f"jspace_{path.name}")
+
+
+def _copy_fixture_figures(destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in _load_validator().FIGURE_NAMES:
+        shutil.copy2(PROJECT / "results" / name, destination / name)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "substituted", "malformed_png", "hostile_svg"],
+)
+def test_validator_rejects_incomplete_or_hostile_figure_sets(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    validator = _load_validator()
+    results = tmp_path / "results"
+    _copy_fixture_figures(results)
+    if mutation == "missing":
+        (results / validator.FIGURE_NAMES[0]).unlink()
+    elif mutation == "substituted":
+        (results / "jspace_observation_substitute.png").write_bytes(
+            (PROJECT / "results" / validator.FIGURE_NAMES[0]).read_bytes()
+        )
+    elif mutation == "malformed_png":
+        (results / validator.FIGURE_NAMES[0]).write_bytes(
+            b"\x89PNG\r\n\x1a\nbroken"
+        )
+    else:
+        svg = next(name for name in validator.FIGURE_NAMES if name.endswith(".svg"))
+        (results / svg).write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>',
+            encoding="utf-8",
+        )
+
+    with pytest.raises(validator.ObservationValidationError):
+        validator._validate_figures(results, success=True)
+
+
+def test_validator_accepts_complete_canonical_figure_set(tmp_path: Path) -> None:
+    validator = _load_validator()
+    results = tmp_path / "results"
+    _copy_fixture_figures(results)
+
+    validator._validate_figures(results, success=True)
+
+
+def test_runtime_source_digest_is_historical_and_platform_independent(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    project = repository / "projects" / "jspace_llama"
+    source = project / "src" / "jspace_llama" / "module.py"
+    runner = repository / "tools" / "colab" / "run_jspace.py"
+    source.parent.mkdir(parents=True)
+    runner.parent.mkdir(parents=True)
+    source.write_bytes(b"line_one = 1\nline_two = 2\n")
+    runner.write_bytes(b"RUNNER = True\n")
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Tests"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "fixture"],
+        cwd=repository,
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    validator = _load_validator()
+    before = validator._runtime_source_sha256_at_commit(project, commit)
+
+    source.write_bytes(b"line_one = 1\r\nline_two = 2\r\n")
+    validator._runtime_source_sha256_at_commit.cache_clear()
+
+    assert validator._runtime_source_sha256_at_commit(project, commit) == before
+
+
+def test_runtime_source_digest_recomputes_historical_branch_commit() -> None:
+    assert _load_validator()._runtime_source_sha256_at_commit(
+        PROJECT,
+        "b7c0327d08a497f45c8257e751af318ad9917024",
+    ) == "9026506027532d70f1ce3603bd7ebe6f1dabf92d781c2b43478e00fba13dc440"
+
+
+def test_runtime_source_digest_rejects_fake_commit_and_tampered_hash(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_artifacts import build_observation_artifacts
+
+    payload = complete_payload()
+    for field, value in (
+        ("commit", "f" * 40),
+        ("runtime_source_sha256", "f" * 64),
+    ):
+        provenance = copy.deepcopy(payload["provenance"])
+        provenance["source"][field] = value
+        manifest, result = build_observation_artifacts(
+            run_id="provenance-test",
+            started_at="2026-11-11T00:00:00Z",
+            ended_at="2026-11-11T00:00:01Z",
+            provenance=provenance,
+            raw_artifact_sha256="0" * 64,
+            payload=payload,
+        )
+        raw_path = tmp_path / f"{field}.json"
+        atomic_write_json(raw_path, payload)
+        manifest["raw_artifact_sha256"] = hashlib.sha256(
+            raw_path.read_bytes()
+        ).hexdigest()
+        result["manifest_sha256"] = document_sha256(manifest)
+        validator = _load_validator()
+
+        with pytest.raises(
+            validator.ObservationValidationError,
+            match="source commit|runtime source",
+        ):
+            validator.validate_documents(
+                manifest,
+                result,
+                schema_dir=SCHEMAS,
+                raw_path=raw_path,
+            )
 
 
 def _rewrite_raw_and_hashes(
@@ -403,6 +578,7 @@ def test_production_sized_compact_and_raw_render_and_validate(
 
     assert 2_000_000 < compact_path.stat().st_size <= limit
     assert 2_000_000 < raw_path.stat().st_size <= limit
+    _copy_canonical_figures(tmp_path)
     _load_validator().validate_result_files(
         tmp_path / "results",
         SCHEMAS,
@@ -893,6 +1069,11 @@ def test_incomplete_provenance_still_reconciles_complete_raw(
             "dataset_invalid",
             "DatasetValidationError",
         ),
+        (
+            ObservationReadoutError("invalid numerical readout"),
+            "readout_failed",
+            "ObservationReadoutError",
+        ),
     ],
     ids=[
         "cuda",
@@ -904,6 +1085,7 @@ def test_incomplete_provenance_still_reconciles_complete_raw(
         "layer-band",
         "lens-integrity",
         "dataset",
+        "readout",
     ],
 )
 def test_validator_enforces_pipeline_failure_reason_to_type_mapping(
@@ -1088,6 +1270,78 @@ def test_validator_rejects_raw_rank_that_contradicts_compact(
     with pytest.raises(
         validator.ObservationValidationError,
         match="raw.*compact|direct.*differ",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "prompt",
+        "prompt_token_ids",
+        "prompt_token_count",
+        "prompt_sha256",
+        "prompt_token_ids_sha256",
+    ],
+)
+def test_validator_rejects_prompt_audit_tampering(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    item = raw["tokenization_audit"][0]
+    if field == "prompt":
+        item[field] = "tampered prompt "
+    elif field == "prompt_token_ids":
+        item[field][0] += 1
+    elif field == "prompt_token_count":
+        item[field] += 1
+    else:
+        item[field] = "f" * 64
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="tokenization audit|tokenization.*invalid",
+    ):
+        validator.validate_documents(
+            manifest,
+            result,
+            schema_dir=SCHEMAS,
+            raw_path=raw_path,
+        )
+
+
+def test_validator_rejects_intermediate_token_id_tampering(
+    tmp_path: Path,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    raw["tokenization_audit"][0]["intermediates"][0]["token_id"] += 1
+    raw["direct"]["items"][0]["intermediates"][0]["token_id"] += 1
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+    validator = _load_validator()
+
+    with pytest.raises(
+        validator.ObservationValidationError,
+        match="raw direct records differ|tokenization audit",
     ):
         validator.validate_documents(
             manifest,
@@ -1467,7 +1721,7 @@ def test_unrelated_tokenization_programming_error_is_reraised(
     monkeypatch.setattr(
         pipeline,
         "audit_tokenization",
-        lambda items, tokenizer: (_ for _ in ()).throw(
+        lambda items, tokenizer, **kwargs: (_ for _ in ()).throw(
             ValueError("programming bug")
         ),
     )
@@ -1526,7 +1780,7 @@ def test_real_observation_wiring_never_calls_model_generation(
     monkeypatch.setattr(
         pipeline,
         "audit_tokenization",
-        lambda items, tokenizer: payload["tokenization_audit"],
+        lambda items, tokenizer, **kwargs: payload["tokenization_audit"],
     )
     monkeypatch.setattr(
         pipeline,
@@ -1540,7 +1794,7 @@ def test_real_observation_wiring_never_calls_model_generation(
     )
     monkeypatch.setattr(
         pipeline,
-        "read_source_provenance",
+        "read_observation_source_provenance",
         lambda root: _provenance()["source"],
     )
     monkeypatch.setattr(
