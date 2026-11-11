@@ -72,7 +72,7 @@ tokenização, o painel, os escopos de camadas, a proveniência e os hashes
 precisam formar um conjunto completo e validado. Isso não exige `pass@k` alto;
 uma execução completa pode ser operacionalmente bem-sucedida mesmo com
 recuperação baixa. A execução canônica
-`bc8ec4ac-1ecd-4cee-8022-294bd0734040` terminou com esse `success` operacional
+`2fcb8a49-136f-4868-91cc-f98f9dc2e57d` terminou com esse `success` operacional
 em uma NVIDIA L4; não houve geração de texto nem intervenção.
 
 No conjunto completo, as métricas extraídas do JSON validado foram:
@@ -90,7 +90,9 @@ itens e teve recuperação maior: na *band*, J-lens `0,395062 / 0,641975 /
 0,691358` e logit lens `0,333333 / 0,456790 / 0,506173`; em todas as camadas,
 J-lens `0,395062 / 0,654321 / 0,716049` e logit lens `0,333333 / 0,456790 /
 0,518519`, sempre na ordem `pass@1/5/10`. Isso descreve este conjunto e esta
-tokenização; não demonstra superioridade causal da J-lens.
+tokenização; não demonstra superioridade causal da J-lens. Na versão canônica
+do schema, a auditoria também registra os IDs e hashes dos tokens dos 93
+prompts, e o painel reutiliza esses IDs em vez de tokenizar o texto novamente.
 
 O painel ajuda a tornar a escala dos ranks concreta. `Brazil` em
 `amazon-language`, `Mars` em `mars-color`, `gold` em `atomic-79-symbol`,

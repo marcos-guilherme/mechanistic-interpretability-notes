@@ -154,9 +154,9 @@ sem que isso demonstre um workspace útil ou um efeito causal.
 
 ### Resultados observacionais
 
-A execução canônica `bc8ec4ac-1ecd-4cee-8022-294bd0734040` começou em
-`2026-11-11T07:53:02.832167Z` e terminou em
-`2026-11-11T07:55:37.531131Z`. Em uma NVIDIA L4, com `bfloat16` e CUDA 13.2,
+A execução canônica `2fcb8a49-136f-4868-91cc-f98f9dc2e57d` começou em
+`2026-11-11T15:14:19.427513Z` e terminou em
+`2026-11-11T15:19:29.812212Z`. Em uma NVIDIA L4, com `bfloat16` e CUDA 13.2,
 ela processou os 93 itens e terminou com `status=success`. Esse estado afirma
 que o pipeline e a evidência foram completados e validados; não afirma que a
 recuperação foi alta e não modifica o resultado causal anterior.
@@ -178,6 +178,12 @@ single-token aparecem em 81 itens. Nesse subconjunto, os valores
 `0,333333 / 0,456790 / 0,518519`, respectivamente. A diferença em relação ao
 conjunto total sugere que a tokenização participa da dificuldade medida; não
 autoriza generalizar para outros tokenizers, lentes ou corpora.
+
+No schema v2, não auditei apenas o primeiro token de cada intermediário. Também
+registrei os IDs e os hashes da tokenização bruta dos 93 prompts. O readout
+confere se a tokenização interna da lente coincide com essa auditoria, e o
+painel reutiliza os mesmos IDs ao capturar a posição final. Isso fecha uma
+fonte de divergência silenciosa entre duas leituras do mesmo texto.
 
 O painel fixo de 12 itens mostra tanto recuperações claras quanto falhas.
 `Brazil` em `amazon-language`, `Mars`, `gold`, `March`, `oxygen` e `east`
@@ -392,6 +398,20 @@ como caminho. A correção foi tornar a checagem sensível ao campo e ao schema,
 em vez de procurar padrões suspeitos em qualquer string. A lição comum é que
 reprodutibilidade depende tanto de rejeitar saídas indevidas quanto de não
 rejeitar dados válidos por heurísticas genéricas.
+
+A revisão integral ainda revelou que a primeira validação numérica do
+`gradient_pursuit` criava uma máscara `isfinite` do tamanho inteiro do
+dicionário em GPU. A L4 encerrou essa tentativa como `resource_exhausted`, sem
+publicar artefatos parciais. Troquei a checagem por blocos limitados a um milhão
+de elementos e repeti o protocolo em uma sessão limpa. A execução v2 então
+terminou com `success`, preservando a rejeição de `NaN` e infinito sem exigir
+uma segunda cópia do dicionário na memória.
+
+Também passei a recomputar a proveniência do código a partir dos blobs do commit
+histórico, e não apenas a confiar no hash declarado pelo produtor. O manifesto
+canônico aponta para o commit `4cd9756786ee83dabc0d3340385919fd408cc549`
+e para o digest de fonte
+`0c7d97282d2d4c699a4c392d5efb6a9388dd9d8cee0b7b9d5f63e6dc7f8dc8e8`.
 
 ## Evidência canônica
 

@@ -59,6 +59,11 @@ bruto, não fornece `target` ao modelo, não gera texto e não edita ativações
 O `success` obtido significa que artefatos, hashes, schemas e métricas foram
 validados, não que uma relação causal tenha sido demonstrada.
 
+Na versão canônica do schema, a auditoria cobre também os IDs e hashes dos
+tokens dos 93 prompts; o painel reutiliza esses IDs. A proveniência do código é
+recomputada a partir do commit histórico registrado, e as seis figuras fazem
+parte da validação independente do resultado.
+
 Na *band* 12–28, os `pass@1/5/10` foram `0,344086 / 0,548387 / 0,596774` para
 a J-lens e `0,284946 / 0,392473 / 0,435484` para a logit lens. Nas camadas
 ajustadas 0–30, foram `0,344086 / 0,564516 / 0,629032` e
