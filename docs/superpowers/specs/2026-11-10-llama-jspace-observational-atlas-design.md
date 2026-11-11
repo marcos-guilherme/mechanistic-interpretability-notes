@@ -4,8 +4,8 @@
 
 Antes de escolher outra intervenção causal, esta etapa vai observar quais
 direções rotuladas pela J-lens aparecem no estado interno do
-`meta-llama/Llama-3.1-8B-Instruct`. A exploração não parte de `spider`, `ant` ou
-qualquer outro conceito-alvo e não executa geração nem altera ativações.
+`meta-llama/Llama-3.1-8B-Instruct`. A exploração não trata `spider → ant` como
+hipótese privilegiada, não executa geração e não altera ativações.
 
 O resultado anterior permanece como evidência canônica da primeira tentativa
 causal. Ele foi inconclusivo porque o baseline comportamental não foi
@@ -20,91 +20,118 @@ significado.
 
 ## Pergunta exploratória
 
-Quais direções rotuladas por tokens aparecem com maior saliência e persistência
-nas camadas cobertas pela J-lens, como esses padrões variam entre contextos e
-como evoluem ao longo das posições de conteúdo de alguns prompts?
+Nos prompts multihop publicados com o estudo, a J-lens do Llama 3.1 8B recupera
+os conceitos intermediários não escritos no texto? Quais outros tokens aparecem
+no workspace, e como o ranking direto da J-lens difere da logit lens e da
+decomposição esparsa por *gradient pursuit*?
 
 Esta pergunta é descritiva. O atlas poderá sugerir hipóteses para uma fase
 causal posterior, mas não será usado para afirmar que uma direção é necessária
 ou suficiente para o comportamento do modelo.
 
-## Painel pré-definido de prompts
+## Fonte e conjunto de prompts
 
-O painel terá oito prompts curtos em inglês, dois por categoria:
+Será usada a cópia vendorizada de `lens-eval-multihop.json` incluída no
+`jspace` fixado no commit
+`04c822a255fe0a10d84e08ec499e5e09f4b7d37a`. Ela reproduz o conjunto sintético
+publicado pela Anthropic sob Apache 2.0 no repositório
+`anthropics/jacobian-lens`. A cópia foi verificada contra o commit upstream
+`581d398613e5602a5af361e1c34d3a92ea82ba8e`; ambas têm SHA-256
+`2cd5a47aa3d7627708843bc61f03ab1d10eda4184f357c5cbf93c97184e32c9c`. O
+arquivo contém 93 itens com:
 
-| Categoria | Identificador | Texto |
-|---|---|---|
-| Fato concreto | `fact_capital` | `The capital of France is` |
-| Fato concreto | `fact_freezing` | `Water freezes at` |
-| Senso comum e narrativa | `common_glass` | `When Maya dropped the glass, it` |
-| Senso comum e narrativa | `common_key` | `To unlock the door, he used a` |
-| Raciocínio abstrato | `abstract_syllogism` | `If all daxes are blue and this is a dax, then it is` |
-| Raciocínio abstrato | `abstract_arithmetic` | `Two plus three equals` |
-| Controle lexical | `control_repeat` | `Repeat exactly: meadow` |
-| Controle lexical | `control_ready` | `Reply with one word: ready` |
+- `name`: identificador estável;
+- `prompt`: completação textual que termina imediatamente antes da resposta;
+- `target`: resposta esperada, usada para definir a posição de leitura;
+- `intermediates`: conceitos intermediários que o prompt exige sem
+  necessariamente mencioná-los.
 
-Os prompts serão fixados na configuração e renderizados com o chat template do
-modelo e `add_generation_prompt=True`. O texto, os IDs tokenizados e seus
-digests serão registrados na proveniência. Nenhum prompt será alterado depois
-de observar o atlas canônico.
+Os prompts serão usados como texto bruto, exatamente como publicados, sem chat
+template, instrução adicional ou geração. O texto, a ordem dos itens, o hash do
+arquivo, os IDs tokenizados e seus digests serão registrados na proveniência.
 
-## Desenho em duas etapas
+O conjunto contém o caso `spider-legs`:
 
-### 1. Varredura ampla
+```text
+Fact: The number of legs on the animal that spins webs is
+```
 
-Para cada um dos oito prompts, o readout será calculado no último slot do
-prefill, imediatamente antes da geração, em todas as camadas ajustadas e
-validadas da J-lens. Cada slot armazenará:
+O prompt original termina com um espaço. Seu intermediário é `spider` e o alvo
+final é `8`. Isso permite reexaminar a hipótese anterior sem depender da
+paráfrase e do chat template usados na primeira execução causal.
 
-- camada, posição e token observado;
-- os 25 token IDs recuperados, seus textos decodificados, ranks e coeficientes;
-- variância explicada pela decomposição;
-- identificador do prompt e categoria.
+## Desenho observacional
 
-Essa etapa compara contextos com custo controlado e mostra o conteúdo disponível
-no ponto em que o modelo começaria a responder.
+### 1. Auditoria de tokenização
 
-### 2. Leitura profunda
+Antes do readout, cada intermediário será tokenizado nas variantes com e sem
+espaço inicial. A execução registrará a sequência completa, o token ID usado
+pela regra canônica de primeiro token e se o conceito é single-token no
+tokenizer do Llama.
 
-Três prompts serão escolhidos automaticamente a partir da varredura ampla. Para
-cada prompt, a assinatura será o conjunto não vazio de token IDs que aparece em
-pelo menos duas camadas. Quando houver pelo menos três prompts elegíveis, serão
-avaliadas todas as combinações de três e escolhida a que maximiza a distância
-média de Jaccard, definida como `1 - |A ∩ B| / |A ∪ B|`; empates serão
-resolvidos pela ordem fixa da configuração. Quando houver menos de três prompts
-elegíveis, o fallback fixo será `fact_capital`, `common_glass` e
-`abstract_syllogism`.
+O score canônico seguirá a regra publicada, baseada no primeiro token. Um score
+secundário será calculado somente sobre intermediários single-token. Assim, a
+replicação permanece comparável sem esconder diferenças entre o tokenizer do
+Llama e os tokenizers dos modelos avaliados no estudo.
 
-Nos três prompts escolhidos, o readout será repetido para todas as posições do
-texto do usuário e para o último slot do prefill. O span do usuário será
-identificado por offsets do tokenizer sobre o chat template renderizado. A
-execução falhará explicitamente se os offsets não permitirem um mapeamento
-inequívoco; posições do template não serão silenciosamente tratadas como
-conteúdo.
+### 2. Avaliação completa dos 93 prompts
+
+Para cada item, o readout será calculado no último token do prompt, a posição
+que antecede `target`. Em todas as camadas do workspace band, serão obtidos:
+
+- ranking direto do intermediário pela J-lens;
+- ranking do mesmo token pela logit lens;
+- melhor rank e camada para cada método;
+- `pass@1`, `pass@5` e `pass@10` agregados.
+
+O workspace band será a análise principal. A repetição em todas as camadas
+ajustadas pela lente será uma análise secundária explicitamente identificada,
+para mostrar se um acerto depende de camadas externas ao band.
+
+### 3. Painel qualitativo fixo
+
+Doze itens serão aprofundados, escolhidos antes da execução para cobrir relações
+e domínios diferentes:
+
+`carnival-ocean`, `amazon-language`, `mars-color`, `spider-legs`,
+`basketball-players`, `atomic-79-symbol`, `planet-3-moons`,
+`rhyme-rain-neighbor`, `etym-wargod-month`, `chem-photosynthesis-Z`,
+`nhop-primary-planet` e `inv-sunrise-opposite`.
+
+Para cada camada do workspace band, o painel armazenará separadamente:
+
+- os dez primeiros tokens do ranking direto da J-lens;
+- os dez primeiros tokens da logit lens;
+- até 25 direções selecionadas por *gradient pursuit*, com coeficientes e
+  variância explicada.
+
+Nenhum resultado da avaliação completa alterará essa seleção.
 
 ## Métricas e interpretação
 
-A unidade de agregação será o token ID, preservando separadamente o texto
-decodificado. Isso evita unir tokens distintos apenas porque sua apresentação é
-parecida. Para cada token ID, o resumo registrará:
+Para cada intermediário, o melhor rank será o mínimo entre as camadas do escopo
+avaliado. `pass@k` será a média, entre os 93 itens, da fração de intermediários
+cujo melhor rank é menor ou igual a `k`, com ranks apresentados em base 1. Essa
+é a definição canônica do conjunto.
 
-- número e proporção de prompts em que aparece;
-- número de slots e camadas em que aparece;
-- primeira e última camada;
-- maior coeficiente e o slot correspondente;
-- rank mediano e melhor rank;
-- persistência, medida pelo número de pares de camadas adjacentes em que o token
-  aparece.
+Serão publicados separadamente:
 
-Coeficientes brutos e variância explicada serão preservados para diagnóstico,
-mas a comparação visual entre camadas usará uma saliência baseada em rank,
-`(k - rank + 1) / k`. Essa decisão evita assumir que a escala absoluta dos
-coeficientes é diretamente comparável entre todas as camadas.
+- J-lens no workspace band, resultado principal;
+- logit lens no mesmo band, baseline de método;
+- J-lens e logit lens em todas as camadas ajustadas, análises secundárias;
+- scores canônicos por primeiro token e scores do subconjunto single-token.
+
+A unidade registrada será sempre o token ID, preservando o texto decodificado.
+O *gradient pursuit* não será incluído em `pass@k`: ele representa uma
+decomposição esparsa do residual, não o mesmo ranking produzido pelo readout
+direto da lente. Seus coeficientes, ranks e variância explicada serão usados
+somente na análise qualitativa dos 12 itens.
 
 O atlas não aplicará testes confirmatórios nem escolherá um “conceito vencedor”.
 Direções candidatas para uma intervenção futura deverão combinar presença em
-mais de um prompt, persistência entre camadas, leitura posicional coerente e
-uma hipótese comportamental que possa ser testada em prompts separados.
+mais de um prompt, persistência entre camadas, coerência com os intermediários
+esperados e uma hipótese comportamental que possa ser testada em prompts
+separados.
 
 ## Arquitetura
 
@@ -113,21 +140,27 @@ proveniência e do runner Colab. A lógica causal existente continuará isolada.
 
 Novos componentes terão responsabilidades separadas:
 
-1. uma configuração observacional fixa conterá prompts, `k`, política de
-   posições e regra de seleção profunda;
-2. um coletor registrará ativações de prefill sem geração e as manterá fora do
-   Git;
-3. um leitor processará uma camada por vez, materializará o dicionário uma única
-   vez por camada, calculará todos os slots necessários e o removerá da GPU;
-4. um agregador produzirá assinaturas, seleção determinística e resumos;
+1. um carregador validará licença, revisão, hash, schema, ordem e contagem dos
+   93 itens vendorizados;
+2. um auditor de tokenização produzirá as variantes canônicas e o subconjunto
+   single-token;
+3. um avaliador obterá os rankings diretos da J-lens e da logit lens no último
+   token de cada prompt;
+4. um leitor qualitativo processará o painel fixo por camada e manterá separado
+   o resultado de *gradient pursuit*;
 5. um pipeline observacional gravará artefatos atômicos e proveniência;
 6. um gerador de figuras produzirá as visualizações estáticas;
 7. um notebook fino apenas chamará o pipeline.
 
-As ativações serão transferidas para CPU após a captura. Durante o readout,
-somente a camada corrente do dicionário e os vetores necessários retornarão à
-GPU. Essa ordem preserva a estratégia limitada em memória usada na primeira
-execução e evita rematerializar o dicionário para cada prompt.
+As ativações do painel serão transferidas para CPU após a captura. Durante a
+decomposição esparsa, somente a camada corrente do dicionário e os vetores
+necessários retornarão à GPU. Essa ordem preserva a estratégia limitada em
+memória usada na primeira execução e evita rematerializar o dicionário para
+cada prompt.
+
+O pipeline não chamará geração, hooks de intervenção, `LensSwap`, clamp ou
+perturbações aleatórias. A única alteração sobre o modelo será a instrumentação
+necessária para registrar ativações de um forward pass.
 
 ## Artefatos e visualizações
 
@@ -139,34 +172,32 @@ O experimento terá artefatos próprios, sem modificar
 - `results/jspace_observation_manifest.json`: proveniência e estado da
   execução, incluindo SHA-256 do artefato bruto local;
 - `results/jspace_observation.json`: resumo compacto validado por schema;
-- `results/jspace_observation_layers.{png,svg}`: heatmap de token por camada na
-  varredura ampla;
-- `results/jspace_observation_variance.{png,svg}`: variância explicada por
-  camada e prompt;
-- `results/jspace_observation_positions.{png,svg}`: leitura posição por camada
-  dos três prompts aprofundados.
+- `results/jspace_observation_pass_at_k.{png,svg}`: comparação entre J-lens e
+  logit lens no band e em todas as camadas;
+- `results/jspace_observation_rank_heatmap.{png,svg}`: rank do intermediário
+  esperado por item e camada;
+- `results/jspace_observation_panel.{png,svg}`: trajetórias dos tokens nos 12
+  casos qualitativos.
 
-O heatmap amplo mostrará somente os token IDs mais persistentes, com texto
-decodificado como rótulo e saliência baseada em rank. O JSON compacto manterá
-todos os resumos necessários para reconstruir as figuras. Tokens especiais,
-whitespace e fragmentos subword não serão removidos do dado bruto; qualquer
-filtro de apresentação será explícito e registrado.
+O JSON compacto manterá os agregados e os dados necessários para reconstruir as
+figuras. Tokens especiais, whitespace e fragmentos subword não serão removidos
+do dado bruto; qualquer filtro de apresentação será explícito e registrado.
 
 ## Falhas e estados
 
-Falhas de acesso, download, CUDA, integridade da lente, dimensões, camadas,
-tokenização, mapeamento de offsets, memória ou decomposição numérica terão
+Falhas de acesso, download, hash ou schema do conjunto, CUDA, integridade da
+lente, dimensões, camadas, tokenização, memória ou decomposição numérica terão
 códigos distintos. Escritas serão atômicas para não misturar artefatos de
 execuções diferentes.
 
 Uma execução só terá estado `success` quando:
 
 - a proveniência e a integridade da lente estiverem completas;
-- a varredura ampla contiver exatamente um slot por combinação de oito prompts
-  e camadas esperadas;
-- as camadas esperadas tiverem sido processadas;
-- exatamente três prompts tiverem sido selecionados pela regra registrada;
-- todas as posições de conteúdo desses prompts tiverem sido processadas;
+- o arquivo de origem corresponder à revisão, ao hash e aos 93 itens esperados;
+- os 93 prompts tiverem auditoria de tokenização e rankings dos dois métodos;
+- as camadas do workspace band tiverem sido processadas como análise principal;
+- todas as camadas ajustadas tiverem sido processadas como análise secundária;
+- os 12 itens fixos tiverem o readout qualitativo completo;
 - o resumo compacto e as três famílias de figuras forem validados.
 
 `success` significa apenas que a observação foi executada como especificado. Não
@@ -178,9 +209,11 @@ Os testes locais usarão modelos, tokenizers, ativações e dicionários falsos 
 verificar:
 
 - captura e liberação de memória camada por camada;
-- ranks, agregações, persistência e regra de desempate;
-- seleção por distância de Jaccard e fallback;
-- mapeamento exato das posições de conteúdo;
+- validação do arquivo vendorizado, de seu hash e de seus 93 itens;
+- variantes de tokenização, primeiro token e filtro single-token;
+- ranks em base 1, mínimo entre camadas e `pass@1/5/10`;
+- separação entre workspace band e análise de todas as camadas;
+- separação entre ranking direto e decomposição por *gradient pursuit*;
 - separação entre artefatos brutos e compactos;
 - schemas, hashes, proveniência e escrita atômica;
 - geração determinística das matrizes usadas pelas figuras;
@@ -192,7 +225,7 @@ não contém lógica duplicada e permanece sem outputs versionados.
 
 ## Separação entre exploração e confirmação
 
-O painel de oito prompts será o conjunto de seleção exploratória. Se o atlas
+Os 93 prompts oficiais serão o conjunto de seleção exploratória. Se o atlas
 sugerir uma direção candidata, a fase seguinte terá uma especificação própria:
 conceito, camadas, intensidade, comportamento esperado, controles e prompts
 confirmatórios serão fixados antes da execução. Os prompts deste atlas não
