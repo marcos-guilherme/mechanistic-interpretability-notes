@@ -23,6 +23,7 @@ IMPORT_PACKAGE = "jspace_llama"
 LOCKED_REQUIREMENTS = Path("/tmp/jspace-locked-requirements.txt")
 SUCCESS_MARKER = "JSPACE_BOOTSTRAP_SUCCESS"
 SUCCESS_NONCE_ENV = "JSPACE_SUCCESS_NONCE"
+UPGRADED_MODULE_ROOTS = frozenset({"matplotlib"})
 
 
 def consume_success_nonce() -> str:
@@ -231,9 +232,12 @@ def migrate_same_session(
         if _resolved_sys_path_entry(entry) not in excluded_paths
     ]
     sys.path[:] = [str(source), *retained_paths]
-    package_prefix = f"{package_name}."
+    module_roots = {*UPGRADED_MODULE_ROOTS, package_name}
     for name in tuple(sys.modules):
-        if name == package_name or name.startswith(package_prefix):
+        if any(
+            name == root or name.startswith(f"{root}.")
+            for root in module_roots
+        ):
             sys.modules.pop(name, None)
     importlib.invalidate_caches()
 

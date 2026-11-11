@@ -560,6 +560,56 @@ def test_bootstrap_migrates_legacy_checkout_and_cached_namespace(
         real_invalidate_caches()
 
 
+def test_bootstrap_invalidates_preloaded_matplotlib_tree_only(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "matplotlib_session_migration")
+    project = tmp_path / "content" / "jspace_llama_project"
+    (project / "src").mkdir(parents=True)
+    legacy = tmp_path / "content" / "jspace_llama"
+    stale_names = (
+        "matplotlib",
+        "matplotlib.pyplot",
+        "matplotlib.backends",
+        "matplotlib.backends.backend_svg",
+    )
+    unrelated_names = ("matplotlib_inline", "seaborn")
+    test_names = (*stale_names, *unrelated_names)
+    missing = object()
+    prior_modules = {
+        name: sys.modules.get(name, missing) for name in test_names
+    }
+    prior_sys_path = list(sys.path)
+    stale_modules = {name: ModuleType(name) for name in stale_names}
+    unrelated_modules = {
+        name: ModuleType(name) for name in unrelated_names
+    }
+
+    try:
+        sys.modules.update(stale_modules)
+        sys.modules.update(unrelated_modules)
+
+        bootstrap.migrate_same_session(
+            project,
+            legacy,
+            package_name="bootstrap_test_package",
+        )
+
+        assert all(name not in sys.modules for name in stale_names)
+        assert all(
+            sys.modules[name] is unrelated_modules[name]
+            for name in unrelated_names
+        )
+    finally:
+        sys.path[:] = prior_sys_path
+        for name, prior in prior_modules.items():
+            if prior is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prior
+        importlib.invalidate_caches()
+
+
 def test_same_session_migration_replaces_stale_and_duplicate_paths(
     tmp_path: Path,
 ) -> None:
