@@ -36,6 +36,7 @@ RESULT_ALLOWLIST = frozenset(
 )
 ARCHIVE_ROOT_FILES = frozenset({"README.md", "pyproject.toml", "uv.lock"})
 ARCHIVE_SUFFIXES = {
+    "data": frozenset({"", ".json", ".md"}),
     "notebooks": frozenset({".ipynb"}),
     "schemas": frozenset({".json"}),
     "scripts": frozenset({".py"}),
@@ -411,6 +412,12 @@ def _archive_candidates(project: Path) -> list[Path]:
                     continue
                 if suffix not in suffixes:
                     raise ValueError(f"archive source has unapproved suffix: {path}")
+                relative = path.relative_to(project).as_posix()
+                if (
+                    suffix == ""
+                    and relative != "data/anthropic-jlens/LICENSE"
+                ):
+                    raise ValueError(f"archive source has unapproved suffix: {path}")
                 validate_archive_file(path, project)
                 candidates.append(path)
 
@@ -447,10 +454,9 @@ def _runtime_critical_files(
         for path in _archive_candidates(project)
         if (
             path.relative_to(project).parts[0]
-            in {"src", "notebooks", "schemas", "scripts"}
+            in {"data", "src", "notebooks", "schemas", "scripts"}
             or path.name in {"pyproject.toml", "uv.lock"}
         )
-        and path.name != "README.md"
         and "tests" not in path.relative_to(project).parts
     ]
     runner = repository_root / "tools" / "colab" / "run_jspace.py"
@@ -505,6 +511,7 @@ def _runtime_git_pathspecs(
     except ValueError:
         project_relative = "projects/jspace_llama"
     return [
+        f"{project_relative}/data",
         f"{project_relative}/src",
         f"{project_relative}/notebooks",
         f"{project_relative}/schemas",

@@ -67,6 +67,7 @@ def _runtime_source_files(
     repository = repository_root.resolve()
     candidates: list[Path] = []
     for pattern in (
+        "data/**/*",
         "src/**/*.py",
         "notebooks/*.ipynb",
         "schemas/*.json",

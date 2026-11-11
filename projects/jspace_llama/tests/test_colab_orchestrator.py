@@ -132,6 +132,12 @@ def test_archive_contains_only_remote_project_inputs(tmp_path: Path) -> None:
         "pyproject.toml": "project",
         "uv.lock": "lock",
         "README.md": "docs",
+        "data/anthropic-jlens/LICENSE": "license",
+        "data/anthropic-jlens/README.md": "dataset docs",
+        (
+            "data/anthropic-jlens/evaluations/"
+            "lens-eval-multihop.json"
+        ): '{"items":[]}',
         "src/jspace_llama/core.py": "source",
         "tests/test_core.py": "tests",
         "scripts/colab_bootstrap.py": "script",
@@ -171,12 +177,75 @@ def test_archive_contains_only_remote_project_inputs(tmp_path: Path) -> None:
         "jspace_llama/pyproject.toml",
         "jspace_llama/uv.lock",
         "jspace_llama/README.md",
+        "jspace_llama/data/anthropic-jlens/LICENSE",
+        "jspace_llama/data/anthropic-jlens/README.md",
+        (
+            "jspace_llama/data/anthropic-jlens/evaluations/"
+            "lens-eval-multihop.json"
+        ),
         "jspace_llama/src/jspace_llama/core.py",
         "jspace_llama/tests/test_core.py",
         "jspace_llama/scripts/colab_bootstrap.py",
         "jspace_llama/notebooks/01_readout_and_causal_swap.ipynb",
         "jspace_llama/source_provenance.json",
     }
+
+
+def test_archive_rejects_other_extensionless_data_files(tmp_path: Path) -> None:
+    runner = load_module(RUNNER_PATH, "run_jspace_data_suffix")
+    project = tmp_path / "projects" / "jspace_llama"
+    for relative in (
+        "README.md",
+        "pyproject.toml",
+        "uv.lock",
+        "data/anthropic-jlens/LICENSE",
+        "data/other/NOTICE",
+    ):
+        path = project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unapproved suffix"):
+        runner.build_archive(
+            project=project,
+            staging=tmp_path / ".colab-staging",
+            repository_root=ROOT,
+        )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "data/anthropic-jlens/LICENSE",
+        "data/anthropic-jlens/README.md",
+        "data/anthropic-jlens/evaluations/lens-eval-multihop.json",
+    ],
+)
+def test_archive_digest_covers_observational_data(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    runner = load_module(
+        RUNNER_PATH,
+        f"run_jspace_data_digest_{Path(relative).name}",
+    )
+    project = tmp_path / "projects" / "jspace_llama"
+    for project_relative in (
+        "README.md",
+        "pyproject.toml",
+        "uv.lock",
+        "data/anthropic-jlens/LICENSE",
+        "data/anthropic-jlens/README.md",
+        "data/anthropic-jlens/evaluations/lens-eval-multihop.json",
+    ):
+        path = project / project_relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(project_relative, encoding="utf-8")
+
+    before = runner.runtime_source_sha256(project, ROOT)
+    (project / relative).write_text("changed", encoding="utf-8")
+
+    assert runner.runtime_source_sha256(project, ROOT) != before
 
 
 def test_bootstrap_safe_extract_rejects_path_traversal(tmp_path: Path) -> None:
