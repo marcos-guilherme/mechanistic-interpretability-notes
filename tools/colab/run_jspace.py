@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from contextlib import contextmanager
+import gzip
 import hashlib
 import io
 import json
@@ -39,6 +41,8 @@ MAX_OBSERVATION_JSON_BYTES = 5 * 1_048_576
 MAX_FIGURE_BYTES = 5 * 1_048_576
 MAX_ARCHIVE_BYTES = 40 * 1_048_576
 MAX_IMAGE_DIMENSION = 10_000
+MAX_TAR_HEADER_OVERHEAD_BYTES = 1_048_576
+TAR_BLOCK_BYTES = 512
 RESULT_SETS = {
     "causal": frozenset(
         {
@@ -109,6 +113,58 @@ def result_size_limit(name: str) -> int:
     if name.endswith((".png", ".svg")):
         return MAX_FIGURE_BYTES
     return MAX_RESULT_BYTES
+
+
+def decompressed_tar_limit(result_set: str) -> int:
+    allowlist = result_allowlist(result_set)
+    padded_payload_bytes = sum(
+        (
+            (result_size_limit(name) + TAR_BLOCK_BYTES - 1)
+            // TAR_BLOCK_BYTES
+        )
+        * TAR_BLOCK_BYTES
+        for name in allowlist
+    )
+    standard_header_bytes = len(allowlist) * TAR_BLOCK_BYTES
+    return (
+        padded_payload_bytes
+        + standard_header_bytes
+        + MAX_TAR_HEADER_OVERHEAD_BYTES
+    )
+
+
+class _BoundedDecompressedReader:
+    def __init__(self, source, limit: int) -> None:
+        self._source = source
+        self._limit = limit
+        self._count = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        remaining = self._limit - self._count
+        requested = remaining + 1 if size < 0 else min(size, remaining + 1)
+        payload = self._source.read(requested)
+        if len(payload) > remaining:
+            raise ValueError(
+                "decompressed TAR exceeds selected result profile limit"
+            )
+        self._count += len(payload)
+        return payload
+
+
+@contextmanager
+def open_bounded_result_tar(
+    archive_source,
+    result_set: str,
+):
+    with gzip.GzipFile(fileobj=archive_source, mode="rb") as decompressed:
+        bounded = _BoundedDecompressedReader(
+            decompressed,
+            decompressed_tar_limit(result_set),
+        )
+        with tarfile.open(fileobj=bounded, mode="r|") as handle:
+            yield handle
 
 
 def huggingface_token_path(home: Path | None = None) -> Path:
@@ -1100,6 +1156,77 @@ def _replace_result_payloads(
             raise
 
 
+def _scan_result_tar_members(
+    handle: tarfile.TarFile,
+    allowlist: set[str],
+) -> list[tuple[str, int]]:
+    members: list[tuple[str, int]] = []
+    names: set[str] = set()
+    total_size = 0
+    for member in handle:
+        name = _normalized_result_member(member.name)
+        if name in names:
+            raise ValueError("duplicate result archive member")
+        if name not in allowlist:
+            raise ValueError(f"unexpected result archive member: {name}")
+        if len(members) >= len(allowlist):
+            raise ValueError("too many result archive members")
+        if not member.isfile() or member.issym() or member.islnk():
+            raise ValueError(
+                "result archive must contain regular files only"
+            )
+        size_limit = result_size_limit(name)
+        if member.size < 0 or member.size > size_limit:
+            raise ValueError(f"result artifact is too large: {name}")
+        total_size += member.size
+        if total_size > MAX_ARCHIVE_BYTES:
+            raise ValueError("result archive expands beyond size limit")
+        names.add(name)
+        members.append((name, member.size))
+
+    missing = allowlist - names
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise FileNotFoundError(
+            f"missing result archive member: {joined}"
+        )
+    return members
+
+
+def _read_validated_result_tar(
+    handle: tarfile.TarFile,
+    expected: list[tuple[str, int]],
+) -> dict[str, bytes]:
+    payloads: dict[str, bytes] = {}
+    index = 0
+    for member in handle:
+        if index >= len(expected):
+            raise ValueError("result archive changed after validation")
+        expected_name, expected_size = expected[index]
+        name = _normalized_result_member(member.name)
+        if (
+            name != expected_name
+            or member.size != expected_size
+            or not member.isfile()
+            or member.issym()
+            or member.islnk()
+        ):
+            raise ValueError("result archive changed after validation")
+        size_limit = result_size_limit(name)
+        source = handle.extractfile(member)
+        if source is None:
+            raise ValueError(f"cannot read result artifact: {name}")
+        payload = source.read(size_limit + 1)
+        if len(payload) > size_limit:
+            raise ValueError(f"result artifact is too large: {name}")
+        _validate_result_bytes(name, payload)
+        payloads[name] = payload
+        index += 1
+    if index != len(expected):
+        raise ValueError("result archive changed after validation")
+    return payloads
+
+
 def extract_results_archive(
     archive: Path,
     project: Path = PROJECT,
@@ -1109,57 +1236,18 @@ def extract_results_archive(
     archive_metadata = os.lstat(archive)
     validate_result_archive(archive, metadata=archive_metadata)
     with open_validated_file(archive, archive_metadata) as archive_source:
-        with tarfile.open(fileobj=archive_source, mode="r:gz") as handle:
-            members: list[tuple[tarfile.TarInfo, str]] = []
-            names: set[str] = set()
-            total_size = 0
-            for member in handle:
-                name = _normalized_result_member(member.name)
-                if name in names:
-                    raise ValueError("duplicate result archive member")
-                if name not in allowlist:
-                    raise ValueError(
-                        f"unexpected result archive member: {name}"
-                    )
-                if len(members) >= len(allowlist):
-                    raise ValueError("too many result archive members")
-                if not member.isfile() or member.issym() or member.islnk():
-                    raise ValueError(
-                        "result archive must contain regular files only"
-                    )
-                size_limit = result_size_limit(name)
-                if member.size < 0 or member.size > size_limit:
-                    raise ValueError(
-                        f"result artifact is too large: {name}"
-                    )
-                total_size += member.size
-                if total_size > MAX_ARCHIVE_BYTES:
-                    raise ValueError("result archive expands beyond size limit")
-                names.add(name)
-                members.append((member, name))
+        with open_bounded_result_tar(
+            archive_source,
+            result_set,
+        ) as handle:
+            expected = _scan_result_tar_members(handle, allowlist)
 
-            missing = allowlist - names
-            if missing:
-                joined = ", ".join(sorted(missing))
-                raise FileNotFoundError(
-                    f"missing result archive member: {joined}"
-                )
-
-            payloads: dict[str, bytes] = {}
-            for member, name in members:
-                size_limit = result_size_limit(name)
-                source = handle.extractfile(member)
-                if source is None:
-                    raise ValueError(
-                        f"cannot read result artifact: {name}"
-                    )
-                payload = source.read(size_limit + 1)
-                if len(payload) > size_limit:
-                    raise ValueError(
-                        f"result artifact is too large: {name}"
-                    )
-                _validate_result_bytes(name, payload)
-                payloads[name] = payload
+    with open_validated_file(archive, archive_metadata) as archive_source:
+        with open_bounded_result_tar(
+            archive_source,
+            result_set,
+        ) as handle:
+            payloads = _read_validated_result_tar(handle, expected)
 
     _replace_result_payloads(payloads, project)
 

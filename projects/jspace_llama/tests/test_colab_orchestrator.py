@@ -487,6 +487,36 @@ def write_tar_payloads(
             handle.addfile(info, io.BytesIO(payload))
 
 
+def write_extension_metadata_archive(
+    archive: Path,
+    extension: str,
+    metadata_bytes: int,
+) -> None:
+    if extension == "pax":
+        with tarfile.open(
+            archive,
+            "w:gz",
+            format=tarfile.PAX_FORMAT,
+            pax_headers={"comment": "A" * metadata_bytes},
+        ) as handle:
+            for name in sorted(CAUSAL_RESULTS):
+                info = tarfile.TarInfo(name)
+                info.size = 2
+                handle.addfile(info, io.BytesIO(b"{}"))
+        return
+    if extension == "gnu-longname":
+        with tarfile.open(
+            archive,
+            "w:gz",
+            format=tarfile.GNU_FORMAT,
+        ) as handle:
+            info = tarfile.TarInfo("A" * metadata_bytes)
+            info.size = 0
+            handle.addfile(info, io.BytesIO())
+        return
+    raise AssertionError(f"unknown extension fixture: {extension}")
+
+
 def test_result_profiles_are_exact_and_independent() -> None:
     runner = load_module(RUNNER_PATH, "run_jspace_result_profiles")
     pack = load_module(PACK_PATH, "pack_jspace_result_profiles")
@@ -800,6 +830,60 @@ def test_observation_extract_bounds_high_member_count_before_materializing(
     # header beyond the selected profile before the validator rejects.
     assert next_calls <= len(OBSERVATION_RESULTS) + 2
     assert not (tmp_path / "project").exists()
+
+
+@pytest.mark.parametrize("extension", ["pax", "gnu-longname"])
+def test_result_extract_bounds_extension_metadata_before_tarfile_parse(
+    tmp_path: Path,
+    extension: str,
+) -> None:
+    runner = load_module(
+        RUNNER_PATH,
+        f"run_jspace_bounded_{extension.replace('-', '_')}",
+    )
+    archive = tmp_path / f"{extension}.tar.gz"
+    write_extension_metadata_archive(
+        archive,
+        extension,
+        metadata_bytes=8 * 1_048_576,
+    )
+
+    assert archive.stat().st_size < 100_000
+    assert archive.stat().st_size < runner.MAX_ARCHIVE_BYTES
+    with pytest.raises(ValueError, match="decompressed TAR exceeds"):
+        runner.extract_results_archive(archive, tmp_path / "project", "causal")
+
+    assert not (tmp_path / "project").exists()
+
+
+@pytest.mark.parametrize(
+    ("result_set", "payloads"),
+    [
+        (
+            "causal",
+            {
+                "results/execution_manifest.json": b"{}",
+                "results/final_evaluation.json": b"[]",
+            },
+        ),
+        ("observation", observation_payloads()),
+    ],
+)
+def test_result_extract_accepts_valid_bounded_profile_archive(
+    tmp_path: Path,
+    result_set: str,
+    payloads: dict[str, bytes],
+) -> None:
+    runner = load_module(RUNNER_PATH, f"run_jspace_valid_{result_set}")
+    archive = tmp_path / f"{result_set}.tar.gz"
+    project = tmp_path / "project"
+    write_tar_payloads(archive, payloads)
+
+    runner.extract_results_archive(archive, project, result_set)
+
+    assert {
+        name: (project / name).read_bytes() for name in payloads
+    } == payloads
 
 
 def test_observation_extract_reads_no_payload_before_complete_membership(
