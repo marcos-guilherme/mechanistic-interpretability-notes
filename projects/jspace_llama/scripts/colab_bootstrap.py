@@ -294,6 +294,14 @@ def dependency_commands(
             "--editable",
             str(project),
         ],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "--yes",
+            "torchaudio",
+        ],
     ]
 
 

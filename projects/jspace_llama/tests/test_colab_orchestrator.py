@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 import tarfile
 
 import pytest
@@ -204,6 +205,26 @@ def test_bootstrap_uses_locked_metadata_and_editable_install(tmp_path: Path) -> 
     assert str(project) in commands[1]
     assert ["uv", "pip", "install", "--system"] == commands[2][:4]
     assert commands[3][-2:] == ["--editable", str(project)]
+
+
+def test_bootstrap_removes_incompatible_preinstalled_torchaudio(
+    tmp_path: Path,
+) -> None:
+    bootstrap = load_module(BOOTSTRAP_PATH, "jspace_bootstrap_torchaudio")
+
+    commands = bootstrap.dependency_commands(
+        tmp_path / "jspace_llama",
+        tmp_path / "requirements.txt",
+    )
+
+    assert [
+        sys.executable,
+        "-m",
+        "pip",
+        "uninstall",
+        "--yes",
+        "torchaudio",
+    ] in commands
 
 
 def test_bootstrap_cuda_diagnostics_fail_clearly_without_cuda(
