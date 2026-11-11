@@ -51,7 +51,7 @@ Hugging Face Hub, JSON Schema, Matplotlib, pytest, nbformat e Colab L4.
 
 ---
 
-### Tarefa 1: Fixar o conjunto oficial e suas dependências
+### Task 1: Fixar o conjunto oficial e suas dependências
 
 **Arquivos:**
 - Criar: `projects/jspace_llama/data/anthropic-jlens/LICENSE`
@@ -194,7 +194,7 @@ commit.
 
 ---
 
-### Tarefa 2: Validar itens e auditar a tokenização
+### Task 2: Validar itens e auditar a tokenização
 
 **Arquivos:**
 - Criar: `projects/jspace_llama/src/jspace_llama/observation_data.py`
@@ -380,7 +380,7 @@ git commit -m "feat(jspace): audit multihop tokenization"
 
 ---
 
-### Tarefa 3: Implementar o ranking direto e `pass@k`
+### Task 3: Implementar o ranking direto e `pass@k`
 
 **Arquivos:**
 - Criar: `projects/jspace_llama/src/jspace_llama/observation_readout.py`
@@ -494,7 +494,7 @@ git commit -m "feat(jspace): score canonical J-lens readout"
 
 ---
 
-### Tarefa 4: Ler o painel qualitativo por camada
+### Task 4: Ler o painel qualitativo por camada
 
 **Arquivos:**
 - Criar: `projects/jspace_llama/src/jspace_llama/observation_panel.py`
@@ -604,7 +604,7 @@ git commit -m "feat(jspace): add qualitative workspace panel"
 
 ---
 
-### Tarefa 5: Construir pipeline, artefatos, schemas e figuras
+### Task 5: Construir pipeline, artefatos, schemas e figuras
 
 **Arquivos:**
 - Criar: `projects/jspace_llama/src/jspace_llama/observation_artifacts.py`
@@ -772,7 +772,7 @@ git commit -m "feat(jspace): build observational atlas pipeline"
 
 ---
 
-### Tarefa 6: Integrar notebook e transporte seguro do Colab
+### Task 6: Integrar notebook e transporte seguro do Colab
 
 **Arquivos:**
 - Criar:
@@ -905,7 +905,7 @@ git commit -m "feat(jspace): run observational atlas on Colab"
 
 ---
 
-### Tarefa 7: Documentar e verificar a implementação local
+### Task 7: Documentar e verificar a implementação local
 
 **Arquivos:**
 - Modificar: `projects/jspace_llama/README.md`
@@ -982,7 +982,7 @@ git commit -m "docs(jspace): explain observational atlas"
 
 ---
 
-### Tarefa 8: Executar na L4, coletar e interpretar o atlas
+### Task 8: Executar na L4, coletar e interpretar o atlas
 
 **Arquivos:**
 - Criar pela execução:
