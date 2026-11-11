@@ -11,12 +11,15 @@ outra operacional, voltada a permitir que a execução seja repetida e
 auditada. A [metodologia comum](METODOLOGIA.md) reúne os critérios que adotei;
 o [modelo de replicação](MODELO.md) ajuda a aplicá-los em um novo estudo.
 
+As [fontes e referências](../REFERENCIAS.md) registram os artigos originais,
+os materiais de formação e as implementações que orientaram os três estudos.
+
 ## Índice dos estudos
 
 ### IOI
 
 Replicação do circuito de identificação do objeto indireto em GPT-2 Small, com
-uma trilha didática e outra voltada à fidelidade ao artigo. O projeto contém
+uma etapa didática e outra voltada à fidelidade ao artigo. O projeto contém
 ambiente próprio, notebooks, testes e artefatos canônicos de resultados.
 
 - [Visão geral e instruções de reprodução](../../projects/ioi/README.md)

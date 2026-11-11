@@ -25,15 +25,18 @@ testes e resultados. A documentação compartilhada conecta esses experimentos:
 - a [metodologia comum](docs/replicacoes/METODOLOGIA.md) reúne os critérios que
   passei a aplicar para planejar, executar e avaliar cada reprodução;
 - o [modelo de replicação](docs/replicacoes/MODELO.md) transforma esses
-  critérios em um roteiro reutilizável.
+  critérios em um roteiro reutilizável;
+- as [fontes e referências](docs/REFERENCIAS.md) distinguem os artigos
+  originais, os materiais de formação e as implementações que orientaram os
+  estudos.
 
 ## Estudos
 
 ### [Circuito IOI em GPT-2 Small](projects/ioi)
 
 Usei a tarefa de identificação do objeto indireto como primeiro contato com a
-análise de circuitos. O projeto combina uma trilha didática, na qual reconstruí
-as ferramentas passo a passo, e uma trilha mais próxima do artigo, com
+análise de circuitos. O projeto combina uma etapa didática, na qual reconstruí
+as ferramentas passo a passo, e uma etapa mais próxima do artigo, com
 resultados locais para baseline, caminhos causais, *Backup Name Movers*,
 *faithfulness*, *completeness*, *minimality* e protocolos adversariais.
 
