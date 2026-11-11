@@ -20,6 +20,11 @@ def test_observation_notebook_is_thin_and_output_free() -> None:
 
     assert "run_observation_pipeline" in code
     assert "run_observation_pipeline(project_root=project_root)" in code
+    assert "from jspace_llama.runtime import find_project_root" in code
+    assert "project_root = find_project_root()" in code
+    assert "Path.cwd()" not in code
+    assert 'project_root / "pyproject.toml"' not in code
+    assert "project_root.parent" not in code
     assert "gradient_pursuit" not in code
     assert "lens.apply" not in code
     assert "generate(" not in code
