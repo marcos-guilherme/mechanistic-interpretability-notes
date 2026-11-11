@@ -1097,7 +1097,46 @@ def test_validator_rejects_raw_rank_that_contradicts_compact(
         )
 
 
-def test_validator_rejects_arbitrary_posix_absolute_path(
+@pytest.mark.parametrize(
+    "token_text",
+    ["/x", "/n", "/team", "/month", "//"],
+)
+def test_validator_allows_slash_prefixed_decoded_tokens_at_exact_leaves(
+    tmp_path: Path,
+    token_text: str,
+) -> None:
+    from jspace_llama.observation_pipeline import run_observation_pipeline
+
+    result = run_observation_pipeline(tmp_path, execute=complete_payload)
+    manifest_path = tmp_path / "results" / "jspace_observation_manifest.json"
+    raw_path = tmp_path / "artifacts" / "jspace_observation_raw.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    token_leaves = [
+        raw["panel"]["items"][0]["pursuit"][0]["tokens"][0],
+        result["panel"][0]["pursuit"][0]["tokens"][0],
+    ]
+    for method in ("jlens", "logit_lens"):
+        token_leaves.extend(
+            (
+                raw["direct"]["items"][0]["top_tokens"][method][0]["tokens"][0],
+                raw["panel"]["items"][0]["top_tokens"][method][0]["tokens"][0],
+                result["panel"][0]["top_tokens"][method][0]["tokens"][0],
+            )
+        )
+    for token in token_leaves:
+        token["token"] = token_text
+    _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
+
+    _load_validator().validate_documents(
+        manifest,
+        result,
+        schema_dir=SCHEMAS,
+        raw_path=raw_path,
+    )
+
+
+def test_validator_rejects_posix_path_in_general_string(
     tmp_path: Path,
 ) -> None:
     from jspace_llama.observation_pipeline import run_observation_pipeline
@@ -1108,15 +1147,9 @@ def test_validator_rejects_arbitrary_posix_absolute_path(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     forbidden = "/var/lib/private/model.pt"
-    result["panel"][0]["top_tokens"]["jlens"][0]["tokens"][0][
-        "token"
-    ] = forbidden
-    raw["panel"]["items"][0]["top_tokens"]["jlens"][0]["tokens"][0][
-        "token"
-    ] = forbidden
-    raw["direct"]["items"][0]["top_tokens"]["jlens"][0]["tokens"][0][
-        "token"
-    ] = forbidden
+    result["panel"][0]["prompt"] = forbidden
+    raw["panel"]["items"][0]["prompt"] = forbidden
+    raw["direct"]["items"][0]["prompt"] = forbidden
     _rewrite_raw_and_hashes(raw_path, raw, manifest, result)
     validator = _load_validator()
 
@@ -1130,6 +1163,25 @@ def test_validator_rejects_arbitrary_posix_absolute_path(
             schema_dir=SCHEMAS,
             raw_path=raw_path,
         )
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"provenance": {"note": "/var/lib/private/model.pt"}},
+        {"reason": {"message": "/var/lib/private/model.pt"}},
+        {"general": {"token": "/x"}},
+        {"general": {"credential": "safe-looking-value"}},
+    ],
+    ids=["provenance-path", "error-path", "non-schema-token", "credential"],
+)
+def test_validator_token_exemption_does_not_weaken_other_locations(
+    document: dict[str, object],
+) -> None:
+    validator = _load_validator()
+
+    with pytest.raises(validator.ObservationValidationError):
+        validator._reject_forbidden(document)
 
 
 def test_validator_rejects_forged_raw_for_incomplete_observation(

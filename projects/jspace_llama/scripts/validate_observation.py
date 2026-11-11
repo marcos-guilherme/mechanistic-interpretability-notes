@@ -139,7 +139,61 @@ def _validate_schema(
         ) from error
 
 
-def _reject_forbidden(value: Any, location: str = "$") -> None:
+def _is_decoded_token_path(path: tuple[str | int, ...]) -> bool:
+    method_names = {"jlens", "logit_lens"}
+    if len(path) == 8:
+        return (
+            path[0] == "panel"
+            and isinstance(path[1], int)
+            and path[2] == "top_tokens"
+            and path[3] in method_names
+            and isinstance(path[4], int)
+            and path[5] == "tokens"
+            and isinstance(path[6], int)
+            and path[7] == "token"
+        )
+    if len(path) == 7:
+        return (
+            path[0] == "panel"
+            and isinstance(path[1], int)
+            and path[2] == "pursuit"
+            and isinstance(path[3], int)
+            and path[4] == "tokens"
+            and isinstance(path[5], int)
+            and path[6] == "token"
+        )
+    if len(path) == 10:
+        return (
+            path[0] == "raw"
+            and path[1] in {"direct", "panel"}
+            and path[2] == "items"
+            and isinstance(path[3], int)
+            and path[4] == "top_tokens"
+            and path[5] in method_names
+            and isinstance(path[6], int)
+            and path[7] == "tokens"
+            and isinstance(path[8], int)
+            and path[9] == "token"
+        )
+    if len(path) == 9:
+        return (
+            path[0:3] == ("raw", "panel", "items")
+            and isinstance(path[3], int)
+            and path[4] == "pursuit"
+            and isinstance(path[5], int)
+            and path[6] == "tokens"
+            and isinstance(path[7], int)
+            and path[8] == "token"
+        )
+    return False
+
+
+def _reject_forbidden(
+    value: Any,
+    location: str = "$",
+    *,
+    path: tuple[str | int, ...] = (),
+) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
             normalized = str(key).casefold()
@@ -149,16 +203,26 @@ def _reject_forbidden(value: Any, location: str = "$") -> None:
                 raise ObservationValidationError(
                     f"forbidden field at {location}.{key}"
                 )
-            _reject_forbidden(child, f"{location}.{key}")
+            _reject_forbidden(
+                child,
+                f"{location}.{key}",
+                path=(*path, str(key)),
+            )
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            _reject_forbidden(child, f"{location}[{index}]")
+            _reject_forbidden(
+                child,
+                f"{location}[{index}]",
+                path=(*path, index),
+            )
     elif isinstance(value, float) and not math.isfinite(value):
         raise ObservationValidationError(
             f"non-finite value at {location}"
         )
-    elif isinstance(value, str) and any(
-        pattern.search(value) for pattern in ABSOLUTE_PATHS
+    elif (
+        isinstance(value, str)
+        and not _is_decoded_token_path(path)
+        and any(pattern.search(value) for pattern in ABSOLUTE_PATHS)
     ):
         raise ObservationValidationError(
             f"absolute/local path at {location}"
@@ -678,7 +742,7 @@ def validate_documents(
         manifest,
         raw_path=Path(raw_path),
     )
-    _reject_forbidden(raw, "$raw")
+    _reject_forbidden(raw, "$raw", path=("raw",))
     complete = _validate_counts_and_claims(result)
     provenance_complete = _provenance_complete(manifest["provenance"])
     expected_status = (
