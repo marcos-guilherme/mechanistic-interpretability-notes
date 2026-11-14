@@ -28,7 +28,7 @@ publicação.
 
 ### [How To Become A Mechanistic Interpretability Researcher](https://www.alignmentforum.org/posts/jP9KDyMkchuv6tHwm/how-to-become-a-mechanistic-interpretability-researcher)
 
-**Papel:** fonte formativa — Neel Nanda, 2025.
+**Papel:** fonte formativa (Neel Nanda, 2025).
 
 Este texto foi importante para transformar leitura em prática. A orientação
 de aprender uma base suficiente e partir cedo para projetos concretos ajudou
@@ -44,7 +44,7 @@ próprias e voltada às ideias que considero transferíveis para pesquisa.
 
 ### [An Extremely Opinionated Annotated List of My Favourite Mechanistic Interpretability Papers v2](https://www.alignmentforum.org/posts/NfFST5Mio7BCAQHPA/an-extremely-opinionated-annotated-list-of-my-favourite-1)
 
-**Papel:** fonte formativa — Neel Nanda, 2024.
+**Papel:** fonte formativa (Neel Nanda, 2024).
 
 Usei esta lista comentada como mapa de entrada para uma área com muitas linhas
 de pesquisa e vocabulários diferentes. Ela me ajudou a priorizar fundamentos,
@@ -58,7 +58,7 @@ ou uma revisão exaustiva da área.
 
 ### [A Mathematical Framework for Transformer Circuits](https://transformer-circuits.pub/2021/framework/index.html)
 
-**Papel:** fundamento — Nelson Elhage et al., 2021.
+**Papel:** fundamento (Nelson Elhage et al., 2021).
 
 Este trabalho forneceu parte do vocabulário usado para pensar o transformer
 como uma composição de caminhos no fluxo residual. As distinções entre
@@ -81,8 +81,8 @@ da biblioteca podem alterar uma reprodução.
 
 ### [Interpretability in the Wild: a Circuit for Indirect Object Identification in GPT-2 small](https://arxiv.org/abs/2211.00593)
 
-**Papel:** artigo original — Kevin Wang, Alexandre Variengien, Arthur Conmy,
-Buck Shlegeris e Jacob Steinhardt, 2022.
+**Papel:** artigo original (Kevin Wang, Alexandre Variengien, Arthur Conmy,
+Buck Shlegeris e Jacob Steinhardt, 2022).
 
 Este é o trabalho reproduzido em `projects/ioi`. O artigo identifica em GPT-2
 Small um circuito de 26 cabeças distribuídas em sete classes funcionais,
@@ -105,7 +105,7 @@ posições semânticas e referências de ablação.
 
 ### [Refusal in Language Models Is Mediated by a Single Direction](https://arxiv.org/abs/2406.11717)
 
-**Papel:** artigo original — Andy Arditi et al., 2024.
+**Papel:** artigo original (Andy Arditi et al., 2024).
 
 Este é o trabalho reproduzido em `projects/refusal_direction`. O artigo mostra
 que uma direção aproximadamente unidimensional do fluxo residual medeia a
@@ -137,18 +137,19 @@ pesos no futuro.
 
 ### [Verbalizable Representations Form a Global Workspace in Language Models](https://arxiv.org/abs/2607.15495)
 
-**Papel:** artigo original — Wes Gurnee et al., 2026.
+**Papel:** artigo original (Wes Gurnee et al., 2026).
 
 Este é o trabalho científico que apresenta a Jacobian lens e investiga o
 J-space como um conjunto privilegiado de representações verbalizáveis,
 reportáveis e causalmente usado em certas formas de raciocínio. O estudo em
-`projects/jspace_llama` não tenta reproduzir toda essa análise: ele prepara um
-marco causal mínimo em um modelo aberto menor, com uma lente previamente
-ajustada.
+`projects/jspace_llama` não tenta reproduzir toda essa análise: ele executou um
+protocolo causal mínimo em um modelo aberto menor, com uma lente previamente
+ajustada. A execução foi operacionalmente completa, mas cientificamente
+inconclusiva (`primary_gates_failed`).
 
 ### [A global workspace in language models](https://www.anthropic.com/research/global-workspace)
 
-**Papel:** visão geral do artigo — Anthropic, 2026.
+**Papel:** visão geral do artigo (Anthropic, 2026).
 
 Esta apresentação oferece uma entrada mais acessível para a hipótese, os
 experimentos e seus limites. Ela foi útil para formar a intuição de que o
@@ -188,6 +189,9 @@ experimento: testa-se readout e intervenção, não o treinamento da lente.
 
 Esta é a página oficial do modelo escolhido para o marco causal
 `spider → ant`. O repositório é restrito; autenticar o cliente do Hugging Face
-não substitui a aprovação da licença. A tentativa registrada parou justamente
-nesse limite, antes de qualquer inferência, e por isso permanece
-cientificamente inconclusiva.
+não substitui a aprovação da licença. Uma primeira tentativa parou nesse
+limite, antes da inferência. Depois que o acesso foi aprovado, a execução
+causal canônica completou o protocolo, mas permaneceu cientificamente
+inconclusiva (`primary_gates_failed`) porque os critérios primários falharam.
+O atlas executado em seguida foi validado como resultado observacional; ele
+não contém intervenção e não reclassifica a tentativa causal.

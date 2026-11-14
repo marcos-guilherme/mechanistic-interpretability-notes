@@ -1,0 +1,42 @@
+{
+  "theme.SearchBar.label": {
+    "message": "Buscar",
+    "description": "Rótulo e placeholder do campo de busca"
+  },
+  "theme.SearchBar.seeAll": {
+    "message": "Ver todos os resultados",
+    "description": "Link para todos os resultados da busca"
+  },
+  "theme.SearchBar.noResultsText": {
+    "message": "Nenhum resultado encontrado",
+    "description": "Mensagem da busca sem resultados"
+  },
+  "theme.SearchBar.searchInContext": {
+    "message": "Ver todos os resultados em \"{context}\"",
+    "description": "Link para resultados dentro do contexto atual"
+  },
+  "theme.SearchBar.seeAllOutsideContext": {
+    "message": "Ver resultados fora de \"{context}\"",
+    "description": "Link para resultados fora do contexto atual"
+  },
+  "theme.SearchPage.existingResultsTitle": {
+    "message": "Resultados da busca por \"{query}\"",
+    "description": "Título da página para uma busca preenchida"
+  },
+  "theme.SearchPage.emptyResultsTitle": {
+    "message": "Buscar na documentação",
+    "description": "Título da página de busca vazia"
+  },
+  "theme.SearchPage.documentsFound.plurals": {
+    "message": "1 documento encontrado|{count} documentos encontrados",
+    "description": "Quantidade de documentos encontrados"
+  },
+  "theme.SearchPage.noResultsText": {
+    "message": "Nenhum documento encontrado",
+    "description": "Mensagem da página de busca sem resultados"
+  },
+  "theme.SearchPage.searchContext.everywhere": {
+    "message": "Em todo o portal",
+    "description": "Opção para buscar em todos os contextos"
+  }
+}

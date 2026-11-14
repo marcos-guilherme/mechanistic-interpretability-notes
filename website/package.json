@@ -1,0 +1,68 @@
+{
+  "name": "ioi-replication-portal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Registro público documental do processo de experimentação em interpretabilidade mecanística.",
+  "engines": {
+    "node": ">=20 <21",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-content.mjs",
+    "check": "node scripts/sync-content.mjs --check",
+    "test": "node --test tests/build-audit.test.mjs tests/editorial-no-em-dash.test.mjs tests/portal-validation.test.mjs tests/publication-gate.test.mjs tests/publication-readiness.test.mjs tests/sync-content.test.mjs",
+    "prestart": "npm run sync",
+    "start": "docusaurus start",
+    "prebuild": "npm run sync",
+    "build": "docusaurus build",
+    "postbuild": "node scripts/patch-base-url-css.mjs",
+    "build:project-page": "cross-env DOCUSAURUS_URL=http://127.0.0.1:4173 DOCUSAURUS_BASE_URL=/ioi-replication/ npm run build",
+    "serve:project-page": "node scripts/serve-project-page.mjs",
+    "audit:build": "node scripts/audit-build.mjs",
+    "audit:project-page": "node scripts/audit-build.mjs --base-url /ioi-replication/",
+    "test:e2e:project-page": "npm run build:project-page && npm run audit:project-page && playwright test",
+    "validate:project-page": "npm test && npm run typecheck && npm run sync && npm run check && npm run build && npm run audit:build && npm run test:e2e:project-page",
+    "playwright:install": "playwright install chromium",
+    "clear": "docusaurus clear",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@docusaurus/theme-mermaid": "3.10.2",
+    "@easyops-cn/docusaurus-search-local": "0.55.3",
+    "@mdx-js/react": "3.1.1",
+    "@mermaid-js/layout-elk": "0.1.9",
+    "clsx": "2.1.1",
+    "katex": "0.18.2",
+    "prism-react-renderer": "2.4.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "rehype-katex": "7.0.1",
+    "remark-math": "6.0.0",
+    "remark-mdx": "3.1.1",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@docusaurus/module-type-aliases": "3.10.2",
+    "@docusaurus/tsconfig": "3.10.2",
+    "@docusaurus/types": "3.10.2",
+    "@playwright/test": "1.65.1",
+    "@types/node": "20.19.43",
+    "@types/react": "19.2.7",
+    "cross-env": "10.1.0",
+    "js-yaml": "4.3.2",
+    "spdx-exceptions": "2.5.0",
+    "spdx-expression-parse": "5.0.0",
+    "spdx-license-ids": "3.0.24",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "katex": "0.18.2",
+    "serialize-javascript": "7.1.4",
+    "tinypool": "2.2.0",
+    "uuid": "11.1.1"
+  }
+}

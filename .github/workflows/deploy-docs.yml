@@ -1,0 +1,171 @@
+name: Deploy documentation to GitHub Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Enforce publication gate
+        shell: bash
+        env:
+          DISPATCH_REF_TYPE: ${{ github.ref_type }}
+          DISPATCH_REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PUBLICATION_APPROVED: ${{ vars.PUBLICATION_APPROVED }}
+          PUBLIC_AUTHOR_NAME: ${{ vars.PUBLIC_AUTHOR_NAME }}
+          PUBLIC_LICENSE_SPDX: ${{ vars.PUBLIC_LICENSE_SPDX }}
+        run: |
+          set -Eeuo pipefail
+
+          fail() {
+            echo "::error::$1"
+            exit 1
+          }
+
+          reject_placeholder() {
+            local field="$1"
+            local value="$2"
+            local normalized
+            normalized="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | xargs)"
+            case "$normalized" in
+              ""|*"tbd"*|*"todo"*|*"placeholder"*|*"changeme"*|*"change me"*|*"your name"*|"example")
+                fail "$field deve ter um valor público explícito, sem placeholder."
+                ;;
+            esac
+          }
+
+          [[ "${DISPATCH_REF_TYPE:-}" == "branch" ]] ||
+            fail "A publicação manual só pode usar uma branch, não tag ou outra ref."
+
+          [[ -n "${DEFAULT_BRANCH:-}" ]] ||
+            fail "A branch principal do repositório não foi informada pelo GitHub."
+
+          [[ "${DISPATCH_REF_NAME:-}" == "${DEFAULT_BRANCH}" ]] ||
+            fail "A publicação deve partir da branch principal '${DEFAULT_BRANCH}', não de '${DISPATCH_REF_NAME:-ref vazia}'."
+
+          [[ "${PUBLICATION_APPROVED:-}" == "true" ]] ||
+            fail "PUBLICATION_APPROVED deve ser exatamente 'true'."
+
+          reject_placeholder "PUBLIC_AUTHOR_NAME" "${PUBLIC_AUTHOR_NAME:-}"
+          reject_placeholder "PUBLIC_LICENSE_SPDX" "${PUBLIC_LICENSE_SPDX:-}"
+
+          license_path="${GITHUB_WORKSPACE}/LICENSE"
+          [[ ! -L "$license_path" && -f "$license_path" && -s "$license_path" ]] ||
+            fail "É obrigatório um LICENSE real, regular e não vazio na raiz do projeto."
+
+          grep -q '[^[:space:]]' "$license_path" ||
+            fail "O LICENSE raiz contém somente whitespace."
+
+          if grep -Eiq '(^|[^[:alnum:]_])(tbd|todo|placeholder|changeme|change me)([^[:alnum:]_]|$)' "$license_path"; then
+            fail "O LICENSE raiz contém um placeholder e não pode liberar a publicação."
+          fi
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install website dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Validate root license and SPDX expression
+        working-directory: website
+        env:
+          PUBLIC_LICENSE_SPDX: ${{ vars.PUBLIC_LICENSE_SPDX }}
+        run: node scripts/validate-publication.mjs --license ../LICENSE
+
+      - name: Install Chromium and system dependencies
+        working-directory: website
+        run: npx playwright install --with-deps chromium
+
+      - name: Test website
+        working-directory: website
+        run: npm test
+
+      - name: Type-check website
+        working-directory: website
+        run: npm run typecheck
+
+      - name: Synchronize and check public content
+        working-directory: website
+        run: |
+          npm run sync
+          npm run check
+
+      - name: Build and audit fixed Project Pages configuration
+        working-directory: website
+        run: |
+          npm run build:project-page
+          npm run audit:project-page
+
+      - name: Validate Project Pages behavior
+        working-directory: website
+        run: npm run test:e2e:project-page
+
+      - name: Derive public URL from GITHUB_REPOSITORY
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          IFS='/' read -r owner repository extra <<< "${GITHUB_REPOSITORY}"
+          if [[ -z "$owner" || -z "$repository" || -n "${extra:-}" ]]; then
+            echo "::error::GITHUB_REPOSITORY deve ter o formato owner/repository."
+            exit 1
+          fi
+
+          public_url="https://${owner}.github.io"
+          if [[ "${repository,,}" == "${owner,,}.github.io" ]]; then
+            base_url="/"
+          else
+            base_url="/${repository}/"
+          fi
+
+          {
+            echo "DOCUSAURUS_URL=${public_url}"
+            echo "DOCUSAURUS_BASE_URL=${base_url}"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate final build for public URL
+        working-directory: website
+        run: npm run build
+
+      - name: Audit final public build
+        working-directory: website
+        run: npm run audit:build
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: website/build
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,1 +1,1 @@
-"""Tests for the paper-faithful replication track."""
+"""Tests for the paper-faithful IOI replication."""

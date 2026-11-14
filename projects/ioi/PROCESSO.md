@@ -38,12 +38,12 @@ respondem a perguntas diferentes.
 
 ### Métodos
 
-A investigação foi dividida em dois trilhos. Os notebooks 01–04 formam uma
+A investigação foi dividida em duas etapas. Os notebooks 01–04 formam uma
 introdução didática com oito prompts e apresentam linha de base, atribuição
 direta aos logits, *activation patching* e *path patching*. Os notebooks 05–10
-constituem o trilho de maior fidelidade: usam pares determinísticos
+constituem a etapa de maior fidelidade: usam pares determinísticos
 $p_{IOI}/p_{ABC}$, tokenização sem BOS artificial, posições semânticas e o
-circuito publicado. Esse trilho avalia o baseline, diagnostica os 26 nós,
+circuito publicado. Essa etapa avalia o baseline, diagnostica os 26 nós,
 reconstrói caminhos com o algoritmo histórico de quatro passes, testa a
 compensação das *Backup Name Movers*, mede *faithfulness*, *completeness* e
 *minimality* e executa protocolos adversariais. Os tamanhos variam por
@@ -81,11 +81,11 @@ visíveis a métrica, a decomposição e as intervenções. Os notebooks 05–10
 recomeçam o experimento com as convenções de *Interpretability in the Wild*
 ([arXiv:2211.00593](https://arxiv.org/abs/2211.00593)): datasets pareados
 $p_{IOI}/p_{ABC}$, posições semânticas, o circuito publicado e protocolos de
-validação. O primeiro trilho ensina a fazer as perguntas; o segundo controla
+validação. A primeira etapa ensina a fazer as perguntas; a segunda controla
 dados, posições, intervenções e proveniência para respondê-las de modo mais
 fiel ao artigo.
 
-Os notebooks do trilho fiel são **independentes em dados**. Cada um constrói
+Os notebooks da etapa fiel são **independentes em dados**. Cada um constrói
 seu próprio conjunto com tamanho e seed registrados, em vez de receber em
 memória o dataset ou o resultado do notebook anterior. A ordem 05→10 é uma
 ordem conceitual e operacional do
@@ -95,9 +95,9 @@ status e só então reconstrói o índice consolidado.
 
 ![Visão geral dos experimentos](results/paper/ioi_experiments_overview.png)
 
-## A passagem do trilho didático ao trilho fiel
+## A passagem da etapa didática à etapa fiel
 
-Há cinco mudanças de contrato que impedem comparar os dois trilhos como se
+Há cinco mudanças de contrato que impedem comparar as duas etapas como se
 fossem apenas versões de tamanhos diferentes:
 
 | Convenção | Notebooks 01–04 | Notebooks 05–10 |
@@ -110,7 +110,7 @@ fossem apenas versões de tamanhos diferentes:
 
 Assim, `END` não significa “última coluna do tensor”: é a posição semântica
 que prevê a resposta, localizada separadamente em cada exemplo. Nos datasets
-do trilho paper, a última posição real pode ser o próprio token IO da resposta,
+da etapa fiel, a última posição real pode ser o próprio token IO da resposta,
 em `END+1`; nesse caso, `logits[:, -1]` já prevê o token posterior à resposta
 e está errado mesmo sem padding. Quando há padding à direita, `-1` pode ainda
 selecionar padding. O uso de `prepend_bos=False` completa esse contrato: sem um
@@ -119,14 +119,14 @@ coordenadas históricas da tokenização, em vez de serem deslocados em uma
 posição.
 
 Do mesmo modo, um efeito negativo no notebook 07 não é um *recovery* negativo
-do trilho didático; é perda de IO−S ao inserir no forward de $p_{IOI}$ uma
+da etapa didática; é perda de IO−S ao inserir no forward de $p_{IOI}$ uma
 escrita vinda de $p_{ABC}$.
 
 ![Mecanismo do circuito IOI](results/paper/ioi_circuit_mechanism.png)
 
 ## Caderno de bordo: pergunta, operação e evidência
 
-### 01 — Baseline de IOI
+### 01: Baseline de IOI
 
 **Pergunta.** O GPT-2 Small prefere o objeto indireto correto ao sujeito
 repetido nos oito exemplos introdutórios? **Operação.** Tokeniza com BOS,
@@ -134,9 +134,9 @@ compara na última posição os logits dos dois nomes e confere a implementaçã
 com indexação manual. **Evidência.** O próprio
 [notebook 01](notebooks/01_ioi_baseline.ipynb) registra a diferença por prompt,
 a média e as asserções de concordância. Ele estabelece comportamento, não
-mecanismo, e não gera um JSON do trilho paper.
+mecanismo, e não gera um JSON da etapa fiel.
 
-### 02 — Direct Logit Attribution
+### 02: Direct Logit Attribution
 
 **Pergunta.** Quais componentes escrevem diretamente na direção
 `correto − incorreto`? **Operação.** Reconstrói o baseline após `ln_final`,
@@ -146,7 +146,7 @@ Os mapas e verificações do
 [notebook 02](notebooks/02_direct_logit_attribution.ipynb) mostram atribuição e
 atenção END→IO. É evidência decompositiva, não de necessidade causal.
 
-### 03 — Activation patching
+### 03: Activation patching
 
 **Pergunta.** Onde restaurar uma ativação limpa recupera o comportamento
 degradado pela troca IO/S? **Operação.** Executa limpo e corrompido, transplanta
@@ -156,7 +156,7 @@ o sweep de heads e os testes dos extremos 0/1 estão no
 [notebook 03](notebooks/03_activation_patching.ipynb). A intervenção localiza
 causalidade sob essa corrupção, sem ainda isolar arestas.
 
-### 04 — Path patching e validação didática
+### 04: Path patching e validação didática
 
 **Pergunta.** Por quais receivers as heads candidatas afetam a resposta, e o
 circuito proposto preserva o comportamento nesses oito prompts? **Operação.**
@@ -167,14 +167,14 @@ Mapas de arestas, ablações de grupos e resultados do
 didáticas específicas aos oito prompts; o protocolo mais próximo do artigo só
 aparece no notebook 09.
 
-![Famílias de métodos compartilhadas, com métricas e intervenções específicas em cada trilho](results/paper/ioi_interpretability_methods.png)
+![Famílias de métodos compartilhadas, com métricas e intervenções específicas em cada etapa](results/paper/ioi_interpretability_methods.png)
 
-A figura aproxima as famílias de perguntas — atribuição, patching e validação
-—, não suas convenções exatas. No trilho didático elas operam sobre oito
-prompts, corrupção IO/S e *recovery* normalizada; no trilho paper usam posições
+A figura aproxima as famílias de perguntas (atribuição, patching e validação),
+não suas convenções exatas. Na etapa didática elas operam sobre oito
+prompts, corrupção IO/S e *recovery* normalizada; na etapa fiel usam posições
 semânticas, substituição pABC e, em geral, IO−S bruto.
 
-### 05 — Dataset do paper e baseline
+### 05: Dataset do paper e baseline
 
 **Pergunta.** O comportamento de IOI reaparece quando se adotam o dataset e as
 coordenadas históricas? **Operação.** Constrói pares determinísticos
@@ -183,9 +183,9 @@ as posições IO, S1, S2, S1+1 e END; mede IO−S, acurácia e P(IO) em minibatc
 **Evidência.** O [notebook 05](notebooks/05_paper_dataset_and_baseline.ipynb)
 produz [o artefato de baseline](results/paper/baseline_seed_42_n_256.json), que
 registra configuração, incerteza e comparação com o artigo. Este notebook
-inicia de fato o trilho fiel; os posteriores não reutilizam seu lote.
+inicia de fato a etapa fiel; os posteriores não reutilizam seu lote.
 
-### 06 — Validação diagnóstica do circuito publicado
+### 06: Validação diagnóstica do circuito publicado
 
 **Pergunta.** As sete classes e os 26 nós já publicados exibem os sinais
 esperados sob DLA e patching semântico? **Operação.** Projeta `hook_result`,
@@ -196,7 +196,7 @@ $p_{ABC}\rightarrow p_{IOI}$ nas cinco posições semânticas. **Evidência.** O
 resumos por classe. Apesar do nome histórico do arquivo, **06 é validação
 diagnóstica da lista publicada, não descoberta cega do circuito**.
 
-### 07 — Path patching fiel
+### 07: Path patching fiel
 
 **Pergunta.** As arestas dirigidas entre Duplicate/Induction, S-Inhibition e
 Name Movers transportam o efeito nas posições semânticas previstas?
@@ -211,7 +211,7 @@ dois métodos em campos distintos; o
 [resumo canônico](results/paper/summary.json) declara
 `historical_four_pass_semantic` como método primário.
 
-### 08 — Backup Name Movers
+### 08: Backup Name Movers
 
 **Pergunta.** As Backup Name Movers aumentam sua escrita quando as três Name
 Movers primárias sofrem knockout? **Operação.** Substitui em END os resultados
@@ -224,7 +224,7 @@ prompt e a fração de compensação. O denominador corrigido é a **DLA basal d
 primárias menos a DLA das substituições pABC**, ambas na escala basal; não se
 usa apenas a DLA basal como se toda ela tivesse sido removida.
 
-### 09 — Faithfulness, completeness e minimality
+### 09: Faithfulness, completeness e minimality
 
 **Pergunta.** Quanto do comportamento o circuito retém, o que acontece ao
 remover o mesmo conjunto $K$ do modelo e do circuito, e cada nó é necessário
@@ -239,7 +239,7 @@ contém um erro. **Evidência.** O
 guardam $F(M)$, $F(C)$, conjuntos removidos, curvas e intervalos. As contagens
 pontual e com IC95 devem permanecer separadas.
 
-### 10 — Protocolos adversariais
+### 10: Protocolos adversariais
 
 **Pergunta.** A previsão comportamental do circuito resiste a cláusulas que
 repetem IO, em comparação com um controle que repete S? **Operação.** Parte de
@@ -258,7 +258,7 @@ resultados absolutos, deltas pareados, seeds e hashes dos datasets.
 
 Para números consolidados, configurações e caminhos dos artefatos, a fonte
 canônica é [`results/paper/summary.json`](results/paper/summary.json). Ele é
-derivado dos seis JSONs do trilho fiel; não deve ser atualizado por cópia
+derivado dos seis JSONs da etapa fiel; não deve ser atualizado por cópia
 manual. Para saber o que realmente foi executado, em qual ordem, dispositivo,
 commit, duração e status, a fonte canônica é
 [`results/paper/execution_manifest.json`](results/paper/execution_manifest.json).
@@ -315,7 +315,7 @@ Para executar um notebook isolado:
 uv run jupyter nbconvert --to notebook --execute --inplace notebooks/<nome>.ipynb --ExecutePreprocessor.kernel_name=ioi-replication --ExecutePreprocessor.timeout=7200
 ```
 
-Para refazer todo o trilho fiel em ordem e reconstruir os JSONs:
+Para refazer toda a etapa fiel em ordem e reconstruir os JSONs:
 
 ```powershell
 uv run python scripts/run_paper_notebooks.py

@@ -13,9 +13,9 @@ Wild*](https://arxiv.org/abs/2211.00593). Em
 [`PROCESSO.md`](PROCESSO.md), conto com mais detalhes como conectei as
 perguntas, intervenções, evidências e decisões de reprodução.
 
-## Duas trilhas
+## Duas etapas
 
-Dividi os notebooks em duas trilhas porque precisei aprender as ferramentas
+Dividi os notebooks em duas etapas porque precisei aprender as ferramentas
 antes de tentar uma reprodução mais próxima do artigo:
 
 1. **01–04, didática:** uso prompts compactos e introduzo progressivamente
@@ -28,7 +28,7 @@ antes de tentar uma reprodução mais próxima do artigo:
    da Figura 8. Registrei em cada artefato os desvios em relação ao código
    histórico.
 
-A trilha fiel usa TransformerLens **4.3.0** no modo de compatibilidade com
+A etapa fiel usa TransformerLens **4.3.0** no modo de compatibilidade com
 GPT-2 e o contrato explícito de TL4.3 `fold_ln=True`,
 `center_writing_weights=True`, `center_unembed=True`,
 `fold_value_biases=True`, `refactor_factored_attn_matrices=False`,
@@ -36,7 +36,7 @@ GPT-2 e o contrato explícito de TL4.3 `fold_ln=True`,
 disponível; o carregamento comum dos notebooks usa CPU como fallback. O runner
 completo exige CUDA por padrão para impedir que uma reexecução lenta em CPU
 passe despercebida; `--allow-cpu` deve ser usado apenas de forma intencional.
-Cada artefato da trilha registra essa configuração diretamente do runtime, em
+Cada artefato da etapa registra essa configuração diretamente do runtime, em
 vez de repetir um rótulo copiado.
 
 ## Ambiente
@@ -64,7 +64,7 @@ Para executar um notebook isolado, substitua `<name>`:
 uv run jupyter nbconvert --to notebook --execute --inplace notebooks/<name>.ipynb --ExecutePreprocessor.kernel_name=ioi-replication --ExecutePreprocessor.timeout=7200
 ```
 
-Comandos individuais da trilha fiel:
+Comandos individuais da etapa fiel:
 
 ```text
 uv run jupyter nbconvert --to notebook --execute --inplace notebooks/05_paper_dataset_and_baseline.ipynb --ExecutePreprocessor.kernel_name=ioi-replication --ExecutePreprocessor.timeout=7200
@@ -93,12 +93,12 @@ vez de inventar uma medição de pico.
 
 | Notebook | Seeds | N alvo / referência | Lotes | Tempo da execução | VRAM testada |
 |---|---|---:|---:|---:|---:|
-| 05 baseline | 42 | 256 / — | 32 | 0:26 | 6 GiB |
+| 05 baseline | 42 | 256 / sem ref. | 32 | 0:26 | 6 GiB |
 | 06 validação diagnóstica | 106 | 64 / ABC pareado | lote completo | 13:47 | 6 GiB |
 | 07 grade de caminhos publicada | 107 | 64 / ABC pareado | lote completo | 9:22 | 6 GiB |
 | 08 backups | 308 / 309 | 16 / 300 (10×30 grupos) | alvo completo / ref. 16 | 0:35 | 6 GiB |
 | 09 validação | 409 / 410 / 411 | 100 / 300 (10×30 grupos) | alvo 50 / ref. 16 | 13:20 | 6 GiB |
-| 10 adversarial | base 510; IO 511; double IO 512; S 513 | 500 / — | 16 | 0:37 | 6 GiB |
+| 10 adversarial | base 510; IO 511; double IO 512; S 513 | 500 / sem ref. | 16 | 0:37 | 6 GiB |
 
 No notebook 09, mantive todos os **10 subconjuntos aleatórios, 10 execuções
 gulosas, 10 passos gulosos e 10 candidatos por passo**. A referência de 08–09

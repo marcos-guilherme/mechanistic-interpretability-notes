@@ -1,0 +1,65 @@
+.card {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  padding: var(--space-6);
+  border: 1px solid var(--site-border);
+  border-radius: var(--site-radius);
+  background: var(--site-surface);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.035em;
+}
+
+.model {
+  color: var(--site-muted);
+  text-transform: uppercase;
+}
+
+.causal,
+.partial,
+.inconclusive {
+  padding: 0.22rem 0.5rem;
+  border-radius: 999px;
+}
+
+.causal {
+  color: var(--site-evidence-causal-text);
+  background: var(--site-evidence-causal-bg);
+}
+
+.partial {
+  color: var(--site-evidence-observational-text);
+  background: var(--site-evidence-observational-bg);
+}
+
+.inconclusive {
+  color: var(--site-evidence-inconclusive-text);
+  background: var(--site-evidence-inconclusive-bg);
+}
+
+.title {
+  margin-bottom: var(--space-3);
+  font-size: clamp(1.25rem, 2vw, 1.55rem);
+  letter-spacing: -0.025em;
+}
+
+.description {
+  flex: 1;
+  margin-bottom: var(--space-6);
+  color: var(--site-muted);
+}
+
+.link {
+  width: fit-content;
+  font-weight: 650;
+  text-underline-offset: 0.2em;
+}

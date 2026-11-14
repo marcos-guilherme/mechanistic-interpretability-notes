@@ -166,7 +166,7 @@ registradas para que a exploração não vire uma sequência sem memória.
 **Entendimento** transforma um padrão em uma afirmação resistente. Entram
 controles, ablações, hipóteses alternativas, novas amostras e testes
 adversariais. O objetivo já não é encontrar algo interessante, mas descobrir
-sob quais condições ele permanece verdadeiro e o que o explica.
+sob quais condições o padrão permanece verdadeiro e o que o explica.
 
 **Comunicação** organiza evidência para outra pessoa. Isso inclui selecionar a
 pergunta central, separar resultado de interpretação, expor limitações e
@@ -256,10 +256,10 @@ precisam de uma lembrança curta; métricas parecidas precisam de definições;
 mudanças de convenção devem ser sinalizadas. Figuras e notebooks ajudam, mas
 não substituem uma narrativa que diga por que cada experimento existe.
 
-Trabalho público e auditável também é uma forma de demonstrar capacidade.
-Código executável, resultados com proveniência e uma análise honesta de
-limitações mostram mais sobre prática científica do que uma lista de assuntos
-estudados. Um resultado inconclusivo bem documentado pode ser valioso quando
+Trabalho público e auditável também permite que terceiros verifiquem o que foi
+feito, não apenas o que foi afirmado. Código executável, resultados com
+proveniência e uma análise honesta de limitações registram a prática
+científica com mais fidelidade do que uma lista de assuntos estudados. Um resultado inconclusivo bem documentado pode ser valioso quando
 ensina onde a cadeia experimental parou e como repetir a tentativa.
 
 Feedback externo acelera habilidades lentas. Mentores e colegas podem perceber
@@ -311,11 +311,20 @@ continua limitado pela seleção, pela seed, pelo modelo e pelo conjunto em que
 foi escolhido.
 
 O estudo de **J-space** elevou a ambição para uma intervenção em um conceito
-intermediário. O software e o fluxo de execução chegaram ao ambiente remoto,
-mas o acesso aos pesos falhou antes da inferência. Registrar esse estado como
-inconclusivo aplica um princípio geral deste guia: a cadeia de evidência
-precisa existir antes da interpretação. Ausência de medição não é resultado
-negativo.
+intermediário. A primeira tentativa parou antes da inferência porque o acesso
+ao modelo *gated* ainda não estava aprovado. Depois da aprovação, a execução
+causal canônica carregou o modelo e a lente e completou readout, baseline,
+no-op, controle aleatório e intervenção-alvo. Cientificamente, porém, ela
+permaneceu inconclusiva (`primary_gates_failed`): as precondições primárias não
+foram satisfeitas, portanto a execução completa não demonstra nem refuta o
+mecanismo.
+
+Em seguida, separei a pergunta de leitura da pergunta causal e executei um
+atlas observacional validado sobre o conjunto de avaliação
+`lens-eval-multihop`, com 93 prompts. Ele descreve o que a J-lens e a logit
+lens recuperam, sem gerar texto ou intervir nas ativações. Essa sequência
+aplica um princípio geral deste guia: sucesso operacional, observação e
+evidência causal precisam permanecer distintos antes da interpretação.
 
 Os três estudos também ilustram a passagem de prática guiada para perguntas
 mais abertas. Essa passagem não elimina a necessidade de retornar aos

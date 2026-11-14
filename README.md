@@ -9,11 +9,12 @@ problemas que encontrei e até onde cada resultado realmente permite concluir.
 Organizei o trabalho em três estudos. Comecei pelo circuito de identificação
 do objeto indireto em GPT-2 Small, avancei para uma direção causal de recusa no
 Gemma 2B IT e, por fim, preparei uma intervenção conceitual em J-space no
-Llama 3.1 8B Instruct. Nem todas as etapas terminaram da mesma forma: duas
-produziram resultados científicos e a tentativa com J-space ficou inconclusiva
-antes da inferência, por falta de autorização para acessar os pesos do modelo.
-Mantive esse resultado porque a falha operacional também faz parte de um
-processo experimental reproduzível.
+Llama 3.1 8B Instruct. Nem todas as etapas terminaram da mesma forma. No
+J-space, a tentativa causal foi concluída operacionalmente, mas permaneceu
+inconclusiva porque os critérios primários falharam (`primary_gates_failed`).
+Depois, executei e validei um atlas observacional sobre o que a lente consegue
+expor; esse atlas não contém intervenção e, portanto, não deve ser confundido
+com evidência causal.
 
 ## Como este repositório está organizado
 
@@ -22,6 +23,9 @@ testes e resultados. A documentação compartilhada conecta esses experimentos:
 
 - o [índice das replicações](docs/replicacoes/README.md) funciona como mapa do
   trabalho;
+- o [diário e painel cronológico dos experimentos](docs/ACOMPANHAMENTO_EXPERIMENTOS.md)
+  acompanha decisões, incidentes, resultados e evidências de J-space e Direção
+  de Recusa;
 - a [metodologia comum](docs/replicacoes/METODOLOGIA.md) reúne os critérios que
   passei a aplicar para planejar, executar e avaliar cada reprodução;
 - o [modelo de replicação](docs/replicacoes/MODELO.md) transforma esses

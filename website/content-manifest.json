@@ -1,0 +1,305 @@
+{
+  "schema_version": 1,
+  "generated_root": "website/.generated",
+  "public_pages": [
+    {
+      "source": "README.md",
+      "id": "inicio",
+      "slug": "/sobre-o-projeto",
+      "title": "Replicações de interpretabilidade mecanística",
+      "sidebar": "inicio",
+      "order": 10
+    },
+    {
+      "source": "docs/replicacoes/README.md",
+      "id": "replicacoes",
+      "slug": "/replicacoes",
+      "title": "Índice das replicações",
+      "sidebar": "inicio",
+      "order": 20
+    },
+    {
+      "source": "docs/replicacoes/METODOLOGIA.md",
+      "id": "metodologia",
+      "slug": "/metodologia",
+      "title": "Metodologia comum de replicação",
+      "sidebar": "metodo-e-percurso",
+      "order": 30
+    },
+    {
+      "source": "docs/GUIA_PESQUISA_EM_INTERPRETABILIDADE.md",
+      "id": "guia-pesquisa-interpretabilidade",
+      "slug": "/guia-pesquisa-interpretabilidade",
+      "title": "Guia de pesquisa em interpretabilidade mecanística",
+      "sidebar": "metodo-e-percurso",
+      "order": 40
+    },
+    {
+      "source": "docs/REFERENCIAS.md",
+      "id": "referencias",
+      "slug": "/referencias",
+      "title": "Fontes e referências",
+      "sidebar": "metodo-e-percurso",
+      "order": 50
+    },
+    {
+      "source": "docs/ACOMPANHAMENTO_EXPERIMENTOS.md",
+      "id": "acompanhamento-experimentos",
+      "slug": "/acompanhamento-experimentos",
+      "title": "Acompanhamento dos experimentos",
+      "sidebar": "metodo-e-percurso",
+      "order": 60
+    },
+    {
+      "source": "projects/ioi/README.md",
+      "id": "ioi",
+      "slug": "/estudos/ioi",
+      "title": "Circuito IOI em GPT-2 Small",
+      "sidebar": "estudos",
+      "order": 70
+    },
+    {
+      "source": "projects/ioi/PROCESSO.md",
+      "id": "ioi-processo",
+      "slug": "/estudos/ioi/processo",
+      "title": "Processo de estudo e reprodução do circuito IOI",
+      "sidebar_label": "Processo: IOI",
+      "sidebar": "estudos",
+      "order": 80
+    },
+    {
+      "source": "projects/refusal_direction/README.md",
+      "id": "direcao-recusa",
+      "slug": "/estudos/direcao-de-recusa",
+      "title": "Direção de recusa no Gemma 2B IT",
+      "sidebar": "estudos",
+      "order": 90
+    },
+    {
+      "source": "projects/refusal_direction/PROCESSO.md",
+      "id": "direcao-recusa-processo",
+      "slug": "/estudos/direcao-de-recusa/processo",
+      "title": "Processo de estudo e reprodução da direção de recusa",
+      "sidebar_label": "Processo: recusa",
+      "sidebar": "estudos",
+      "order": 100
+    },
+    {
+      "source": "projects/jspace_llama/README.md",
+      "id": "jspace-llama",
+      "slug": "/estudos/jspace-llama",
+      "title": "J-space no Llama 3.1 8B Instruct",
+      "sidebar": "estudos",
+      "order": 110
+    },
+    {
+      "source": "projects/jspace_llama/PROCESSO.md",
+      "id": "jspace-llama-processo",
+      "slug": "/estudos/jspace-llama/processo",
+      "title": "Processo de estudo causal e observacional do J-space",
+      "sidebar_label": "Processo: J-space",
+      "sidebar": "estudos",
+      "order": 120
+    }
+  ],
+  "allowed_assets": [
+    {
+      "source": "projects/ioi/results/paper/ioi_circuit_mechanism.png",
+      "destination": "assets/ioi/ioi_circuit_mechanism.png",
+      "kind": "figure"
+    },
+    {
+      "source": "projects/ioi/results/paper/ioi_interpretability_methods.png",
+      "destination": "assets/ioi/ioi_interpretability_methods.png",
+      "kind": "figure"
+    },
+    {
+      "source": "projects/ioi/results/paper/ioi_validation_adversarial.png",
+      "destination": "assets/ioi/ioi_validation_adversarial.png",
+      "kind": "figure"
+    },
+    {
+      "source": "projects/ioi/results/paper/ioi_experiments_overview.png",
+      "destination": "assets/ioi/ioi_experiments_overview.png",
+      "kind": "figure"
+    },
+    {
+      "source": "projects/jspace_llama/results/jspace_observation_pass_at_k.png",
+      "destination": "assets/jspace-llama/jspace_observation_pass_at_k.png",
+      "kind": "figure"
+    },
+    {
+      "source": "projects/jspace_llama/results/jspace_observation_rank_heatmap.png",
+      "destination": "assets/jspace-llama/jspace_observation_rank_heatmap.png",
+      "kind": "figure"
+    },
+    {
+      "source": "projects/jspace_llama/results/jspace_observation_panel.png",
+      "destination": "assets/jspace-llama/jspace_observation_panel.png",
+      "kind": "figure"
+    }
+  ],
+  "allowed_evidence": [
+    {
+      "source": "projects/ioi/results/paper/baseline_seed_42_n_256.json",
+      "destination": "evidence/ioi/baseline_seed_42_n_256.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/ioi/results/paper/06_circuit_discovery.json",
+      "destination": "evidence/ioi/06_circuit_discovery.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/ioi/results/paper/07_path_patching.json",
+      "destination": "evidence/ioi/07_path_patching.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/ioi/results/paper/08_backup_name_movers.json",
+      "destination": "evidence/ioi/08_backup_name_movers.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/ioi/results/paper/09_faithfulness_completeness_minimality.json",
+      "destination": "evidence/ioi/09_faithfulness_completeness_minimality.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/ioi/results/paper/10_adversarial_examples.json",
+      "destination": "evidence/ioi/10_adversarial_examples.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/ioi/results/paper/summary.json",
+      "destination": "evidence/ioi/summary.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/ioi/results/paper/execution_manifest.json",
+      "destination": "evidence/ioi/execution_manifest.json",
+      "kind": "manifest"
+    },
+    {
+      "source": "projects/refusal_direction/results/01_baseline.json",
+      "destination": "evidence/refusal-direction/01_baseline.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/02_candidates.json",
+      "destination": "evidence/refusal-direction/02_candidates.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/03_interventions.json",
+      "destination": "evidence/refusal-direction/03_interventions.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/final_evaluation.json",
+      "destination": "evidence/refusal-direction/final_evaluation.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/execution_manifest.json",
+      "destination": "evidence/refusal-direction/execution_manifest.json",
+      "kind": "manifest"
+    },
+    {
+      "source": "projects/jspace_llama/results/final_evaluation.json",
+      "destination": "evidence/jspace-llama/final_evaluation.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/jspace_llama/results/jspace_observation_manifest.json",
+      "destination": "evidence/jspace-llama/jspace_observation_manifest.json",
+      "kind": "manifest"
+    },
+    {
+      "source": "projects/jspace_llama/data/anthropic-jlens/LICENSE",
+      "destination": "evidence/jspace-llama/anthropic-jlens-LICENSE.txt",
+      "kind": "license"
+    }
+  ],
+  "deny_prefixes": [
+    "docs/superpowers/",
+    "docs/entregas/",
+    "tools/colab/",
+    "artifacts/",
+    "website/.generated/",
+    ".github/",
+    ".cursor/",
+    ".vscode/",
+    ".git/"
+  ],
+  "deny_globs": [
+    "**/notebooks/**",
+    "**/scripts/**",
+    "**/src/**",
+    "**/tests/**",
+    "**/test/**",
+    "**/tools/**",
+    "**/config/**",
+    "**/configs/**",
+    "**/.github/**",
+    "**/.cursor/**",
+    "**/.vscode/**",
+    "**/*.ipynb",
+    "**/*_output.ipynb",
+    "**/*.drawio",
+    "**/*.svg",
+    "**/*.py",
+    "**/*.pyi",
+    "**/*.js",
+    "**/*.jsx",
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.mjs",
+    "**/*.cjs",
+    "**/*.sh",
+    "**/*.ps1",
+    "**/*.bat",
+    "**/*.cmd",
+    "**/*.toml",
+    "**/*.ini",
+    "**/*.cfg",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/Dockerfile",
+    "**/docker-compose.*",
+    "**/package.json",
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/pyproject.toml",
+    "**/requirements*.txt",
+    "**/.env",
+    "**/.env.*",
+    "**/.npmrc",
+    "**/.pypirc",
+    "**/.netrc",
+    "**/credentials",
+    "**/credentials.*",
+    "**/*credential*",
+    "**/*secret*",
+    "**/*token*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/*.safetensors",
+    "**/*.bin",
+    "**/*.pt",
+    "**/*.pth",
+    "**/*.ckpt",
+    "**/*.onnx",
+    "**/__pycache__/**",
+    "**/.cache/**",
+    "**/.pytest_cache/**",
+    "**/.mypy_cache/**",
+    "**/.ruff_cache/**",
+    "**/node_modules/**"
+  ]
+}

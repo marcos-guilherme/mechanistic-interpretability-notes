@@ -5,6 +5,11 @@ que decisões importantes ficassem espalhadas apenas entre notebooks, código e
 logs. Aqui explico como organizei o trabalho e onde encontrar a evidência de
 cada estudo.
 
+Como porta de entrada cronológica para J-space e Direção de Recusa, o
+[diário e painel dos experimentos](../ACOMPANHAMENTO_EXPERIMENTOS.md) reúne
+decisões, incidentes, resultados e evidências dos dois estudos. Ele complementa
+este índice e a metodologia, sem substituir nenhum dos dois.
+
 Ao longo dos experimentos, procurei manter duas leituras em paralelo: uma
 conceitual, voltada a entender a hipótese e o papel de cada intervenção, e
 outra operacional, voltada a permitir que a execução seja repetida e
@@ -40,7 +45,7 @@ gerações.
 - [Avaliação final canônica](../../projects/refusal_direction/results/final_evaluation.json)
 - [Manifesto da execução](../../projects/refusal_direction/results/execution_manifest.json)
 
-### J-space Llama — tentativa causal e atlas observacional
+### J-space Llama: tentativa causal e atlas observacional
 
 Organizei este estudo em três etapas distintas. A primeira é a tentativa causal
 já executada: depois que o acesso ao modelo foi aprovado, uma execução em
@@ -80,8 +85,8 @@ Para permitir a validação independente, o perfil observacional transportou
 nove membros: dois JSONs compactos, seis figuras canônicas e
 `artifacts/jspace_observation_raw.json`. Esse sidecar contém registros
 observacionais no nível dos prompts, não gerações ou continuações, e é
-validado e publicado localmente na mesma transação dos arquivos canônicos. Ele
-serve apenas para reconciliar hashes e conteúdo, continua ignorado pelo Git e
+validado e publicado localmente na mesma transação dos arquivos canônicos. O
+sidecar serve apenas para reconciliar hashes e conteúdo, continua ignorado pelo Git e
 não faz parte do commit de evidência canônica.
 
 Uma terceira etapa, se for realizada, será uma nova confirmação causal. Ela

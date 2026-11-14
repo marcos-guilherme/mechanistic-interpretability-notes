@@ -589,12 +589,12 @@ uv run pytest tests/test_notebooks.py::test_experimental_notebooks_are_clean_saf
 Expected: `PASS`. Se falhar, corrigir o notebook indicado antes de editar a
 documentação.
 
-- [ ] **Step 3: Document the two notebook tracks**
+- [ ] **Step 3: Document the two notebook sets**
 
 Em `README.md`, abaixo da lista dos quatro notebooks canônicos, adicionar:
 
 ```markdown
-### Trilha experimental
+### Notebooks experimentais
 
 Os notebooks em [`notebooks/experimental/`](notebooks/experimental/) abrem o
 mesmo experimento em células menores: mostram shapes, valores intermediários,
@@ -637,7 +637,7 @@ Expected: `4 notebooks válidos`.
 
 ```powershell
 git add projects/refusal_direction/tests/test_notebooks.py projects/refusal_direction/README.md projects/refusal_direction/PROCESSO.md
-git commit -m "docs(refusal): connect experimental notebook track"
+git commit -m "docs(refusal): connect experimental notebooks"
 ```
 
 ---

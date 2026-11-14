@@ -10,7 +10,7 @@
         <mxCell id="3" parent="1" style="rounded=1;arcSize=8;fillColor=#f5f5f5;strokeColor=#111111;strokeWidth=1.5;fontColor=#111111;whiteSpace=wrap;html=1;" value="" vertex="1">
           <mxGeometry height="150" width="730" x="35" y="75" as="geometry" />
         </mxCell>
-        <mxCell id="4" parent="1" style="text;strokeColor=none;fillColor=none;verticalAlign=middle;fontColor=#111111;fontSize=13;fontStyle=1;align=left;whiteSpace=wrap;html=1;" value="Trilha didática · 8 prompts" vertex="1">
+        <mxCell id="4" parent="1" style="text;strokeColor=none;fillColor=none;verticalAlign=middle;fontColor=#111111;fontSize=13;fontStyle=1;align=left;whiteSpace=wrap;html=1;" value="Etapa didática · 8 prompts" vertex="1">
           <mxGeometry height="25" width="240" x="55" y="83" as="geometry" />
         </mxCell>
         <mxCell id="5" parent="1" style="rounded=1;arcSize=14;fillColor=#f8cecc;strokeColor=#111111;strokeWidth=1.5;fontColor=#111111;fontSize=12;whiteSpace=wrap;html=1;" value="&lt;b&gt;01 Baseline&lt;/b&gt;&lt;br&gt;IO − S" vertex="1">
@@ -37,7 +37,7 @@
         <mxCell id="12" parent="1" style="rounded=1;arcSize=8;fillColor=#f5f5f5;strokeColor=#111111;strokeWidth=1.5;fontColor=#111111;whiteSpace=wrap;html=1;" value="" vertex="1">
           <mxGeometry height="210" width="730" x="35" y="260" as="geometry" />
         </mxCell>
-        <mxCell id="13" parent="1" style="text;strokeColor=none;fillColor=none;verticalAlign=middle;fontColor=#111111;fontSize=13;fontStyle=1;align=left;whiteSpace=wrap;html=1;" value="Trilha fiel ao paper · GPT-2 Small" vertex="1">
+        <mxCell id="13" parent="1" style="text;strokeColor=none;fillColor=none;verticalAlign=middle;fontColor=#111111;fontSize=13;fontStyle=1;align=left;whiteSpace=wrap;html=1;" value="Etapa fiel ao artigo · GPT-2 Small" vertex="1">
           <mxGeometry height="25" width="280" x="55" y="268" as="geometry" />
         </mxCell>
         <mxCell id="14" parent="1" style="rounded=1;arcSize=14;fillColor=#f8cecc;strokeColor=#111111;strokeWidth=1.5;fontColor=#111111;fontSize=12;whiteSpace=wrap;html=1;" value="&lt;b&gt;05 Dataset&lt;/b&gt;&lt;br&gt;pIOI / pABC" vertex="1">

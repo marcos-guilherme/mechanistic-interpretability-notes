@@ -110,14 +110,14 @@ camadas intermediárias e se concentram em ranks menores aproximadamente entre
 17 e 28, enquanto algumas linhas continuam ruins mesmo nessa região. Ele
 mostra o menor rank por item e camada em escala logarítmica, não uma fronteira
 causal nem uma camada universal. O `gradient_pursuit` por vezes reencontra o
-mesmo texto — `spider`, por exemplo, aparece entre seus componentes em várias
-camadas —, mas decompõe a ativação por coeficientes; não é outro cálculo do
+mesmo texto (`spider`, por exemplo, aparece entre seus componentes em várias
+camadas), mas decompõe a ativação por coeficientes; não é outro cálculo do
 rank direto e não foi fundido com `pass@k`.
 
 As figuras reproduzem as métricas e a estrutura do JSON. O gráfico de barras e
 o heatmap são legíveis; já o painel preserva tokens brutos, inclusive quebras
 de linha, scripts variados e símbolos de controle, o que torna algumas células
-visualmente ruidosas. Por isso, ele serve como visão qualitativa, enquanto o
+visualmente ruidosas. Por isso, o painel serve como visão qualitativa, enquanto o
 JSON validado permanece a fonte para valores exatos. A interpretação ainda é
 limitada pelo tokenizer, pela lente treinada no corpus Salesforce-Wikitext,
 pelo recorte de camadas e pelo painel exploratório de 12 itens.
@@ -185,7 +185,7 @@ python tools/colab/run_jspace.py stop
 O perfil `observation` é separado do perfil causal padrão e tem exatamente
 nove membros: dois JSONs compactos, seis figuras canônicas PNG/SVG e
 `artifacts/jspace_observation_raw.json`. Esse sidecar bruto contém os registros
-observacionais no nível dos prompts — não saídas geradas nem continuações — e
+observacionais no nível dos prompts (não saídas geradas nem continuações) e
 serve somente para o validador local recalcular hashes e reconciliar o conteúdo
 compacto. O empacotamento e o download validam o JSON, o caminho e o limite de
 tamanho; a publicação local dos nove membros é transacional. O sidecar

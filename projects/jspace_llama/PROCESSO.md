@@ -1,6 +1,7 @@
 # Processo de estudo causal e observacional do J-space
 
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
+[← Voltar ao diário central dos experimentos](../../docs/ACOMPANHAMENTO_EXPERIMENTOS.md)
 
 > **Estado:** tentativa causal inconclusiva preservada; atlas observacional
 > executado e validado
@@ -95,7 +96,8 @@ Portanto, o marco causal planejado não foi demonstrado por este protocolo.
 Também não interpreto a execução como uma refutação geral do J-space: a linha
 de base comportamental exigida não foi estabelecida e o conceito-fonte não
 apareceu no readout. O resultado científico adequado é que esta configuração
-de prompt, parser, lente, camadas e `alpha=4.0` permaneceu inconclusiva.
+de prompt, parser, lente, camadas e `alpha=4.0` permaneceu
+[inconclusiva](results/final_evaluation.json).
 
 ### Extensão observacional: o atlas
 
@@ -159,7 +161,9 @@ A execução canônica `2fcb8a49-136f-4868-91cc-f98f9dc2e57d` começou em
 `2026-11-11T15:19:29.812212Z`. Em uma NVIDIA L4, com `bfloat16` e CUDA 13.2,
 ela processou os 93 itens e terminou com `status=success`. Esse estado afirma
 que o pipeline e a evidência foram completados e validados; não afirma que a
-recuperação foi alta e não modifica o resultado causal anterior.
+recuperação foi alta e não modifica o resultado causal anterior. O
+[manifesto observacional](results/jspace_observation_manifest.json) registra
+essa execução e sua proveniência.
 
 Na *band* 12–28, a J-lens obteve `pass@1=0,344086`,
 `pass@5=0,548387` e `pass@10=0,596774`; a logit lens obteve `0,284946`,
@@ -169,6 +173,14 @@ e a logit lens a `0,284946`, `0,392473` e `0,446237`. A J-lens recuperou uma
 fração maior de intermediários neste recorte, mas essa comparação entre
 projeções sobre os mesmos estados é observacional: ela não mostra que os
 conceitos recuperados causem a resposta.
+
+<figure>
+
+![Gráfico de barras do pass@1, pass@5 e pass@10 da J-lens e da logit lens, comparando a faixa 12–28 com todas as camadas ajustadas](results/jspace_observation_pass_at_k.png)
+
+<figcaption><em>Figura observacional: recuperação agregada das duas lentes nos dois escopos de camada.</em></figcaption>
+
+</figure>
 
 Dos 103 intermediários, 82 eram single-token e 21 eram multi-token. Os 82
 single-token aparecem em 81 itens. Nesse subconjunto, os valores
@@ -193,6 +205,14 @@ rank 2 na camada 19, tanto na *band* quanto no conjunto completo. Já
 ranks 1999, 1090 e 514; a busca em todas as camadas melhorou esses valores
 para 24, 286 e 349, sem torná-los recuperações fortes.
 
+<figure>
+
+![Painel observacional de 12 prompts com conceitos esperados, ranks da J-lens e componentes do gradient pursuit em camadas selecionadas](results/jspace_observation_panel.png)
+
+<figcaption><em>Figura observacional: painel qualitativo registrado, com recuperações e falhas.</em></figcaption>
+
+</figure>
+
 No heatmap, as primeiras camadas concentram ranks altos para a maioria dos
 itens. Há uma melhora ampla a partir da região intermediária e uma
 concentração qualitativa de ranks menores entre aproximadamente as camadas 17
@@ -200,6 +220,14 @@ e 28, mas permanecem faixas de itens ruins nessa mesma região; as camadas 29 e
 30 também são heterogêneas. Como cada célula usa o menor rank entre os
 intermediários daquele item, a figura não localiza uma camada causal nem
 garante que todos os conceitos do item estejam disponíveis.
+
+<figure>
+
+![Mapa de calor observacional dos menores ranks da J-lens por item e camada, com ampla melhora nas camadas intermediárias e tardias e heterogeneidade persistente](results/jspace_observation_rank_heatmap.png)
+
+<figcaption><em>Figura observacional: distribuição dos melhores ranks por item ao longo das camadas.</em></figcaption>
+
+</figure>
 
 O `gradient_pursuit` às vezes reencontra o texto esperado. No caso de
 `spider`, ele inclui `Spider` ou `spider` entre os componentes em várias
@@ -225,7 +253,7 @@ TCC. A primeira tentativa me obrigou a separar falha de infraestrutura de
 resultado experimental; a segunda mostrou outra distinção: executar a
 intervenção não significa que as precondições científicas tenham sido
 satisfeitas. Em conjunto com IOI e Refusal Direction, este estudo representa o
-terceiro nível de análise causal que explorei — a intervenção sobre conceitos
+terceiro nível de análise causal que explorei: a intervenção sobre conceitos
 em um espaço de trabalho aprendido por uma lente. Registrar o baseline
 inválido, o readout sem `spider` e a degradação da intervenção evita transformar
 uma execução completa em uma conclusão mais forte do que os dados permitem.
@@ -296,7 +324,9 @@ secundários de transparência, não uma afirmação de generalização.
 - Seed: 42.
 - Commit local: `fd8a77ad7d93df76b5c499bb314a71ad1c75760c`.
 - Estado do código-fonte no envio: limpo no escopo do experimento.
-- Camadas avaliadas: 12–28 de um modelo com 32 camadas.
+- Camadas: 12–28 no protocolo causal e como faixa principal do atlas; o atlas
+  também reporta todas as camadas ajustadas da lente, 0–30, em um modelo com
+  32 camadas.
 - Lente: 1.040.197.778 bytes, SHA-256
   `d5300a1575c0b5ad6e01b098c75adb072f3a6c246f184ce2fb35a3550fc8c68b`.
 

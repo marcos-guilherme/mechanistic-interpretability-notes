@@ -1,4 +1,4 @@
-"""Paper-faithful data and metrics for the IOI replication track."""
+"""Paper-faithful data and metrics for the IOI replication."""
 
 from ioi_replication.paper.ablation import (
     GroupedActivationMeans,

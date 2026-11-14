@@ -1,6 +1,7 @@
 # Processo de estudo e reprodução da direção de recusa
 
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
+[← Voltar ao diário central dos experimentos](../../docs/ACOMPANHAMENTO_EXPERIMENTOS.md)
 
 > **Estado:** concluído, com reprodução causal parcial
 >
@@ -21,8 +22,8 @@ recusa e adicioná-la deve induzir recusa mesmo em instruções inofensivas.
 Depois de estudar um circuito distribuído no experimento de IOI, escolhi esta
 replicação para explorar uma hipótese quase oposta em forma: um comportamento
 complexo mediado por uma única direção contínua. Isso me permitiu comparar duas
-maneiras de formular uma explicação mecanística — como conjunto de componentes
-discretos e como orientação no espaço residual.
+maneiras de formular uma explicação mecanística (como conjunto de componentes
+discretos e como orientação no espaço residual).
 
 ### Problema de pesquisa
 
@@ -134,7 +135,7 @@ separadamente as contagens planejadas e as contagens efetivas pós-filtro.
 
 ## Caderno de bordo dos quatro estágios
 
-### 01 — Dataset e linha de base
+### 01: Dataset e linha de base
 
 O [primeiro notebook](notebooks/01_dataset_and_baseline.ipynb) pergunta se o
 modelo exibe o contraste necessário antes de qualquer intervenção. Ele carrega
@@ -151,7 +152,7 @@ traz taxa de recusa das gerações para os 32 exemplos nocivos e 32 inofensivos
 antes do filtro. Esse estágio estabelece comportamento no recorte selecionado;
 por si só, não estabelece um mecanismo.
 
-### 02 — Extração das direções candidatas
+### 02: Extração das direções candidatas
 
 O [segundo notebook](notebooks/02_extract_candidate_directions.ipynb) captura a
 entrada residual de cada um dos 18 blocos nas cinco posições finais do sufixo
@@ -173,7 +174,7 @@ normalizá-las ou tratá-las como evidência, a execução passou a tratá-las c
 controle de neutralidade da instrumentação, mas candidatas nulas não podem ser
 interpretadas como direções causais.
 
-### 03 — Seleção e intervenções causais
+### 03: Seleção e intervenções causais
 
 O [terceiro notebook](notebooks/03_causal_interventions.ipynb) avalia as 90
 candidatas na validação efetiva. Uma candidata só é elegível quando:
@@ -213,7 +214,7 @@ entre magnitudes de perturbação. Isso é mais informativo que um no-op, mas um
 única orientação e uma única seed não caracterizam a distribuição de
 controles aleatórios.
 
-### 04 — Avaliação e preservação
+### 04: Avaliação e preservação
 
 O [quarto notebook](notebooks/04_evaluation_and_validation.ipynb) consolida as
 métricas científicas: taxa de recusa, falsa recusa, divergência KL e mudança de
@@ -277,7 +278,7 @@ necessário entre o método descrito no artigo e uma execução verificável:
 - Conexões do CLI com o Colab puderam cair durante chamadas longas. Retomar o
   comando contra a mesma sessão nomeada preservou o runtime, os arquivos e o
   estado do kernel. Uma queda do cliente não deve ser confundida com perda da
-  sessão — nem com encerramento da GPU.
+  sessão, nem com encerramento da GPU.
 
 ## Fontes canônicas e segurança
 
@@ -377,8 +378,8 @@ baixar novamente o modelo.
 ## Limites e próximos passos
 
 Esta é uma execução de uma seed, um modelo e uma GPU, com amostras pequenas e
-filtradas pelo próprio comportamento basal. Além disso, a mesma validação
-efetiva foi usada para escolher a candidata e reportar o efeito final; não há
+filtradas pelo próprio comportamento basal. A mesma validação efetiva foi usada
+para escolher a candidata e reportar o efeito final; não há
 um terceiro conjunto totalmente separado para estimar generalização após a
 seleção. A detecção de recusa usa um conjunto curto de marcadores e um token
 inicial específico do Gemma, enquanto preservação foi medida apenas nos 32
