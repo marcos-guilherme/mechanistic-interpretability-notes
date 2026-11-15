@@ -112,7 +112,7 @@ Result: `84 passed in 7.38s` (baseline 58 + 26 observability tests)
 
 ### Fix commit
 
-`19a51beb4c05d96ba30f321bc846359155d0ae56`
+`54b20f135352990f1e9ca8e4e128ad52b8d4a735`
 
 ### Review items addressed
 
