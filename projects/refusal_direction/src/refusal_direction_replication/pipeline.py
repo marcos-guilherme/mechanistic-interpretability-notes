@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import subprocess
 
 import torch
@@ -699,6 +700,7 @@ def _mean(values: Sequence[float]) -> float:
 
 
 IMPLEMENTATION_COMMIT_FILENAME = "IMPLEMENTATION_COMMIT"
+IMPLEMENTATION_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _implementation_commit_stamp_paths() -> list[Path]:
@@ -712,9 +714,9 @@ def _usable_commit(value: str | None) -> str | None:
     if value is None:
         return None
     stripped = value.strip()
-    if not stripped or stripped.casefold() == "unknown":
-        return None
-    return stripped
+    if IMPLEMENTATION_COMMIT_RE.fullmatch(stripped):
+        return stripped
+    return None
 
 
 def implementation_commit_hash() -> str:

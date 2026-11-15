@@ -20,6 +20,7 @@ from .gates import (
 
 QWEN_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
 QWEN_REVISION = "c03e6d358207e414f1eca0bb1891e29f1db0e242"
+UPSTREAM_COMMIT = "9d852fae1a9121c78b29142de733cb1340770cc3"
 LEAK_KEYS = frozenset(
     {
         "text",
@@ -57,6 +58,16 @@ GENERATION_SPLIT_KEYS = {
     "harmless_validation": "harmless_val",
 }
 HEX_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+IMPLEMENTATION_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+EXPECTED_COMPARATORS = {
+    "min_valid_harmful": "gte",
+    "min_valid_harmless": "gte",
+    "min_refusal_gap": "gte",
+    "min_harmful_ablation_drop": "gte",
+    "min_harmless_addition_increase": "gte",
+    "max_random_control_harmful_drop": "lte",
+    "max_harmless_ablation_kl": "lte",
+}
 PASS_STAGE_FILES = (
     "00_preflight.json",
     "01_baseline.json",
@@ -152,21 +163,26 @@ def _all_finite(obj: Any) -> bool:
 
 
 def _model_ok(payload: dict[str, Any]) -> bool:
-    config = payload.get("config", {})
-    provenance = payload.get("provenance", {})
-    if not provenance and "status" in payload:
-        return True
-    name = config.get("model_name") or provenance.get("model_name")
-    requested = config.get("model_revision") or provenance.get(
-        "requested_model_revision"
-    )
-    resolved = provenance.get("resolved_model_revision")
-    if name != QWEN_MODEL:
-        return False
-    if requested != QWEN_REVISION:
-        return False
-    if resolved != QWEN_REVISION:
-        return False
+    config = payload.get("config") or {}
+    provenance = payload.get("provenance") or {}
+    if not config and not provenance:
+        return "status" in payload
+    if config:
+        if config.get("model_name") != QWEN_MODEL:
+            return False
+        if config.get("model_revision") != QWEN_REVISION:
+            return False
+        if config.get("upstream_commit") != UPSTREAM_COMMIT:
+            return False
+    if provenance:
+        if provenance.get("model_name") != QWEN_MODEL:
+            return False
+        if provenance.get("requested_model_revision") != QWEN_REVISION:
+            return False
+        if provenance.get("resolved_model_revision") != QWEN_REVISION:
+            return False
+        if provenance.get("upstream_commit") != UPSTREAM_COMMIT:
+            return False
     return True
 
 
@@ -220,6 +236,10 @@ def _checks_match(stored: dict[str, Any], recomputed) -> bool:
             return False
         if bool(stored_check.get("passed")) != check.passed:
             return False
+        if stored_check.get("comparator") != check.comparator:
+            return False
+        if stored_check.get("reason") != check.reason:
+            return False
         if abs(float(stored_check.get("observed")) - float(check.observed)) > 1e-9:
             return False
         if abs(float(stored_check.get("threshold")) - float(check.threshold)) > 1e-9:
@@ -250,7 +270,8 @@ def _gate_fields_complete(evaluation: dict[str, Any], status: str) -> bool:
         for item in checks:
             if any(field not in item for field in REQUIRED_GATE_FIELDS):
                 return False
-            if item.get("comparator") not in {"gte", "lte"}:
+            expected = EXPECTED_COMPARATORS.get(item.get("name"))
+            if expected is None or item.get("comparator") != expected:
                 return False
             if not item.get("reason"):
                 return False
@@ -258,10 +279,7 @@ def _gate_fields_complete(evaluation: dict[str, Any], status: str) -> bool:
 
 
 def _commit_ok(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    stripped = value.strip()
-    return bool(stripped) and stripped.casefold() != "unknown"
+    return isinstance(value, str) and bool(IMPLEMENTATION_COMMIT_RE.fullmatch(value))
 
 
 def _run_id_ok(value: Any) -> bool:

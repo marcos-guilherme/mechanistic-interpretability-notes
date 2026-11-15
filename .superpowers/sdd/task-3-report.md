@@ -290,3 +290,90 @@ Result: `155 passed in 14.52s` (previous 142 + 13 second-review tests)
 ### Status (second review round)
 
 `DONE_WITH_CONCERNS`
+
+---
+
+## Third review round (task-3-review.md)
+
+Addressed every item in the third-review section. Config and provenance are
+checked independently, gate comparators/reasons are canonical, commits must be
+40 lowercase hex characters, and missing stamps fail inside the pilot error
+boundary.
+
+### RED evidence
+
+Command:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py::test_validator_rejects_wrong_provenance_when_config_is_correct tests/test_qwen_pilot.py::test_validator_rejects_missing_provenance_revision_when_config_is_correct tests/test_qwen_pilot.py::test_validator_rejects_missing_or_wrong_upstream_commit tests/test_qwen_pilot.py::test_validator_rejects_wrong_gate_comparator tests/test_qwen_pilot.py::test_validator_rejects_noncanonical_gate_reason tests/test_qwen_pilot.py::test_validator_rejects_non_lowercase_sha_implementation_commit tests/test_qwen_pilot.py::test_missing_implementation_commit_produces_operational_error -q --tb=line
+```
+
+Result (failing tests added before production changes):
+
+```text
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_wrong_provenance_when_config_is_correct
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_missing_provenance_revision_when_config_is_correct
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_missing_or_wrong_upstream_commit
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_wrong_gate_comparator
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_noncanonical_gate_reason
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_non_lowercase_sha_implementation_commit
+FAILED tests/test_qwen_pilot.py::test_missing_implementation_commit_produces_operational_error
+7 failed in 8.85s
+```
+
+The missing-stamp test failed with `FileNotFoundError` for `pilot_evaluation.json`
+because commit resolution ran outside the orchestration `try`.
+
+### GREEN evidence
+
+Focused suites:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py tests/test_colab_orchestrator.py tests/test_qwen_observability.py -q
+```
+
+Result: `108 passed in 17.70s`
+
+Full refusal project suite:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests -q
+```
+
+Result: `162 passed in 17.22s` (previous 155 + 7 third-review tests)
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `projects/refusal_direction/src/refusal_direction_replication/qwen_pilot_validate.py` | Independent config/provenance/upstream checks; exact comparators and canonical reasons; 40 lowercase hex commits |
+| `projects/refusal_direction/src/refusal_direction_replication/pipeline.py` | Stamp/env/git commits accepted only if they are 40 lowercase hex |
+| `projects/refusal_direction/src/refusal_direction_replication/qwen_pilot.py` | Resolve commit after stage initialize, inside the operational-error boundary |
+| `projects/refusal_direction/tests/test_qwen_pilot.py` | Focused rejection tests for each third-review item |
+
+### Review items addressed
+
+| Finding | Fix |
+|--------|-----|
+| Independent model/revision + upstream | Config and provenance each must match the pinned Qwen model, revision, and Arditi commit |
+| Exact comparator and canonical reason | Each named check has one required comparator; stored reason must match recomputed gate text |
+| 40 lowercase hex commits | Validator and `implementation_commit_hash()` reject uppercase, empty, `unknown`, and wrong length |
+| Commit resolution error boundary | Missing/corrupt stamp writes `operational_error` and failed status before re-raising |
+
+### Self-review (third review round)
+
+- A correct config can no longer hide a wrong or missing provenance model, requested revision, resolved revision, or upstream commit.
+- `min_*` checks must be `gte` and `max_*` checks must be `lte`; swapping them fails even if `passed` is still true.
+- Missing stamps now fail closed after `initialize()`, so `status.json` can be marked failed.
+
+### Concerns (third review round)
+
+1. **No GPU execution** in this round; scientific gates remain unexercised on Qwen weights.
+2. **Git SHAs that are not 40 lowercase hex** (for example uppercase) are treated as corrupt and become operational errors.
+
+### Status (third review round)
+
+`DONE_WITH_CONCERNS`

@@ -192,8 +192,8 @@ def run_qwen_pilot(
 
     runners = stage_runners or _default_stage_runners()
     releaser = release_resources or release_compute_resources
-    commit = implementation_commit_hash()
     last_evaluation: dict[str, Any] | None = None
+    commit: str | None = None
 
     for stage in PILOT_STAGES:
         if store.should_skip_stage(stage):
@@ -201,6 +201,8 @@ def run_qwen_pilot(
         try:
             store.initialize(stage=stage, total_units=1)
             store.begin_running()
+            if commit is None:
+                commit = implementation_commit_hash()
             runners[stage](root, profile=profile, run_id=resolved_run_id)
             if stage == "baseline":
                 baseline_gate = _baseline_gate_from_artifact(

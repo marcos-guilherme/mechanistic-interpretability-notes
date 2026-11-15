@@ -1711,3 +1711,122 @@ def test_implementation_commit_hash_reads_stamped_file(
         lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=""),
     )
     assert implementation_commit_hash() == "d" * 40
+
+
+def test_validator_rejects_wrong_provenance_when_config_is_correct(
+    tmp_path: Path,
+) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"]["model_name"] = "not-the-qwen-model"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["model_and_revision"] is False
+
+
+def test_validator_rejects_missing_provenance_revision_when_config_is_correct(
+    tmp_path: Path,
+) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"].pop("requested_model_revision")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["model_and_revision"] is False
+
+
+def test_validator_rejects_missing_or_wrong_upstream_commit(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"]["upstream_commit"] = "0" * 40
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["model_and_revision"] is False
+    payload["provenance"]["upstream_commit"] = UPSTREAM_COMMIT
+    payload["config"].pop("upstream_commit")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["model_and_revision"] is False
+
+
+def test_validator_rejects_wrong_gate_comparator(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["baseline_gate"]["checks"][0]["comparator"] = "lte"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["gate_fields_complete"] is False
+
+
+def test_validator_rejects_noncanonical_gate_reason(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["baseline_gate"]["checks"][0]["reason"] = "custom reason text"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["gate_calculations_consistent"] is False
+
+
+def test_validator_rejects_non_lowercase_sha_implementation_commit(
+    tmp_path: Path,
+) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    results_dir = tmp_path / "results" / "qwen25_coder_7b"
+    uppercase = "C" * 40
+    for name in (
+        "00_preflight.json",
+        "01_baseline.json",
+        "02_candidates.json",
+        "03_interventions.json",
+        "final_evaluation.json",
+        "pilot_evaluation.json",
+    ):
+        path = results_dir / name
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if name == "pilot_evaluation.json":
+            payload["implementation_commit"] = uppercase
+        else:
+            payload["provenance"]["implementation_commit"] = uppercase
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["code_provenance"] is False
+
+
+def test_missing_implementation_commit_produces_operational_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copy_configs(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "refusal_direction_replication.qwen_pilot.implementation_commit_hash",
+        lambda: (_ for _ in ()).throw(
+            ValueError("implementation commit is missing")
+        ),
+    )
+    runners = {stage: _stage_writer(stage, calls) for stage in PILOT_STAGES}
+    with pytest.raises(ValueError, match="implementation commit"):
+        run_qwen_pilot(tmp_path, run_id="stamp-miss", stage_runners=runners)
+    payload = json.loads(
+        (tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["status"] == STATUS_OPERATIONAL_ERROR
+    assert payload["operational_success"] is False
+    assert payload["error_code"] == "value"
+    assert payload["message"] == "Operational error: invalid value."
+    assert payload["stage"] == "preflight"
+    assert calls == []
+    status = json.loads(
+        (tmp_path / "artifacts" / "qwen25_coder_7b" / "status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert status["state"] == "failed"
+    assert status["message"] == "Operational error: invalid value."
