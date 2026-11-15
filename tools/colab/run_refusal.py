@@ -102,6 +102,14 @@ def status_command(session: str) -> list[str]:
     ]
 
 
+def pilot_command(session: str, *, timeout: int) -> list[str]:
+    return exec_command(
+        session,
+        PROJECT / "scripts" / "qwen_run_pilot.py",
+        timeout=timeout,
+    )
+
+
 def extract_qwen_results_archive(archive: Path, project: Path) -> None:
     sys.path.insert(0, str(project / "src"))
     from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
@@ -150,6 +158,7 @@ def main() -> int:
             "execute",
             "fetch",
             "status",
+            "pilot",
             "stop",
         ),
     )
@@ -255,6 +264,10 @@ def main() -> int:
         if args.profile != "qwen25-coder":
             parser.error("status is only available for --profile qwen25-coder")
         run(status_command(session))
+    elif args.action == "pilot":
+        if args.profile != "qwen25-coder":
+            parser.error("pilot is only available for --profile qwen25-coder")
+        run(pilot_command(session, timeout=args.timeout))
     elif args.action == "stop":
         run(stop_command(session))
     return 0

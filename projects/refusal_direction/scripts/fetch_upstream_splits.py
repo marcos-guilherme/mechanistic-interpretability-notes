@@ -16,6 +16,8 @@ SPLITS = (
     "harmful_val",
     "harmless_train",
     "harmless_val",
+    "harmful_test",
+    "harmless_test",
 )
 
 

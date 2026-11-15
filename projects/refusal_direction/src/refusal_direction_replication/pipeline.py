@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
+import gc
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -35,6 +37,7 @@ from .model import (
     GEMMA_REFUSAL_TOKEN_IDS,
     capture_residual_grid,
     end_of_instruction_offsets,
+    format_chat_instruction,
     load_causal_lm,
     resolve_refusal_token_ids,
     tokenize_instructions,
@@ -128,6 +131,76 @@ def filter_examples_by_score(
     ]
 
 
+def maybe_filter_examples(
+    examples: Sequence[PromptExample],
+    scores: torch.Tensor,
+    *,
+    keep_positive: bool,
+    config: dict,
+) -> list[PromptExample]:
+    if config.get("filter_by_behavior", True):
+        return filter_examples_by_score(
+            examples,
+            scores,
+            keep_positive=keep_positive,
+        )
+    return list(examples)
+
+
+def maybe_filter_scores(
+    scores: torch.Tensor,
+    *,
+    keep_positive: bool,
+    config: dict,
+) -> torch.Tensor:
+    if config.get("filter_by_behavior", True):
+        mask = scores > 0 if keep_positive else scores < 0
+        return scores[mask]
+    return scores
+
+
+SPLIT_NAME_TO_SUFFIX = {
+    "train": "train",
+    "validation": "val",
+    "test": "test",
+}
+
+
+def split_examples(
+    splits: dict[str, list[PromptExample]],
+    split_name: str,
+) -> tuple[list[PromptExample], list[PromptExample]]:
+    try:
+        suffix = SPLIT_NAME_TO_SUFFIX[split_name]
+    except KeyError as error:
+        raise ValueError(f"unknown split name: {split_name}") from error
+    return splits[f"harmful_{suffix}"], splits[f"harmless_{suffix}"]
+
+
+def release_compute_resources(model=None, tokenizer=None) -> None:
+    del model
+    del tokenizer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _record_example_ids(config: dict) -> bool:
+    if "record_example_ids" in config:
+        return bool(config["record_example_ids"])
+    return "test_per_class" in config
+
+
+def _ids_from_examples(examples: Sequence[PromptExample]) -> list[str]:
+    return [example.id for example in examples]
+
+
+def _ids_from_splits(
+    splits: dict[str, Sequence[PromptExample]],
+) -> dict[str, list[str]]:
+    return {name: _ids_from_examples(items) for name, items in splits.items()}
+
+
 def summarize_generated_condition(outputs: Sequence[str]) -> dict:
     return {
         "refusal_rate": refusal_rate(outputs),
@@ -188,6 +261,12 @@ REQUIRED_NON_GEMMA_FIELDS = (
     "refusal_prefixes",
     "position_offsets",
     "model_revision",
+    "test_per_class",
+    "filter_by_behavior",
+    "selection_split",
+    "final_conditions_split",
+    "baseline_gate",
+    "causal_gate",
 )
 
 
@@ -529,16 +608,23 @@ def prompt_cross_entropy_losses(
     return losses
 
 
-def _sampled_splits(root: Path, config: dict) -> dict[str, list[PromptExample]]:
-    dataset_root = root / "artifacts" / "datasets"
-    required = {
+def _split_specs(config: dict) -> dict[str, tuple[str, int, int]]:
+    specs = {
         "harmful_train": ("harmful", config["train_per_class"], 0),
         "harmless_train": ("harmless", config["train_per_class"], 1),
         "harmful_val": ("harmful", config["validation_per_class"], 2),
         "harmless_val": ("harmless", config["validation_per_class"], 3),
     }
+    if "test_per_class" in config:
+        specs["harmful_test"] = ("harmful", config["test_per_class"], 4)
+        specs["harmless_test"] = ("harmless", config["test_per_class"], 5)
+    return specs
+
+
+def _sampled_splits(root: Path, config: dict) -> dict[str, list[PromptExample]]:
+    dataset_root = root / "artifacts" / "datasets"
     sampled = {}
-    for name, (label, size, seed_offset) in required.items():
+    for name, (label, size, seed_offset) in _split_specs(config).items():
         path = dataset_root / f"{name}.json"
         if not path.exists():
             raise FileNotFoundError(
@@ -647,25 +733,29 @@ def run_baseline_stage(
         refusal_token_ids=refusal_token_ids,
     )
 
-    harmful_train_filtered = filter_examples_by_score(
+    harmful_train_filtered = maybe_filter_examples(
         splits["harmful_train"],
         harmful_train_scores,
         keep_positive=True,
+        config=config,
     )
-    harmless_train_filtered = filter_examples_by_score(
+    harmless_train_filtered = maybe_filter_examples(
         splits["harmless_train"],
         harmless_train_scores,
         keep_positive=False,
+        config=config,
     )
-    harmful_val_filtered = filter_examples_by_score(
+    harmful_val_filtered = maybe_filter_examples(
         splits["harmful_val"],
         harmful_val_scores,
         keep_positive=True,
+        config=config,
     )
-    harmless_val_filtered = filter_examples_by_score(
+    harmless_val_filtered = maybe_filter_examples(
         splits["harmless_val"],
         harmless_val_scores,
         keep_positive=False,
+        config=config,
     )
     if not all(
         (
@@ -716,17 +806,27 @@ def run_baseline_stage(
         },
         "harmful_validation": _condition_payload(
             harmful_outputs,
-            harmful_val_scores[harmful_val_scores > 0],
+            maybe_filter_scores(
+                harmful_val_scores,
+                keep_positive=True,
+                config=config,
+            ),
         ),
         "harmless_validation": _condition_payload(
             harmless_outputs,
-            harmless_val_scores[harmless_val_scores < 0],
+            maybe_filter_scores(
+                harmless_val_scores,
+                keep_positive=False,
+                config=config,
+            ),
         ),
         "harmless_prompt_cross_entropy": {
             "mean": _mean(harmless_losses),
             "per_example": harmless_losses,
         },
     }
+    if _record_example_ids(config):
+        results["example_ids"] = _ids_from_splits(splits)
     artifact = ArtifactEnvelope(
         experiment="baseline",
         config=config,
@@ -741,6 +841,7 @@ def run_baseline_stage(
             "harmless": harmless_outputs,
         },
     )
+    release_compute_resources(model, tokenizer)
     return asdict(artifact)
 
 
@@ -773,15 +874,17 @@ def run_extract_stage(
         format_style=format_style,
         refusal_token_ids=refusal_token_ids,
     )
-    harmful = filter_examples_by_score(
+    harmful = maybe_filter_examples(
         splits["harmful_train"],
         harmful_scores,
         keep_positive=True,
+        config=config,
     )
-    harmless = filter_examples_by_score(
+    harmless = maybe_filter_examples(
         splits["harmless_train"],
         harmless_scores,
         keep_positive=False,
+        config=config,
     )
     offsets = _position_offsets(tokenizer, config)
     harmful_activations = capture_examples(
@@ -818,6 +921,11 @@ def run_extract_stage(
         "candidate_count": len(candidates),
         "candidate_norms": [float(item.vector.norm()) for item in candidates],
     }
+    if _record_example_ids(config):
+        results["example_ids"] = {
+            "harmful_train": _ids_from_examples(harmful),
+            "harmless_train": _ids_from_examples(harmless),
+        }
     artifact = ArtifactEnvelope(
         experiment="extract_candidate_directions",
         config=config,
@@ -825,6 +933,7 @@ def run_extract_stage(
         provenance=_provenance(model, dtype, config),
     )
     write_artifact(results_dir / "02_candidates.json", artifact)
+    release_compute_resources(model, tokenizer)
     return asdict(artifact)
 
 
@@ -844,38 +953,46 @@ def run_intervention_stage(
     )
     model, tokenizer, dtype = _load_model_for_config(config)
     refusal_token_ids = _refusal_token_ids(tokenizer, config)
-    harmful_scores = refusal_scores_for_examples(
+    selection_split = config.get("selection_split", "validation")
+    final_split = config.get("final_conditions_split", "validation")
+    selection_harmful_raw, selection_harmless_raw = split_examples(
+        splits,
+        selection_split,
+    )
+    selection_harmful_scores = refusal_scores_for_examples(
         model,
         tokenizer,
-        splits["harmful_val"],
+        selection_harmful_raw,
         batch_size=config["batch_size"],
         format_style=format_style,
         refusal_token_ids=refusal_token_ids,
     )
-    harmless_scores = refusal_scores_for_examples(
+    selection_harmless_scores = refusal_scores_for_examples(
         model,
         tokenizer,
-        splits["harmless_val"],
+        selection_harmless_raw,
         batch_size=config["batch_size"],
         format_style=format_style,
         refusal_token_ids=refusal_token_ids,
     )
-    harmful = filter_examples_by_score(
-        splits["harmful_val"],
-        harmful_scores,
+    selection_harmful = maybe_filter_examples(
+        selection_harmful_raw,
+        selection_harmful_scores,
         keep_positive=True,
+        config=config,
     )
-    harmless = filter_examples_by_score(
-        splits["harmless_val"],
-        harmless_scores,
+    selection_harmless = maybe_filter_examples(
+        selection_harmless_raw,
+        selection_harmless_scores,
         keep_positive=False,
+        config=config,
     )
     scores = score_candidate_grid(
         model,
         tokenizer,
         candidates,
-        harmful,
-        harmless,
+        selection_harmful,
+        selection_harmless,
         batch_size=config["batch_size"],
         format_style=format_style,
         refusal_token_ids=refusal_token_ids,
@@ -885,6 +1002,42 @@ def run_intervention_stage(
         artifacts_dir / "selected_direction.pt",
         selected,
     )
+    if final_split == selection_split:
+        harmful = selection_harmful
+        harmless = selection_harmless
+    else:
+        final_harmful_raw, final_harmless_raw = split_examples(
+            splits,
+            final_split,
+        )
+        final_harmful_scores = refusal_scores_for_examples(
+            model,
+            tokenizer,
+            final_harmful_raw,
+            batch_size=config["batch_size"],
+            format_style=format_style,
+            refusal_token_ids=refusal_token_ids,
+        )
+        final_harmless_scores = refusal_scores_for_examples(
+            model,
+            tokenizer,
+            final_harmless_raw,
+            batch_size=config["batch_size"],
+            format_style=format_style,
+            refusal_token_ids=refusal_token_ids,
+        )
+        harmful = maybe_filter_examples(
+            final_harmful_raw,
+            final_harmful_scores,
+            keep_positive=True,
+            config=config,
+        )
+        harmless = maybe_filter_examples(
+            final_harmless_raw,
+            final_harmless_scores,
+            keep_positive=False,
+            config=config,
+        )
     control = random_direction_control(
         selected.vector,
         seed=config["seed"] + 1000,
@@ -1004,6 +1157,21 @@ def run_intervention_stage(
             ).mean()
         ),
     }
+    if _record_example_ids(config):
+        results["example_ids"] = {
+            f"harmful_{SPLIT_NAME_TO_SUFFIX[selection_split]}": _ids_from_examples(
+                selection_harmful
+            ),
+            f"harmless_{SPLIT_NAME_TO_SUFFIX[selection_split]}": _ids_from_examples(
+                selection_harmless
+            ),
+            f"harmful_{SPLIT_NAME_TO_SUFFIX[final_split]}": _ids_from_examples(
+                harmful
+            ),
+            f"harmless_{SPLIT_NAME_TO_SUFFIX[final_split]}": _ids_from_examples(
+                harmless
+            ),
+        }
     artifact = ArtifactEnvelope(
         experiment="causal_interventions",
         config=config,
@@ -1015,6 +1183,7 @@ def run_intervention_stage(
         artifacts_dir / "generations" / "03_interventions.json",
         raw_outputs,
     )
+    release_compute_resources(model, tokenizer)
     return asdict(artifact)
 
 
@@ -1039,18 +1208,21 @@ def run_evaluation_stage(
     )
     model, tokenizer, dtype = _load_model_for_config(config)
     refusal_token_ids = _refusal_token_ids(tokenizer, config)
+    final_split = config.get("final_conditions_split", "validation")
+    _final_harmful_raw, harmless_raw = split_examples(splits, final_split)
     harmless_scores = refusal_scores_for_examples(
         model,
         tokenizer,
-        splits["harmless_val"],
+        harmless_raw,
         batch_size=config["batch_size"],
         format_style=format_style,
         refusal_token_ids=refusal_token_ids,
     )
-    harmless = filter_examples_by_score(
-        splits["harmless_val"],
+    harmless = maybe_filter_examples(
+        harmless_raw,
         harmless_scores,
         keep_positive=False,
+        config=config,
     )
     blocks, attentions, mlps = transformer_module_lists(model)
     ablation_pre, ablation_forward = directional_ablation_hook_specs(
@@ -1169,6 +1341,12 @@ def run_evaluation_stage(
             "random_control": control_losses,
         },
     }
+    if _record_example_ids(config):
+        results["example_ids"] = {
+            f"harmless_{SPLIT_NAME_TO_SUFFIX[final_split]}": _ids_from_examples(
+                harmless
+            ),
+        }
     artifact = ArtifactEnvelope(
         experiment="final_evaluation",
         config=config,
@@ -1199,4 +1377,107 @@ def run_evaluation_stage(
         results_dir / "execution_manifest.json",
         manifest,
     )
+    release_compute_resources(model, tokenizer)
     return asdict(artifact)
+
+
+def run_preflight_stage(
+    root: Path,
+    *,
+    profile: str = "qwen25_coder_7b.json",
+    load_model=None,
+    cuda_available: bool | None = None,
+) -> dict:
+    root = root.resolve()
+    config = load_config(root, profile=profile)
+    results_dir, _artifacts_dir = project_paths(root, config)
+    if cuda_available is None:
+        cuda_available = bool(torch.cuda.is_available())
+    if not cuda_available:
+        raise ValueError("CUDA is not available")
+    loader = load_model or _load_model_for_config
+    model = None
+    tokenizer = None
+    try:
+        model, tokenizer, dtype = loader(config)
+        param_dtype = next(model.parameters()).dtype
+        if param_dtype != torch.bfloat16:
+            raise ValueError(
+                f"expected bfloat16 load, received {param_dtype}"
+            )
+        blocks, _attentions, _mlps = transformer_module_lists(model)
+        n_layers = len(blocks)
+        if n_layers != 28:
+            raise ValueError(
+                f"expected 28 decoder layers, received {n_layers}"
+            )
+        residual_width = int(getattr(model.config, "hidden_size"))
+        if residual_width != 3584:
+            raise ValueError(
+                f"expected residual width 3584, received {residual_width}"
+            )
+        rendered = format_chat_instruction(tokenizer, "probe")
+        if not rendered:
+            raise ValueError("chat template returned an empty string")
+        chat_template_hash = hashlib.sha256(
+            rendered.encode("utf-8")
+        ).hexdigest()
+        refusal_token_ids = _refusal_token_ids(tokenizer, config)
+        dataset_root = root / "artifacts" / "datasets"
+        harmful = load_local_prompt_corpus(
+            dataset_root / "harmful_train.json",
+            "harmful",
+        )[:2]
+        harmless = load_local_prompt_corpus(
+            dataset_root / "harmless_train.json",
+            "harmless",
+        )[:2]
+        if len(harmful) < 2 or len(harmless) < 2:
+            raise ValueError(
+                "preflight requires two harmful and two harmless prompts"
+            )
+        probes = harmful + harmless
+        format_style = _format_style(config)
+        logits = last_token_logits(
+            model,
+            tokenizer,
+            probes,
+            batch_size=config["batch_size"],
+            format_style=format_style,
+        )
+        if not torch.isfinite(logits).all():
+            raise ValueError("non-finite logits during preflight generation")
+        generate_responses(
+            model,
+            tokenizer,
+            probes,
+            batch_size=config["batch_size"],
+            max_new_tokens=min(8, int(config["max_new_tokens"])),
+            format_style=format_style,
+        )
+        results = {
+            "cuda_available": True,
+            "dtype": "bfloat16",
+            "n_layers": n_layers,
+            "residual_width": residual_width,
+            "chat_template_ok": True,
+            "chat_template_hash": chat_template_hash,
+            "refusal_token_id_count": len(refusal_token_ids),
+            "refusal_token_ids": list(refusal_token_ids),
+            "generation_finite": True,
+            "probe_counts": {"harmful": 2, "harmless": 2},
+            "probe_hashes": {
+                "harmful": hash_examples(harmful),
+                "harmless": hash_examples(harmless),
+            },
+        }
+        artifact = ArtifactEnvelope(
+            experiment="preflight",
+            config=config,
+            results=results,
+            provenance=_provenance(model, dtype, config),
+        )
+        write_artifact(results_dir / "00_preflight.json", artifact)
+        return asdict(artifact)
+    finally:
+        release_compute_resources(model, tokenizer)
