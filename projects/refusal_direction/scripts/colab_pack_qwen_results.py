@@ -1,12 +1,15 @@
+import sys
 from pathlib import Path
+
+ROOT = Path("/content/refusal_direction")
+_SRC = "/content/refusal_direction/src"
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 from refusal_direction_replication.qwen_colab_transport import (
     REMOTE_ARCHIVE,
     pack_qwen_results,
 )
-
-
-ROOT = Path("/content/refusal_direction")
 
 
 def main() -> int:

@@ -7,11 +7,15 @@ arguments and always uses the remote working tree at
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from refusal_direction_replication.qwen_pilot import run_qwen_pilot
-
 REMOTE_ROOT = Path("/content/refusal_direction")
+_SRC = "/content/refusal_direction/src"
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+from refusal_direction_replication.qwen_pilot import run_qwen_pilot
 
 
 def remote_main() -> int:

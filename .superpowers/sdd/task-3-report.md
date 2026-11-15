@@ -377,3 +377,74 @@ Result: `162 passed in 17.22s` (previous 155 + 7 third-review tests)
 ### Status (third review round)
 
 `DONE_WITH_CONCERNS`
+
+---
+
+## Live Colab import failure (task-3-live-bug.md)
+
+The first live `pilot` exec failed with
+`ModuleNotFoundError: No module named 'refusal_direction_replication'`
+because `colab_bootstrap.py` installs the package in a subprocess while
+`colab exec` reuses the already-running kernel `sys.path`.
+
+### RED evidence
+
+Command:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py::test_qwen_remote_scripts_prepare_src_before_package_import tests/test_qwen_observability.py::test_qwen_remote_scripts_prepare_src_before_package_import -q --tb=short
+```
+
+Result (failing tests added before production changes):
+
+```text
+FAILED tests/test_qwen_pilot.py::test_qwen_remote_scripts_prepare_src_before_package_import
+FAILED tests/test_qwen_observability.py::test_qwen_remote_scripts_prepare_src_before_package_import
+2 failed in 6.10s
+```
+
+### GREEN evidence
+
+Focused suites:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py tests/test_colab_orchestrator.py tests/test_qwen_observability.py -q
+```
+
+Result: `110 passed in 21.16s`
+
+Full refusal project suite:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests -q
+```
+
+Result: `164 passed in 19.72s` (previous 162 + 2 import-bootstrap tests)
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `projects/refusal_direction/scripts/qwen_run_pilot.py` | Insert `/content/refusal_direction/src` on `sys.path` before package import |
+| `projects/refusal_direction/scripts/qwen_run_status.py` | Same remote import bootstrap |
+| `projects/refusal_direction/scripts/colab_pack_qwen_results.py` | Same remote import bootstrap |
+| `projects/refusal_direction/tests/test_qwen_pilot.py` | Source-order test for the three Qwen remote scripts |
+| `projects/refusal_direction/tests/test_qwen_observability.py` | Same source-order test; Gemma pack script left unchanged |
+
+### Self-review (live import fix)
+
+- Package modules still import `refusal_direction_replication` normally; only Colab-exec entrypoints bootstrap `sys.path`.
+- Gemma `colab_pack_results.py` does not import the package and was not modified.
+- Remote scripts still avoid argparse and `__file__`.
+
+### Concerns (live import fix)
+
+1. The live session still needs a resync/re-exec of these scripts; this commit does not start or stop Colab.
+2. Scientific GPU gates remain unexercised.
+
+### Status (live import fix)
+
+`DONE_WITH_CONCERNS`

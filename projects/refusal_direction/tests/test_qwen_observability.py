@@ -308,6 +308,26 @@ def test_qwen_fetch_rollback_after_install_failure(
     assert not (project / "results" / "qwen25_coder_7b" / "other.json").exists()
 
 
+def test_qwen_remote_scripts_prepare_src_before_package_import() -> None:
+    scripts = (
+        ROOT / "scripts" / "qwen_run_pilot.py",
+        ROOT / "scripts" / "qwen_run_status.py",
+        ROOT / "scripts" / "colab_pack_qwen_results.py",
+    )
+    for path in scripts:
+        source = path.read_text(encoding="utf-8")
+        assert "/content/refusal_direction/src" in source, path.name
+        assert "sys.path.insert" in source, path.name
+        assert source.index("sys.path.insert") < source.index(
+            "refusal_direction_replication"
+        ), path.name
+    gemma_pack = (ROOT / "scripts" / "colab_pack_results.py").read_text(
+        encoding="utf-8"
+    )
+    assert "refusal_direction_replication" not in gemma_pack
+    assert "sys.path.insert" not in gemma_pack
+
+
 def test_profile_defaults_session_and_pack_script() -> None:
     assert RUN_REFUSAL.resolve_session("gemma", None) == "refusal-gemma"
     assert RUN_REFUSAL.resolve_session("qwen25-coder", None) == "refusal-qwen"

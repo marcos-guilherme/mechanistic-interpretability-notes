@@ -6,9 +6,12 @@ import json
 import sys
 from pathlib import Path
 
-from refusal_direction_replication.run_progress import STATUS_FILENAME
-
 REMOTE_ROOT = Path("/content/refusal_direction")
+_SRC = "/content/refusal_direction/src"
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+from refusal_direction_replication.run_progress import STATUS_FILENAME
 DEFAULT_PROFILE = "qwen25_coder_7b.json"
 last_stdout_summary: str | None = None
 

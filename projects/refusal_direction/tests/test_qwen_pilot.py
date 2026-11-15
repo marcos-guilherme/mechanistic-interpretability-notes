@@ -1154,6 +1154,21 @@ def test_remote_pilot_script_has_no_argparse_or_file_dependency() -> None:
     assert PILOT_CLI.REMOTE_ROOT == Path("/content/refusal_direction")
 
 
+def test_qwen_remote_scripts_prepare_src_before_package_import() -> None:
+    scripts = (
+        PILOT_SCRIPT,
+        ROOT / "scripts" / "qwen_run_status.py",
+        ROOT / "scripts" / "colab_pack_qwen_results.py",
+    )
+    for path in scripts:
+        source = path.read_text(encoding="utf-8")
+        assert "/content/refusal_direction/src" in source, path.name
+        assert "sys.path.insert" in source, path.name
+        assert source.index("sys.path.insert") < source.index(
+            "refusal_direction_replication"
+        ), path.name
+
+
 def test_remote_pilot_main_ignores_ipykernel_argv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
