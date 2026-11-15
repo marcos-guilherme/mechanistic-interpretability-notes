@@ -9,12 +9,6 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = ROOT / "projects" / "refusal_direction"
-sys.path.insert(0, str(PROJECT / "src"))
-
-from refusal_direction_replication.qwen_colab_transport import (
-    REMOTE_ARCHIVE,
-    extract_qwen_archive,
-)
 AUTH = ["colab", "--auth=adc"]
 PROFILE_SESSIONS = {
     "gemma": "refusal-gemma",
@@ -106,6 +100,15 @@ def status_command(session: str) -> list[str]:
         "--timeout",
         "120",
     ]
+
+
+def extract_qwen_results_archive(archive: Path, project: Path) -> None:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        extract_qwen_archive,
+    )
+
+    extract_qwen_archive(archive, project)
 
 
 def run(command: list[str]) -> None:
@@ -222,7 +225,7 @@ def main() -> int:
         )
     elif args.action == "fetch":
         if args.profile == "qwen25-coder":
-            remote_archive = str(REMOTE_ARCHIVE)
+            remote_archive = "/content/qwen_results.tar.gz"
             local_name = "qwen_results.tar.gz"
         else:
             remote_archive = "/content/refusal_results.tar.gz"
@@ -244,7 +247,7 @@ def main() -> int:
             )
         )
         if args.profile == "qwen25-coder":
-            extract_qwen_archive(local, PROJECT)
+            extract_qwen_results_archive(local, PROJECT)
         else:
             with tarfile.open(local, "r:gz") as handle:
                 handle.extractall(PROJECT)

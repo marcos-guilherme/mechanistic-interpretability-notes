@@ -1,24 +1,31 @@
+"""Lightweight Qwen status reader for Colab exec and local tests."""
+
 from __future__ import annotations
 
-import argparse
+import json
 import sys
 from pathlib import Path
 
-from refusal_direction_replication.pipeline import load_config, project_paths
-from refusal_direction_replication.run_progress import RunProgressStore, STATUS_FILENAME
+from refusal_direction_replication.run_progress import STATUS_FILENAME
+
+REMOTE_ROOT = Path("/content/refusal_direction")
+DEFAULT_PROFILE = "qwen25_coder_7b.json"
+last_stdout_summary: str | None = None
 
 
-PROJECT = Path(__file__).resolve().parents[1]
+def artifacts_dir_for_profile(root: Path, profile: str) -> Path:
+    config_path = root / "configs" / profile
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    return root / config["artifacts_dir"]
 
 
-def summarize_status(payload: dict) -> str:
+def summarize_status_for_display(payload: dict) -> str:
     parts = [
         f"profile={payload['profile']}",
         f"run_id={payload['run_id']}",
         f"stage={payload['current_stage']}",
         f"state={payload['state']}",
         f"progress={payload['completed_units']}/{payload['total_units']}",
-        f"updated_at_utc={payload['updated_at_utc']}",
     ]
     message = payload.get("message")
     if message:
@@ -32,42 +39,30 @@ def summarize_status(payload: dict) -> str:
     return " | ".join(parts)
 
 
-def main_with_root(root: Path, *, profile: str = "qwen25_coder_7b.json") -> int:
-    config = load_config(root, profile)
-    _, artifacts = project_paths(root, config)
-    status_path = artifacts / STATUS_FILENAME
+def read_status_payload(artifacts_dir: Path) -> dict | None:
+    status_path = artifacts_dir / STATUS_FILENAME
     if not status_path.is_file():
-        print(f"missing status: {status_path}", file=sys.stderr)
-        return 2
-    store = RunProgressStore(
-        artifacts,
-        profile=profile,
-        run_id="unused",
-    )
-    payload = store.read_status()
+        return None
+    return json.loads(status_path.read_text(encoding="utf-8"))
+
+
+def main_with_root(root: Path, *, profile: str = DEFAULT_PROFILE) -> int:
+    global last_stdout_summary
+    artifacts = artifacts_dir_for_profile(root, profile)
+    payload = read_status_payload(artifacts)
     if payload is None:
-        print(f"missing status: {status_path}", file=sys.stderr)
+        print(f"missing status: {artifacts / STATUS_FILENAME}", file=sys.stderr)
+        last_stdout_summary = None
         return 2
-    print(summarize_status(payload))
+    summary = summarize_status_for_display(payload)
+    print(summary)
+    last_stdout_summary = summary
     return 0
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--profile",
-        default="qwen25_coder_7b.json",
-        help="profile config filename",
-    )
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=PROJECT,
-        help="refusal_direction project root",
-    )
-    args = parser.parse_args()
-    return main_with_root(args.root.resolve(), profile=args.profile)
+def remote_main() -> int:
+    return main_with_root(REMOTE_ROOT, profile=DEFAULT_PROFILE)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(remote_main())

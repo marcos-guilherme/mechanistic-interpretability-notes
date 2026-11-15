@@ -20,6 +20,8 @@ STATUS_FILENAME = "status.json"
 EVENTS_FILENAME = "events.jsonl"
 
 VALID_STATES = frozenset({"pending", "running", "completed", "aborted", "failed"})
+MUTABLE_STATES = frozenset({"pending", "running"})
+TERMINAL_STATES = frozenset({"completed", "aborted"})
 
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "pending": frozenset({"running", "aborted"}),
@@ -79,6 +81,8 @@ class RunProgressStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, sort_keys=True)
                 handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp_path, path)
         except Exception:
             if tmp_path.exists():
@@ -88,6 +92,7 @@ class RunProgressStore:
     def _append_event(self, payload: dict[str, Any]) -> None:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         record = dict(payload)
+        record["run_id"] = self.run_id
         record.setdefault("updated_at_utc", utc_now())
         with self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
@@ -99,6 +104,31 @@ class RunProgressStore:
 
     def _write_status(self, payload: dict[str, Any]) -> None:
         self._atomic_write_json(self.status_path, payload)
+
+    def _ensure_can_mutate(
+        self,
+        current: dict[str, Any],
+        *,
+        state: str | None,
+        completed_units: int | None,
+        total_units: int | None,
+        message: str | None,
+    ) -> None:
+        current_state = current["state"]
+        if current_state in TERMINAL_STATES:
+            raise ValueError("status is terminal and cannot be mutated")
+        changing_state = state is not None and state != current_state
+        touching_fields = any(
+            item is not None for item in (completed_units, total_units, message)
+        )
+        if current_state == "failed" and touching_fields and not changing_state:
+            raise ValueError("status is terminal and cannot be mutated")
+        if (
+            current_state not in MUTABLE_STATES
+            and touching_fields
+            and not changing_state
+        ):
+            raise ValueError("status is terminal and cannot be mutated")
 
     def initialize(
         self,
@@ -146,6 +176,13 @@ class RunProgressStore:
         current = self.read_status()
         if current is None:
             raise ValueError("status is missing; call initialize first")
+        self._ensure_can_mutate(
+            current,
+            state=state,
+            completed_units=completed_units,
+            total_units=total_units,
+            message=message,
+        )
         next_state = state if state is not None else current["state"]
         if state is not None:
             validate_transition(current["state"], next_state)
@@ -167,8 +204,6 @@ class RunProgressStore:
             payload["current_stage"] = stage
         if message is not None:
             payload["message"] = message
-        elif "message" in payload and message is None and event != "message":
-            pass
         if abort_gate is not None:
             payload["abort_gate"] = abort_gate
         if abort_reason is not None:
@@ -244,6 +279,7 @@ class RunProgressStore:
         status = self.read_status()
         if (
             status is not None
+            and status.get("run_id") == self.run_id
             and status.get("current_stage") == stage
             and status.get("state") == "completed"
         ):
@@ -254,8 +290,10 @@ class RunProgressStore:
             if not line.strip():
                 continue
             record = json.loads(line)
-            if record.get("event") == "stage_completed" and record.get(
-                "stage"
-            ) == stage:
+            if (
+                record.get("run_id") == self.run_id
+                and record.get("event") == "stage_completed"
+                and record.get("stage") == stage
+            ):
                 return True
         return False

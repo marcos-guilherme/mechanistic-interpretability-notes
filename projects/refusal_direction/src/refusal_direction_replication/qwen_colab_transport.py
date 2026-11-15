@@ -7,6 +7,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 QWEN_RESULTS_DIR = "results/qwen25_coder_7b"
@@ -36,9 +37,12 @@ def normalize_member_name(name: str) -> str:
     cleaned = name.replace("\\", "/")
     if cleaned.startswith("/"):
         raise ValueError(f"unsafe archive path: {name}")
-    trimmed = cleaned.lstrip("./")
-    parts = PurePosixPath(trimmed).parts
-    if ".." in parts:
+    if ".." in PurePosixPath(cleaned).parts:
+        raise ValueError(f"unsafe archive path: {name}")
+    trimmed = cleaned
+    while trimmed.startswith("./"):
+        trimmed = trimmed[2:]
+    if not trimmed:
         raise ValueError(f"unsafe archive path: {name}")
     return str(PurePosixPath(trimmed))
 
@@ -48,9 +52,9 @@ def is_unsafe_member_name(name: str) -> bool:
         normalized = normalize_member_name(name)
     except ValueError:
         return True
-    if not normalized:
-        return True
-    if not normalized.startswith(("results/qwen25_coder_7b/", "artifacts/qwen25_coder_7b/")):
+    if not normalized.startswith(
+        ("results/qwen25_coder_7b/", "artifacts/qwen25_coder_7b/")
+    ):
         return True
     return False
 
@@ -71,7 +75,6 @@ def collect_qwen_pack_entries(root: Path) -> list[Path]:
         for path in sorted(results_dir.glob("*.json")):
             if path.is_file() and not path.is_symlink():
                 entries.append(path)
-    artifacts_dir = root / "artifacts" / "qwen25_coder_7b"
     for relative in sorted(QWEN_FETCH_ALLOWLIST):
         if relative.startswith(QWEN_RESULTS_DIR):
             continue
@@ -99,6 +102,8 @@ def _validate_tar_member(member: tarfile.TarInfo) -> None:
         raise ValueError(f"archive member is a link: {member.name}")
     if member.isdir():
         raise ValueError(f"archive member is a directory: {member.name}")
+    if not member.isreg():
+        raise ValueError(f"archive member is not a regular file: {member.name}")
     normalized = normalize_member_name(member.name)
     if is_unsafe_member_name(normalized):
         raise ValueError(f"unsafe archive path: {member.name}")
@@ -108,29 +113,50 @@ def _validate_tar_member(member: tarfile.TarInfo) -> None:
         raise ValueError(f"archive member exceeds size limit: {member.name}")
 
 
-def validate_qwen_archive(members: list[tarfile.TarInfo]) -> int:
+def validate_qwen_archive(members: list[tarfile.TarInfo]) -> list[tarfile.TarInfo]:
     seen: set[str] = set()
     total_size = 0
+    file_members: list[tarfile.TarInfo] = []
     for member in members:
+        _validate_tar_member(member)
         normalized = normalize_member_name(member.name)
         if normalized in seen:
             raise ValueError(f"duplicate archive member: {member.name}")
         seen.add(normalized)
-        _validate_tar_member(member)
         total_size += member.size
+        file_members.append(member)
     if total_size > MAX_TOTAL_UNCOMPRESSED_BYTES:
         raise ValueError("archive exceeds total uncompressed size limit")
-    return total_size
+    return file_members
+
+
+@dataclass
+class InstallRecord:
+    target: Path
+    backup: Path | None
+    had_original: bool
+
+
+def _rollback_install_records(records: list[InstallRecord]) -> None:
+    for record in reversed(records):
+        if record.backup is not None and record.backup.exists():
+            if record.target.exists():
+                record.target.unlink()
+            os.replace(record.backup, record.target)
+        elif record.had_original and record.target.exists():
+            record.target.unlink()
+        elif not record.had_original and record.target.exists():
+            record.target.unlink()
 
 
 def extract_qwen_archive(archive: Path, project: Path) -> None:
     with tarfile.open(archive, "r:gz") as handle:
-        members = [item for item in handle.getmembers() if item.isfile()]
-        validate_qwen_archive(members)
+        members = handle.getmembers()
+        file_members = validate_qwen_archive(members)
         staging = Path(tempfile.mkdtemp(prefix="qwen-fetch-", dir=project.parent))
-        installed: list[tuple[Path, Path | None]] = []
+        records: list[InstallRecord] = []
         try:
-            for member in members:
+            for member in file_members:
                 destination = staging / normalize_member_name(member.name)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 extracted = handle.extractfile(member)
@@ -138,27 +164,28 @@ def extract_qwen_archive(archive: Path, project: Path) -> None:
                     raise ValueError(f"unable to extract member: {member.name}")
                 with destination.open("wb") as out:
                     shutil.copyfileobj(extracted, out)
-            for member in members:
+
+            for member in file_members:
                 relative = normalize_member_name(member.name)
                 target = project / relative
                 source = staging / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
                 backup: Path | None = None
-                if target.exists():
+                had_original = target.exists()
+                if had_original:
                     backup = target.with_suffix(target.suffix + ".qwen-fetch-bak")
                     os.replace(target, backup)
+                records.append(
+                    InstallRecord(target=target, backup=backup, had_original=had_original)
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(source, target)
-                installed.append((target, backup))
+
+            for record in records:
+                if record.backup is not None and record.backup.exists():
+                    record.backup.unlink()
         except Exception:
-            for target, backup in reversed(installed):
-                if backup is not None and backup.exists():
-                    os.replace(backup, target)
-                elif target.exists():
-                    target.unlink()
+            _rollback_install_records(records)
             shutil.rmtree(staging, ignore_errors=True)
             raise
         else:
-            for target, backup in installed:
-                if backup is not None and backup.exists():
-                    backup.unlink()
             shutil.rmtree(staging, ignore_errors=True)
