@@ -20,12 +20,15 @@ def format_instruction(instruction: str) -> str:
     return GEMMA_CHAT_TEMPLATE.format(instruction=instruction)
 
 
-def _ensure_pad_token(tokenizer: Any) -> None:
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token_id is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({"pad_token": "<pad>"})
+def _ensure_pad_token(tokenizer: Any) -> bool:
+    if tokenizer.pad_token_id is not None:
+        return False
+    if tokenizer.eos_token_id is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        return False
+    tokenizer.add_special_tokens({"pad_token": "<pad>"})
+    return True
 
 
 def format_chat_instruction(tokenizer: Any, instruction: str) -> str:
@@ -53,11 +56,13 @@ def load_causal_lm(
         model_kwargs["revision"] = revision
     tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
     tokenizer.padding_side = "left"
-    _ensure_pad_token(tokenizer)
+    added_pad_token = _ensure_pad_token(tokenizer)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         **model_kwargs,
     ).eval()
+    if added_pad_token:
+        model.resize_token_embeddings(len(tokenizer))
     model.requires_grad_(False)
     return model, tokenizer
 

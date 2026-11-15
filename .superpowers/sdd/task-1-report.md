@@ -71,3 +71,71 @@ Result: `49 passed in 6.02s` (baseline 37 + 12 new)
 ## Status
 
 `DONE_WITH_CONCERNS`
+
+---
+
+## Review fix round (task-1-review.md)
+
+### RED evidence
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_profile.py -q
+```
+
+```text
+ImportError: cannot import name 'validate_profile_config' from
+'refusal_direction_replication.pipeline'
+ERROR tests/test_qwen_profile.py
+```
+
+Subsequent single-failure GREEN pass before pad-id fix:
+
+```text
+FAILED test_load_causal_lm_uses_eos_pad_when_pad_missing
+assert None == 99
+1 failed, 57 passed
+```
+
+### GREEN evidence
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_profile.py -q
+```
+
+Result: `21 passed`
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests -q
+```
+
+Result: `58 passed in 6.80s` (baseline 37 + 21 profile tests)
+
+### Fix commit
+
+`dd69f6852a43d635755387b931c15c1bb41d2308`
+
+### Review items addressed
+
+| Finding | Fix |
+|--------|-----|
+| Gemma default batching inputs | `RecordingGemmaTokenizer` asserts `format_instruction` strings reach `tokenizer()` |
+| `_position_offsets` wiring | Tests load real Qwen config and compare against generic suffix offsets |
+| Revision + provenance + pad fallback | Monkeypatched `from_pretrained` tests; `_provenance` test; EOS pad sets `pad_token_id` |
+| No double chat templating | Mock records `batch_inputs` as rendered strings only |
+| `format_style` / `refusal_prefixes` | Config assertions + `_format_style` / `_refusal_token_ids` tests |
+| Non-Gemma validation | `validate_profile_config` required fields; `load_config` rejects incomplete profiles |
+| Embedding resize on new pad | `load_causal_lm` calls `resize_token_embeddings` when `<pad>` is added |
+| Hygiene | Removed unused imports; tests end with newline |
+
+### Self-review (review round)
+
+- Non-Gemma profiles now fail fast instead of silently using Gemma paths or refusal IDs.
+- Pad fallback copies both token string and id from EOS.
+- Remaining concern: live Qwen/Gemma weight loading still not exercised in CI.
+
+### Status (review round)
+
+`DONE`

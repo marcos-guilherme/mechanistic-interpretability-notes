@@ -180,11 +180,41 @@ def gemma_module_lists(model) -> tuple[list, list, list]:
     return transformer_module_lists(model)
 
 
+GEMMA_PROFILE = "gemma_2b.json"
+REQUIRED_NON_GEMMA_FIELDS = (
+    "results_dir",
+    "artifacts_dir",
+    "format_style",
+    "refusal_prefixes",
+    "position_offsets",
+    "model_revision",
+)
+
+
+def validate_profile_config(config: dict, *, profile: str) -> None:
+    if profile == GEMMA_PROFILE:
+        return
+    missing = [
+        field
+        for field in REQUIRED_NON_GEMMA_FIELDS
+        if field not in config
+    ]
+    if missing:
+        raise ValueError(
+            "profile "
+            f"{profile} missing required profile fields: {missing}"
+        )
+
+
 def load_config(
     root: Path,
     profile: str = "gemma_2b.json",
 ) -> dict:
-    return json.loads((root / "configs" / profile).read_text(encoding="utf-8"))
+    config = json.loads(
+        (root / "configs" / profile).read_text(encoding="utf-8")
+    )
+    validate_profile_config(config, profile=profile)
+    return config
 
 
 def project_paths(root: Path, config: dict) -> tuple[Path, Path]:
