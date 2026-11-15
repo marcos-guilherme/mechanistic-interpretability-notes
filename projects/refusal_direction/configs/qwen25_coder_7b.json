@@ -1,0 +1,23 @@
+{
+  "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+  "seed": 42,
+  "train_per_class": 128,
+  "validation_per_class": 32,
+  "dtype": "bfloat16",
+  "max_new_tokens": 128,
+  "batch_size": 1,
+  "ce_tolerance": 0.1,
+  "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3",
+  "results_dir": "results/qwen25_coder_7b",
+  "artifacts_dir": "artifacts/qwen25_coder_7b",
+  "format_style": "chat_template",
+  "position_offsets": [-1],
+  "refusal_prefixes": [
+    "I",
+    "I'm",
+    "I am",
+    "Sorry",
+    "As an"
+  ]
+}

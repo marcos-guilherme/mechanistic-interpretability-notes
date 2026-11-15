@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+FORMAT_STYLE_GEMMA = "gemma"
+FORMAT_STYLE_CHAT_TEMPLATE = "chat_template"
 
 GEMMA_CHAT_TEMPLATE = (
     "<start_of_turn>user\n{instruction}<end_of_turn>\n"
@@ -18,35 +20,116 @@ def format_instruction(instruction: str) -> str:
     return GEMMA_CHAT_TEMPLATE.format(instruction=instruction)
 
 
-def load_gemma(
+def _ensure_pad_token(tokenizer: Any) -> None:
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({"pad_token": "<pad>"})
+
+
+def format_chat_instruction(tokenizer: Any, instruction: str) -> str:
+    messages = [{"role": "user", "content": instruction}]
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+
+def load_causal_lm(
     model_name: str,
     *,
     dtype: torch.dtype,
+    revision: str | None = None,
 ) -> tuple[Any, Any]:
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer_kwargs: dict[str, Any] = {}
+    model_kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "device_map": "cuda",
+    }
+    if revision is not None:
+        tokenizer_kwargs["revision"] = revision
+        model_kwargs["revision"] = revision
+    tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
     tokenizer.padding_side = "left"
+    _ensure_pad_token(tokenizer)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=dtype,
-        device_map="cuda",
+        **model_kwargs,
     ).eval()
     model.requires_grad_(False)
     return model, tokenizer
 
 
+def load_gemma(
+    model_name: str,
+    *,
+    dtype: torch.dtype,
+) -> tuple[Any, Any]:
+    return load_causal_lm(model_name, dtype=dtype)
+
+
 def tokenize_instructions(
     tokenizer: Any,
     instructions: list[str],
+    *,
+    format_style: str = FORMAT_STYLE_GEMMA,
 ) -> dict[str, torch.Tensor]:
+    if format_style == FORMAT_STYLE_GEMMA:
+        texts = [format_instruction(item) for item in instructions]
+    elif format_style == FORMAT_STYLE_CHAT_TEMPLATE:
+        texts = [
+            format_chat_instruction(tokenizer, item) for item in instructions
+        ]
+    else:
+        raise ValueError(f"unsupported format_style: {format_style}")
     return tokenizer(
-        [format_instruction(item) for item in instructions],
+        texts,
         padding=True,
         truncation=False,
         return_tensors="pt",
     )
 
 
-def end_of_instruction_offsets(tokenizer: Any) -> tuple[int, ...]:
+def resolve_refusal_token_ids(
+    tokenizer: Any,
+    prefixes: Sequence[str],
+) -> tuple[int, ...]:
+    resolved: list[int] = []
+    seen: set[int] = set()
+    for prefix in prefixes:
+        token_ids = tokenizer.encode(prefix, add_special_tokens=False)
+        if not token_ids:
+            raise ValueError(f"prefix {prefix!r} did not tokenize")
+        first = token_ids[0]
+        if first not in seen:
+            seen.add(first)
+            resolved.append(first)
+    return tuple(resolved)
+
+
+def end_of_instruction_offsets(
+    tokenizer: Any,
+    *,
+    format_style: str = FORMAT_STYLE_GEMMA,
+) -> tuple[int, ...]:
+    if format_style == FORMAT_STYLE_CHAT_TEMPLATE:
+        messages = [{"role": "user", "content": "probe"}]
+        with_prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        without_prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+        )
+        suffix_len = len(with_prompt) - len(without_prompt)
+        if suffix_len <= 0:
+            return (-1,)
+        return tuple(range(-suffix_len, 0))
     suffix = GEMMA_CHAT_TEMPLATE.split("{instruction}")[-1]
     token_ids = tokenizer.encode(suffix, add_special_tokens=False)
     return tuple(range(-len(token_ids), 0))

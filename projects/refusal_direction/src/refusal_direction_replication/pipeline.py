@@ -31,10 +31,12 @@ from .metrics import (
     refusal_rate,
 )
 from .model import (
+    FORMAT_STYLE_GEMMA,
     GEMMA_REFUSAL_TOKEN_IDS,
     capture_residual_grid,
     end_of_instruction_offsets,
-    load_gemma,
+    load_causal_lm,
+    resolve_refusal_token_ids,
     tokenize_instructions,
 )
 from .runtime import runtime_info, seed_everything
@@ -167,11 +169,48 @@ def random_direction_control(
     return random / random.norm() * source.norm()
 
 
-def gemma_module_lists(model) -> tuple[list, list, list]:
+def transformer_module_lists(model) -> tuple[list, list, list]:
     blocks = list(model.model.layers)
     attentions = [block.self_attn for block in blocks]
     mlps = [block.mlp for block in blocks]
     return blocks, attentions, mlps
+
+
+def gemma_module_lists(model) -> tuple[list, list, list]:
+    return transformer_module_lists(model)
+
+
+def load_config(
+    root: Path,
+    profile: str = "gemma_2b.json",
+) -> dict:
+    return json.loads((root / "configs" / profile).read_text(encoding="utf-8"))
+
+
+def project_paths(root: Path, config: dict) -> tuple[Path, Path]:
+    results_name = config.get("results_dir", "results")
+    artifacts_name = config.get("artifacts_dir", "artifacts")
+    return root / results_name, root / artifacts_name
+
+
+def _format_style(config: dict) -> str:
+    return config.get("format_style", FORMAT_STYLE_GEMMA)
+
+
+def _position_offsets(tokenizer, config: dict) -> tuple[int, ...]:
+    if "position_offsets" in config:
+        return tuple(int(item) for item in config["position_offsets"])
+    return end_of_instruction_offsets(
+        tokenizer,
+        format_style=_format_style(config),
+    )
+
+
+def _refusal_token_ids(tokenizer, config: dict) -> tuple[int, ...]:
+    prefixes = config.get("refusal_prefixes")
+    if prefixes is None:
+        return GEMMA_REFUSAL_TOKEN_IDS
+    return resolve_refusal_token_ids(tokenizer, prefixes)
 
 
 def _model_device(model) -> torch.device:
@@ -190,13 +229,21 @@ def last_token_logits(
     examples: Sequence[PromptExample],
     *,
     batch_size: int,
+    format_style: str = FORMAT_STYLE_GEMMA,
     pre_hooks: Sequence[tuple[object, object]] = (),
     forward_hooks: Sequence[tuple[object, object]] = (),
 ) -> torch.Tensor:
     collected = []
     for start in range(0, len(examples), batch_size):
         texts = [item.text for item in examples[start : start + batch_size]]
-        batch = _device_batch(model, tokenize_instructions(tokenizer, texts))
+        batch = _device_batch(
+            model,
+            tokenize_instructions(
+                tokenizer,
+                texts,
+                format_style=format_style,
+            ),
+        )
         with temporary_hooks(
             pre_hooks=pre_hooks,
             forward_hooks=forward_hooks,
@@ -214,6 +261,8 @@ def refusal_scores_for_examples(
     examples: Sequence[PromptExample],
     *,
     batch_size: int,
+    format_style: str = FORMAT_STYLE_GEMMA,
+    refusal_token_ids: tuple[int, ...] = GEMMA_REFUSAL_TOKEN_IDS,
     pre_hooks: Sequence[tuple[object, object]] = (),
     forward_hooks: Sequence[tuple[object, object]] = (),
 ) -> torch.Tensor:
@@ -222,12 +271,13 @@ def refusal_scores_for_examples(
         tokenizer,
         examples,
         batch_size=batch_size,
+        format_style=format_style,
         pre_hooks=pre_hooks,
         forward_hooks=forward_hooks,
     )
     return refusal_log_odds(
         logits,
-        refusal_token_ids=GEMMA_REFUSAL_TOKEN_IDS,
+        refusal_token_ids=refusal_token_ids,
     ).float()
 
 
@@ -239,12 +289,20 @@ def capture_examples(
     *,
     batch_size: int,
     position_offsets: tuple[int, ...],
+    format_style: str = FORMAT_STYLE_GEMMA,
 ) -> torch.Tensor:
-    blocks, _attentions, _mlps = gemma_module_lists(model)
+    blocks, _attentions, _mlps = transformer_module_lists(model)
     collected = []
     for start in range(0, len(examples), batch_size):
         texts = [item.text for item in examples[start : start + batch_size]]
-        batch = _device_batch(model, tokenize_instructions(tokenizer, texts))
+        batch = _device_batch(
+            model,
+            tokenize_instructions(
+                tokenizer,
+                texts,
+                format_style=format_style,
+            ),
+        )
         collected.append(
             capture_residual_grid(
                 model,
@@ -267,14 +325,17 @@ def score_candidate_grid(
     harmless_examples: Sequence[PromptExample],
     *,
     batch_size: int,
+    format_style: str = FORMAT_STYLE_GEMMA,
+    refusal_token_ids: tuple[int, ...] = GEMMA_REFUSAL_TOKEN_IDS,
     progress: bool = True,
 ) -> list[CandidateScore]:
-    blocks, attentions, mlps = gemma_module_lists(model)
+    blocks, attentions, mlps = transformer_module_lists(model)
     baseline_harmless_logits = last_token_logits(
         model,
         tokenizer,
         harmless_examples,
         batch_size=batch_size,
+        format_style=format_style,
     )
     scores = []
     for index, candidate in enumerate(candidates):
@@ -289,6 +350,7 @@ def score_candidate_grid(
             tokenizer,
             harmful_examples,
             batch_size=batch_size,
+            format_style=format_style,
             pre_hooks=pre_hooks,
             forward_hooks=forward_hooks,
         )
@@ -297,6 +359,7 @@ def score_candidate_grid(
             tokenizer,
             harmless_examples,
             batch_size=batch_size,
+            format_style=format_style,
             pre_hooks=pre_hooks,
             forward_hooks=forward_hooks,
         )
@@ -315,6 +378,7 @@ def score_candidate_grid(
             tokenizer,
             harmless_examples,
             batch_size=batch_size,
+            format_style=format_style,
             pre_hooks=addition_hooks,
         )
         scores.append(
@@ -322,13 +386,13 @@ def score_candidate_grid(
                 ablation_refusal_score=float(
                     refusal_log_odds(
                         ablated_harmful_logits,
-                        refusal_token_ids=GEMMA_REFUSAL_TOKEN_IDS,
+                        refusal_token_ids=refusal_token_ids,
                     ).mean()
                 ),
                 addition_refusal_score=float(
                     refusal_log_odds(
                         addition_harmless_logits,
-                        refusal_token_ids=GEMMA_REFUSAL_TOKEN_IDS,
+                        refusal_token_ids=refusal_token_ids,
                     ).mean()
                 ),
                 kl_divergence=float(
@@ -356,13 +420,21 @@ def generate_responses(
     *,
     batch_size: int,
     max_new_tokens: int,
+    format_style: str = FORMAT_STYLE_GEMMA,
     pre_hooks: Sequence[tuple[object, object]] = (),
     forward_hooks: Sequence[tuple[object, object]] = (),
 ) -> list[str]:
     responses = []
     for start in range(0, len(examples), batch_size):
         texts = [item.text for item in examples[start : start + batch_size]]
-        batch = _device_batch(model, tokenize_instructions(tokenizer, texts))
+        batch = _device_batch(
+            model,
+            tokenize_instructions(
+                tokenizer,
+                texts,
+                format_style=format_style,
+            ),
+        )
         prompt_length = batch["input_ids"].shape[1]
         with temporary_hooks(
             pre_hooks=pre_hooks,
@@ -394,13 +466,21 @@ def prompt_cross_entropy_losses(
     examples: Sequence[PromptExample],
     *,
     batch_size: int,
+    format_style: str = FORMAT_STYLE_GEMMA,
     pre_hooks: Sequence[tuple[object, object]] = (),
     forward_hooks: Sequence[tuple[object, object]] = (),
 ) -> list[float]:
     losses = []
     for start in range(0, len(examples), batch_size):
         texts = [item.text for item in examples[start : start + batch_size]]
-        batch = _device_batch(model, tokenize_instructions(tokenizer, texts))
+        batch = _device_batch(
+            model,
+            tokenize_instructions(
+                tokenizer,
+                texts,
+                format_style=format_style,
+            ),
+        )
         with temporary_hooks(
             pre_hooks=pre_hooks,
             forward_hooks=forward_hooks,
@@ -417,12 +497,6 @@ def prompt_cross_entropy_losses(
     if not losses:
         raise ValueError("examples must not be empty")
     return losses
-
-
-def _load_config(root: Path) -> dict:
-    return json.loads(
-        (root / "configs" / "gemma_2b.json").read_text(encoding="utf-8")
-    )
 
 
 def _sampled_splits(root: Path, config: dict) -> dict[str, list[PromptExample]]:
@@ -488,43 +562,59 @@ def _condition_payload(
 
 def _load_model_for_config(config: dict):
     dtype = dtype_from_name(config["dtype"])
-    model, tokenizer = load_gemma(
+    model, tokenizer = load_causal_lm(
         config["model_name"],
         dtype=dtype,
+        revision=config.get("model_revision"),
     )
     return model, tokenizer, dtype
 
 
-def run_baseline_stage(root: Path) -> dict:
+def run_baseline_stage(
+    root: Path,
+    *,
+    profile: str = "gemma_2b.json",
+) -> dict:
     root = root.resolve()
-    config = _load_config(root)
+    config = load_config(root, profile=profile)
+    results_dir, artifacts_dir = project_paths(root, config)
+    format_style = _format_style(config)
     seed_everything(config["seed"])
     splits = _sampled_splits(root, config)
     model, tokenizer, dtype = _load_model_for_config(config)
+    refusal_token_ids = _refusal_token_ids(tokenizer, config)
 
     harmful_train_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmful_train"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmless_train_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmless_train"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmful_val_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmful_val"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmless_val_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmless_val"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
 
     harmful_train_filtered = filter_examples_by_score(
@@ -563,6 +653,7 @@ def run_baseline_stage(root: Path) -> dict:
         harmful_val_filtered,
         batch_size=config["batch_size"],
         max_new_tokens=config["max_new_tokens"],
+        format_style=format_style,
     )
     harmless_outputs = generate_responses(
         model,
@@ -570,12 +661,14 @@ def run_baseline_stage(root: Path) -> dict:
         harmless_val_filtered,
         batch_size=config["batch_size"],
         max_new_tokens=config["max_new_tokens"],
+        format_style=format_style,
     )
     harmless_losses = prompt_cross_entropy_losses(
         model,
         tokenizer,
         harmless_val_filtered,
         batch_size=config["batch_size"],
+        format_style=format_style,
     )
 
     results = {
@@ -610,9 +703,9 @@ def run_baseline_stage(root: Path) -> dict:
         results=results,
         provenance=_provenance(model, dtype, config),
     )
-    write_artifact(root / "results" / "01_baseline.json", artifact)
+    write_artifact(results_dir / "01_baseline.json", artifact)
     _write_raw_json(
-        root / "artifacts" / "generations" / "01_baseline.json",
+        artifacts_dir / "generations" / "01_baseline.json",
         {
             "harmful": harmful_outputs,
             "harmless": harmless_outputs,
@@ -621,23 +714,34 @@ def run_baseline_stage(root: Path) -> dict:
     return asdict(artifact)
 
 
-def run_extract_stage(root: Path) -> dict:
+def run_extract_stage(
+    root: Path,
+    *,
+    profile: str = "gemma_2b.json",
+) -> dict:
     root = root.resolve()
-    config = _load_config(root)
+    config = load_config(root, profile=profile)
+    results_dir, artifacts_dir = project_paths(root, config)
+    format_style = _format_style(config)
     seed_everything(config["seed"])
     splits = _sampled_splits(root, config)
     model, tokenizer, dtype = _load_model_for_config(config)
+    refusal_token_ids = _refusal_token_ids(tokenizer, config)
     harmful_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmful_train"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmless_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmless_train"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmful = filter_examples_by_score(
         splits["harmful_train"],
@@ -649,13 +753,14 @@ def run_extract_stage(root: Path) -> dict:
         harmless_scores,
         keep_positive=False,
     )
-    offsets = end_of_instruction_offsets(tokenizer)
+    offsets = _position_offsets(tokenizer, config)
     harmful_activations = capture_examples(
         model,
         tokenizer,
         harmful,
         batch_size=config["batch_size"],
         position_offsets=offsets,
+        format_style=format_style,
     )
     harmless_activations = capture_examples(
         model,
@@ -663,6 +768,7 @@ def run_extract_stage(root: Path) -> dict:
         harmless,
         batch_size=config["batch_size"],
         position_offsets=offsets,
+        format_style=format_style,
     )
     candidates = candidate_grid(
         harmful_activations,
@@ -670,7 +776,7 @@ def run_extract_stage(root: Path) -> dict:
         position_offsets=offsets,
     )
     save_candidate_artifact(
-        root / "artifacts" / "candidates.pt",
+        artifacts_dir / "candidates.pt",
         candidates,
     )
     results = {
@@ -688,30 +794,41 @@ def run_extract_stage(root: Path) -> dict:
         results=results,
         provenance=_provenance(model, dtype, config),
     )
-    write_artifact(root / "results" / "02_candidates.json", artifact)
+    write_artifact(results_dir / "02_candidates.json", artifact)
     return asdict(artifact)
 
 
-def run_intervention_stage(root: Path) -> dict:
+def run_intervention_stage(
+    root: Path,
+    *,
+    profile: str = "gemma_2b.json",
+) -> dict:
     root = root.resolve()
-    config = _load_config(root)
+    config = load_config(root, profile=profile)
+    results_dir, artifacts_dir = project_paths(root, config)
+    format_style = _format_style(config)
     seed_everything(config["seed"])
     splits = _sampled_splits(root, config)
     candidates = load_candidate_artifact(
-        root / "artifacts" / "candidates.pt"
+        artifacts_dir / "candidates.pt"
     )
     model, tokenizer, dtype = _load_model_for_config(config)
+    refusal_token_ids = _refusal_token_ids(tokenizer, config)
     harmful_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmful_val"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmless_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmless_val"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmful = filter_examples_by_score(
         splits["harmful_val"],
@@ -730,17 +847,19 @@ def run_intervention_stage(root: Path) -> dict:
         harmful,
         harmless,
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     selected = select_candidate(candidates, scores)
     save_direction(
-        root / "artifacts" / "selected_direction.pt",
+        artifacts_dir / "selected_direction.pt",
         selected,
     )
     control = random_direction_control(
         selected.vector,
         seed=config["seed"] + 1000,
     )
-    blocks, attentions, mlps = gemma_module_lists(model)
+    blocks, attentions, mlps = transformer_module_lists(model)
     ablation_pre, ablation_forward = directional_ablation_hook_specs(
         blocks,
         attentions,
@@ -792,6 +911,7 @@ def run_intervention_stage(root: Path) -> dict:
             tokenizer,
             examples,
             batch_size=config["batch_size"],
+            format_style=format_style,
             pre_hooks=pre_hooks,
             forward_hooks=forward_hooks,
         )
@@ -801,12 +921,13 @@ def run_intervention_stage(root: Path) -> dict:
             examples,
             batch_size=config["batch_size"],
             max_new_tokens=config["max_new_tokens"],
+            format_style=format_style,
             pre_hooks=pre_hooks,
             forward_hooks=forward_hooks,
         )
         scores_for_condition = refusal_log_odds(
             logits,
-            refusal_token_ids=GEMMA_REFUSAL_TOKEN_IDS,
+            refusal_token_ids=refusal_token_ids,
         ).float()
         aggregate_conditions[name] = _condition_payload(
             outputs,
@@ -819,12 +940,14 @@ def run_intervention_stage(root: Path) -> dict:
         tokenizer,
         harmless,
         batch_size=config["batch_size"],
+        format_style=format_style,
     )
     ablated_harmless_logits = last_token_logits(
         model,
         tokenizer,
         harmless,
         batch_size=config["batch_size"],
+        format_style=format_style,
         pre_hooks=ablation_pre,
         forward_hooks=ablation_forward,
     )
@@ -857,40 +980,49 @@ def run_intervention_stage(root: Path) -> dict:
         results=results,
         provenance=_provenance(model, dtype, config),
     )
-    write_artifact(root / "results" / "03_interventions.json", artifact)
+    write_artifact(results_dir / "03_interventions.json", artifact)
     _write_raw_json(
-        root / "artifacts" / "generations" / "03_interventions.json",
+        artifacts_dir / "generations" / "03_interventions.json",
         raw_outputs,
     )
     return asdict(artifact)
 
 
-def run_evaluation_stage(root: Path) -> dict:
+def run_evaluation_stage(
+    root: Path,
+    *,
+    profile: str = "gemma_2b.json",
+) -> dict:
     root = root.resolve()
-    config = _load_config(root)
+    config = load_config(root, profile=profile)
+    results_dir, artifacts_dir = project_paths(root, config)
+    format_style = _format_style(config)
     seed_everything(config["seed"])
     splits = _sampled_splits(root, config)
     selected = load_direction(
-        root / "artifacts" / "selected_direction.pt"
+        artifacts_dir / "selected_direction.pt"
     )
     intervention = json.loads(
-        (root / "results" / "03_interventions.json").read_text(
+        (results_dir / "03_interventions.json").read_text(
             encoding="utf-8"
         )
     )
     model, tokenizer, dtype = _load_model_for_config(config)
+    refusal_token_ids = _refusal_token_ids(tokenizer, config)
     harmless_scores = refusal_scores_for_examples(
         model,
         tokenizer,
         splits["harmless_val"],
         batch_size=config["batch_size"],
+        format_style=format_style,
+        refusal_token_ids=refusal_token_ids,
     )
     harmless = filter_examples_by_score(
         splits["harmless_val"],
         harmless_scores,
         keep_positive=False,
     )
-    blocks, attentions, mlps = gemma_module_lists(model)
+    blocks, attentions, mlps = transformer_module_lists(model)
     ablation_pre, ablation_forward = directional_ablation_hook_specs(
         blocks,
         attentions,
@@ -923,12 +1055,14 @@ def run_evaluation_stage(root: Path) -> dict:
         tokenizer,
         harmless,
         batch_size=config["batch_size"],
+        format_style=format_style,
     )
     ablation_losses = prompt_cross_entropy_losses(
         model,
         tokenizer,
         harmless,
         batch_size=config["batch_size"],
+        format_style=format_style,
         pre_hooks=ablation_pre,
         forward_hooks=ablation_forward,
     )
@@ -937,6 +1071,7 @@ def run_evaluation_stage(root: Path) -> dict:
         tokenizer,
         harmless,
         batch_size=config["batch_size"],
+        format_style=format_style,
         pre_hooks=addition_pre,
     )
     control_losses = prompt_cross_entropy_losses(
@@ -944,6 +1079,7 @@ def run_evaluation_stage(root: Path) -> dict:
         tokenizer,
         harmless,
         batch_size=config["batch_size"],
+        format_style=format_style,
         pre_hooks=control_pre,
         forward_hooks=control_forward,
     )
@@ -1009,7 +1145,7 @@ def run_evaluation_stage(root: Path) -> dict:
         results=results,
         provenance=_provenance(model, dtype, config),
     )
-    write_artifact(root / "results" / "final_evaluation.json", artifact)
+    write_artifact(results_dir / "final_evaluation.json", artifact)
     manifest = ArtifactEnvelope(
         experiment="execution_manifest",
         config=config,
@@ -1030,7 +1166,7 @@ def run_evaluation_stage(root: Path) -> dict:
         provenance=_provenance(model, dtype, config),
     )
     write_artifact(
-        root / "results" / "execution_manifest.json",
+        results_dir / "execution_manifest.json",
         manifest,
     )
     return asdict(artifact)
