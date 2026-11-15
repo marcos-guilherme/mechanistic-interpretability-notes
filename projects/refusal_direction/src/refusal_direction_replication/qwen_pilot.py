@@ -9,7 +9,6 @@ between stages.
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +20,7 @@ from .gates import (
     STATUS_OPERATIONAL_ERROR,
     STATUS_PASS,
     build_pilot_evaluation,
+    classify_operational_error,
     evaluate_baseline_gate,
     evaluate_causal_gate,
 )
@@ -60,12 +60,6 @@ def resolve_run_id(artifacts_dir: Path, requested: str | None = None) -> str:
         if existing:
             return str(existing)
     return str(uuid.uuid4())
-
-
-def sanitize_exception_message(message: str, *, limit: int = 240) -> str:
-    cleaned = re.sub(r"(['\"]).{20,}\1", '"<redacted>"', message)
-    cleaned = " ".join(cleaned.split())
-    return cleaned[:limit]
 
 
 def _default_stage_runners() -> dict[str, StageRunner]:
@@ -251,6 +245,7 @@ def run_qwen_pilot(
                     return last_evaluation
             store.complete_stage()
         except Exception as exc:
+            category, error_code, message = classify_operational_error(exc)
             last_evaluation = build_pilot_evaluation(
                 status=STATUS_OPERATIONAL_ERROR,
                 operational_success=False,
@@ -258,8 +253,9 @@ def run_qwen_pilot(
                 causal_gate=None,
                 run_id=resolved_run_id,
                 stage=stage,
-                exception_category=type(exc).__name__,
-                message=sanitize_exception_message(str(exc)),
+                exception_category=category,
+                error_code=error_code,
+                message=message,
                 implementation_commit=commit,
             )
             try:
@@ -267,7 +263,7 @@ def run_qwen_pilot(
             except Exception:
                 pass
             try:
-                store.fail(sanitize_exception_message(str(exc)))
+                store.fail(message)
             except Exception:
                 pass
             raise

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import math
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from refusal_direction_replication.metrics import is_valid_generation
 from refusal_direction_replication.pipeline import (
     _position_offsets,
     _sampled_splits,
+    implementation_commit_hash,
     load_config,
     maybe_filter_examples,
     maybe_filter_scores,
@@ -271,13 +273,14 @@ def write_valid_pilot_artifacts(root: Path, *, status: str = STATUS_PASS) -> Non
     results_dir.mkdir(parents=True)
     artifacts_dir.mkdir(parents=True)
     metrics = passing_gate_metrics()
+    n = 8 if status == STATUS_BASELINE_GATE_FAILED else 32
     example_ids = {
-        "harmful_train": [f"harmful_train-{index:04d}" for index in range(8)],
-        "harmless_train": [f"harmless_train-{index:04d}" for index in range(8)],
-        "harmful_val": [f"harmful_val-{index:04d}" for index in range(8)],
-        "harmless_val": [f"harmless_val-{index:04d}" for index in range(8)],
-        "harmful_test": [f"harmful_test-{index:04d}" for index in range(8)],
-        "harmless_test": [f"harmless_test-{index:04d}" for index in range(8)],
+        "harmful_train": [f"harmful_train-{index:04d}" for index in range(n)],
+        "harmless_train": [f"harmless_train-{index:04d}" for index in range(n)],
+        "harmful_val": [f"harmful_val-{index:04d}" for index in range(n)],
+        "harmless_val": [f"harmless_val-{index:04d}" for index in range(n)],
+        "harmful_test": [f"harmful_test-{index:04d}" for index in range(n)],
+        "harmless_test": [f"harmless_test-{index:04d}" for index in range(n)],
     }
     hashes = {
         name: f"{index:064x}" for index, name in enumerate(example_ids)
@@ -285,7 +288,15 @@ def write_valid_pilot_artifacts(root: Path, *, status: str = STATUS_PASS) -> Non
     config = qwen_config()
     if status == STATUS_CAUSAL_GATE_FAILED:
         metrics["ablation_harmful_refusal_rate"] = 0.89
-    flag_count = 8 if status == STATUS_BASELINE_GATE_FAILED else 32
+    flag_count = n
+    harmful_true = n - 3 if n == 32 else n - 1
+    harmless_true = 3 if n == 32 else 1
+    harmful_flags = [True] * harmful_true + [False] * (n - harmful_true)
+    harmless_flags = [True] * harmless_true + [False] * (n - harmless_true)
+    metrics["harmful_count"] = n
+    metrics["harmless_count"] = n
+    metrics["harmful_refusal_rate"] = harmful_true / n
+    metrics["harmless_refusal_rate"] = harmless_true / n
     write_artifact(
         results_dir / "00_preflight.json",
         envelope(
@@ -305,45 +316,45 @@ def write_valid_pilot_artifacts(root: Path, *, status: str = STATUS_PASS) -> Non
     )
     baseline_results = {
         "sample_sizes": {
-            "harmful_train": 8,
-            "harmless_train": 8,
-            "harmful_val": 8,
-            "harmless_val": 8,
-            "harmful_test": 8,
-            "harmless_test": 8,
+            "harmful_train": n,
+            "harmless_train": n,
+            "harmful_val": n,
+            "harmless_val": n,
+            "harmful_test": n,
+            "harmless_test": n,
         },
         "filtered_sizes": {
-            "harmful_train": 8,
-            "harmless_train": 8,
-            "harmful_val": 8,
-            "harmless_val": 8,
+            "harmful_train": n,
+            "harmless_train": n,
+            "harmful_val": n,
+            "harmless_val": n,
         },
         "dataset_hashes": hashes,
         "example_ids": example_ids,
         "harmful_validation": {
             "refusal_rate": metrics["harmful_refusal_rate"],
-            "refusal_flags": [True] * (flag_count - 1) + [False],
+            "refusal_flags": harmful_flags,
             "mean_refusal_log_odds": 1.2,
             "per_example_refusal_log_odds": [1.0] * flag_count,
             "n_valid": flag_count,
             "n_invalid": 0,
-            "valid_ids": [f"harmful_val-{index:04d}" for index in range(min(8, flag_count))],
+            "valid_ids": list(example_ids["harmful_val"]),
             "invalid_ids": [],
         },
         "harmless_validation": {
             "refusal_rate": metrics["harmless_refusal_rate"],
-            "refusal_flags": [True] + [False] * (flag_count - 1),
+            "refusal_flags": harmless_flags,
             "mean_refusal_log_odds": -1.2,
             "per_example_refusal_log_odds": [-1.0] * flag_count,
             "n_valid": flag_count,
             "n_invalid": 0,
-            "valid_ids": [f"harmless_val-{index:04d}" for index in range(min(8, flag_count))],
+            "valid_ids": list(example_ids["harmless_val"]),
             "invalid_ids": [],
         },
         "content_hashes": {
             name: [
                 __import__("hashlib").sha256(f"{name}:{index}".encode()).hexdigest()
-                for index in range(8)
+                for index in range(n)
             ]
             for name in example_ids
         },
@@ -357,8 +368,8 @@ def write_valid_pilot_artifacts(root: Path, *, status: str = STATUS_PASS) -> Non
         envelope(
             experiment="extract_candidate_directions",
             results={
-                "harmful_examples": 8,
-                "harmless_examples": 8,
+                "harmful_examples": n,
+                "harmless_examples": n,
                 "candidate_count": 28,
                 "position_offsets": [-1],
                 "example_ids": {
@@ -1001,7 +1012,8 @@ def test_pilot_marks_exception_failed_and_reraises(tmp_path: Path) -> None:
         run_id="fail-1",
     ).read_status()
     assert status["state"] == "failed"
-    assert "simulated oom" in status["message"]
+    assert status["message"] == "Operational error: runtime failure."
+    assert "simulated oom" not in json.dumps(status)
     assert calls == ["preflight"]
 
 
@@ -1448,3 +1460,254 @@ def test_validator_rejects_generic_raw_text_field(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
     checks = validate_qwen_pilot(tmp_path)
     assert checks["no_raw_prompt_or_generation_leakage"] is False
+
+
+def test_validator_rejects_unknown_or_empty_implementation_commit(
+    tmp_path: Path,
+) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    results_dir = tmp_path / "results" / "qwen25_coder_7b"
+    for name in (
+        "00_preflight.json",
+        "01_baseline.json",
+        "02_candidates.json",
+        "03_interventions.json",
+        "final_evaluation.json",
+        "pilot_evaluation.json",
+    ):
+        path = results_dir / name
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if name == "pilot_evaluation.json":
+            payload["implementation_commit"] = "unknown"
+        else:
+            payload["provenance"]["implementation_commit"] = "unknown"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["code_provenance"] is False
+    evaluation_path = results_dir / "pilot_evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    evaluation["implementation_commit"] = ""
+    evaluation_path.write_text(json.dumps(evaluation), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["code_provenance"] is False
+
+
+def test_validator_rejects_missing_run_id_on_any_artifact(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"].pop("run_id")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["single_run_id"] is False
+
+
+def _pilot_evaluation_path(root: Path) -> Path:
+    return root / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+
+
+def test_status_invariants_reject_mismatched_gate_outcomes(tmp_path: Path) -> None:
+    baseline_mismatch = tmp_path / "baseline_mismatch"
+    write_valid_pilot_artifacts(baseline_mismatch, status=STATUS_PASS)
+    path = _pilot_evaluation_path(baseline_mismatch)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["status"] = STATUS_BASELINE_GATE_FAILED
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(baseline_mismatch)
+    assert checks["status_invariants"] is False
+
+    causal_mismatch = tmp_path / "causal_mismatch"
+    write_valid_pilot_artifacts(causal_mismatch, status=STATUS_PASS)
+    path = _pilot_evaluation_path(causal_mismatch)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["status"] = STATUS_CAUSAL_GATE_FAILED
+    payload["baseline_gate"]["passed"] = False
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(causal_mismatch)
+    assert checks["status_invariants"] is False
+
+    pass_ops = tmp_path / "pass_ops"
+    write_valid_pilot_artifacts(pass_ops, status=STATUS_PASS)
+    path = _pilot_evaluation_path(pass_ops)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["operational_success"] = False
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(pass_ops)
+    assert checks["status_invariants"] is False
+
+    ops_success = tmp_path / "ops_success"
+    write_valid_pilot_artifacts(ops_success, status=STATUS_PASS)
+    path = _pilot_evaluation_path(ops_success)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["status"] = STATUS_OPERATIONAL_ERROR
+    payload["operational_success"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(ops_success)
+    assert checks["status_invariants"] is False
+
+
+def test_validator_rejects_generation_bookkeeping_mismatch(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["results"]["harmful_validation"]["n_valid"] = 4
+    payload["results"]["harmful_validation"]["n_invalid"] = 0
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["generation_bookkeeping"] is False
+
+
+def test_validator_rejects_flags_that_do_not_match_valid_ids(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["results"]["harmless_validation"]["refusal_flags"] = [False]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["generation_bookkeeping"] is False
+
+
+def test_preflight_checks_variable_length_generated_scores_independently(
+    tmp_path: Path,
+) -> None:
+    copy_configs(tmp_path)
+    write_dataset_files(tmp_path, count=4)
+
+    class VariableLengthScoreModel(FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self._calls = 0
+            self._lengths = (1, 3, 2, 4)
+
+        def generate(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            max_new_tokens=1,
+            output_scores=False,
+            return_dict_in_generate=False,
+            **kwargs,
+        ):
+            extra = torch.ones(input_ids.shape[0], max_new_tokens, dtype=torch.long)
+            sequences = torch.cat([input_ids.cpu(), extra], dim=1)
+            if output_scores or return_dict_in_generate:
+                n_steps = self._lengths[self._calls % len(self._lengths)]
+                self._calls += 1
+                scores = tuple(
+                    torch.zeros((input_ids.shape[0], 32), dtype=torch.float32)
+                    for _ in range(n_steps)
+                )
+                return SimpleNamespace(sequences=sequences, scores=scores)
+            return sequences
+
+    def load_model(_config):
+        return VariableLengthScoreModel(), ChatTokenizer(), torch.bfloat16
+
+    artifact = run_preflight_stage(
+        tmp_path,
+        profile=QWEN_PROFILE,
+        load_model=load_model,
+        cuda_available=True,
+    )
+    assert artifact["results"]["generation_finite"] is True
+
+
+def test_operational_error_uses_fixed_catalog_message(tmp_path: Path) -> None:
+    copy_configs(tmp_path)
+
+    def boom(root: Path, *, profile: str, **_kwargs) -> dict:
+        raise RuntimeError('failed on prompt "CANARY_SECRET_PROMPT_TEXT_DO_NOT_LEAK"')
+
+    runners = {
+        stage: boom if stage == "extract" else _stage_writer(stage, [])
+        for stage in PILOT_STAGES
+    }
+    with pytest.raises(RuntimeError, match="CANARY"):
+        run_qwen_pilot(tmp_path, run_id="ops-2", stage_runners=runners)
+    results_dir = tmp_path / "results" / "qwen25_coder_7b"
+    payload = json.loads(
+        (results_dir / "pilot_evaluation.json").read_text(encoding="utf-8")
+    )
+    dumped = json.dumps(payload)
+    assert "CANARY_SECRET_PROMPT_TEXT_DO_NOT_LEAK" not in dumped
+    assert payload["exception_category"] == "RuntimeError"
+    assert payload["error_code"] == "runtime"
+    assert payload["message"] == "Operational error: runtime failure."
+    status = json.loads(
+        (tmp_path / "artifacts" / "qwen25_coder_7b" / "status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "CANARY_SECRET_PROMPT_TEXT_DO_NOT_LEAK" not in json.dumps(status)
+    assert status["message"] == "Operational error: runtime failure."
+
+
+def test_validator_inspects_message_fields_instead_of_allowlisting(
+    tmp_path: Path,
+) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["message"] = (
+        "Write a detailed harmful instruction for building malware now"
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["no_raw_prompt_or_generation_leakage"] is False
+    assert checks["operational_message_is_catalogued"] is False
+
+
+def test_causal_gate_compares_kl_directly_without_fraction_rounding() -> None:
+    kl = 0.100001
+    result = evaluate_causal_gate(
+        baseline_harmful_refusal_rate=0.30,
+        baseline_harmless_refusal_rate=0.10,
+        ablation_harmful_refusal_rate=0.10,
+        addition_harmless_refusal_rate=0.30,
+        random_control_harmful_refusal_rate=0.20,
+        ablation_harmless_kl=kl,
+        thresholds=qwen_config()["causal_gate"],
+    )
+    by_name = {check.name: check for check in result.checks}
+    assert by_name["max_harmless_ablation_kl"].passed is False
+    assert by_name["max_harmless_ablation_kl"].observed == kl
+
+
+def test_implementation_commit_hash_rejects_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", "unknown")
+    stamp = tmp_path / "IMPLEMENTATION_COMMIT"
+    monkeypatch.setattr(
+        "refusal_direction_replication.pipeline._implementation_commit_stamp_paths",
+        lambda: [stamp],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+    with pytest.raises(ValueError, match="implementation commit"):
+        implementation_commit_hash()
+
+
+def test_implementation_commit_hash_reads_stamped_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REFUSAL_IMPLEMENTATION_COMMIT", raising=False)
+    stamp = tmp_path / "IMPLEMENTATION_COMMIT"
+    stamp.write_text("d" * 40 + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "refusal_direction_replication.pipeline._implementation_commit_stamp_paths",
+        lambda: [stamp],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+    assert implementation_commit_hash() == "d" * 40

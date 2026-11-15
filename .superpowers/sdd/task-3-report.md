@@ -195,3 +195,98 @@ Result: `142 passed in 15.15s` (previous 127 + 15 review-fix tests)
 ### Status (review round)
 
 `DONE_WITH_CONCERNS`
+
+---
+
+## Second review round (task-3-review.md)
+
+Addressed every item in the second-review section. Gemma `build_archive()`
+defaults remain unstamped; only `--profile qwen25-coder` sync writes
+`IMPLEMENTATION_COMMIT` into the Colab archive.
+
+### RED evidence
+
+Command:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py tests/test_colab_orchestrator.py -q --tb=line
+```
+
+Result (failing tests added before production changes):
+
+```text
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_unknown_or_empty_implementation_commit
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_missing_run_id_on_any_artifact
+FAILED tests/test_qwen_pilot.py::test_status_invariants_reject_mismatched_gate_outcomes
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_generation_bookkeeping_mismatch
+FAILED tests/test_qwen_pilot.py::test_validator_rejects_flags_that_do_not_match_valid_ids
+FAILED tests/test_qwen_pilot.py::test_preflight_checks_variable_length_generated_scores_independently
+FAILED tests/test_qwen_pilot.py::test_operational_error_uses_fixed_catalog_message
+FAILED tests/test_qwen_pilot.py::test_validator_inspects_message_fields_instead_of_allowlisting
+FAILED tests/test_qwen_pilot.py::test_causal_gate_compares_kl_directly_without_fraction_rounding
+FAILED tests/test_qwen_pilot.py::test_implementation_commit_hash_rejects_unknown
+FAILED tests/test_qwen_pilot.py::test_implementation_commit_hash_reads_stamped_file
+FAILED tests/test_colab_orchestrator.py::test_gemma_archive_does_not_stamp_implementation_commit
+FAILED tests/test_colab_orchestrator.py::test_qwen_archive_stamps_exact_implementation_commit
+13 failed, 62 passed in 16.96s
+```
+
+### GREEN evidence
+
+Focused suites:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py tests/test_colab_orchestrator.py tests/test_qwen_observability.py -q
+```
+
+Result: `101 passed in 15.17s`
+
+Full refusal project suite:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests -q
+```
+
+Result: `155 passed in 14.52s` (previous 142 + 13 second-review tests)
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `tools/colab/run_refusal.py` | Qwen-only archive stamp of exact `HEAD`; Gemma `build_archive()` default unchanged |
+| `projects/refusal_direction/src/refusal_direction_replication/pipeline.py` | Read stamp/env/git; reject `unknown`; check generated scores per tensor |
+| `projects/refusal_direction/src/refusal_direction_replication/gates.py` | Direct float KL compare; catalogued operational error codes/messages |
+| `projects/refusal_direction/src/refusal_direction_replication/qwen_pilot.py` | Store bounded `error_code` and fixed message; never persist exception text |
+| `projects/refusal_direction/src/refusal_direction_replication/qwen_pilot_validate.py` | Reject unknown/missing provenance; status/generation/message invariants |
+| `projects/refusal_direction/tests/test_qwen_pilot.py` | Focused rejection tests for each second-review item |
+| `projects/refusal_direction/tests/test_colab_orchestrator.py` | Gemma unstamped vs Qwen stamped archive members |
+
+### Review items addressed
+
+| Finding | Fix |
+|--------|-----|
+| Stamp exact commit in Colab archive | Qwen sync adds `refusal_direction/IMPLEMENTATION_COMMIT`; pipeline reads stamp/env before git |
+| Reject unknown/empty commit and missing run IDs | Validator `code_provenance` / `single_run_id`; `implementation_commit_hash()` raises |
+| Status invariants | `baseline_gate_failed`/`causal_gate_failed`/`pass`/`operational_error` checked against gate outcomes and `operational_success` |
+| Generated-condition bookkeeping | `n_valid + n_invalid`, disjoint complete IDs, flags aligned, rate from valid refusals |
+| Variable-length generated scores | Preflight checks each score tensor; no `torch.cat` |
+| Operational-error exception text | Catalog `error_code` + fixed message; validator inspects `message` instead of allowlisting |
+| KL vs rate comparison | Rate diffs stay rational; KL compared as `float <= 0.10` |
+
+### Self-review (second review round)
+
+- Gemma `build_archive()` still defaults to `stamp_commit=False`; only Qwen sync stamps.
+- Compact operational-error JSON no longer contains exception strings that could include prompts.
+- KL of `0.10` still passes; `0.100001` now fails instead of rounding to `1/10`.
+
+### Concerns (second review round)
+
+1. **Remote still needs the stamp.** If a Qwen archive is built without `stamp_commit=True` and git is absent, `implementation_commit_hash()` now raises (operational error) instead of writing `unknown`.
+2. **No GPU execution** in this round; scientific gates remain unexercised on Qwen weights.
+
+### Status (second review round)
+
+`DONE_WITH_CONCERNS`

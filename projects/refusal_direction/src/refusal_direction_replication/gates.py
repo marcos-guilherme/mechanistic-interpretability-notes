@@ -17,6 +17,24 @@ STATUS_PASS = "pass"
 STATUS_BASELINE_GATE_FAILED = "baseline_gate_failed"
 STATUS_CAUSAL_GATE_FAILED = "causal_gate_failed"
 STATUS_OPERATIONAL_ERROR = "operational_error"
+DEFAULT_OPERATIONAL_ERROR_CODE = "unexpected"
+OPERATIONAL_ERROR_CODES = {
+    "RuntimeError": "runtime",
+    "ValueError": "value",
+    "OSError": "os",
+    "FileNotFoundError": "missing_file",
+    "TimeoutError": "timeout",
+    "MemoryError": "memory",
+}
+OPERATIONAL_ERROR_MESSAGES = {
+    "runtime": "Operational error: runtime failure.",
+    "value": "Operational error: invalid value.",
+    "os": "Operational error: I/O failure.",
+    "missing_file": "Operational error: missing file.",
+    "timeout": "Operational error: timeout.",
+    "memory": "Operational error: memory failure.",
+    DEFAULT_OPERATIONAL_ERROR_CODE: "Operational error: unexpected failure.",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +74,14 @@ class GateResult:
             "reason": self.reason,
             "checks": [check.to_dict() for check in self.checks],
         }
+
+
+def classify_operational_error(exc: BaseException) -> tuple[str, str, str]:
+    """Map an exception to a bounded code and a fixed catalog message."""
+
+    category = type(exc).__name__
+    code = OPERATIONAL_ERROR_CODES.get(category, DEFAULT_OPERATIONAL_ERROR_CODE)
+    return category, code, OPERATIONAL_ERROR_MESSAGES[code]
 
 
 def to_fraction(value: float | int | Fraction) -> Fraction:
@@ -102,6 +128,40 @@ def _compare(
         passed=passed,
         threshold=float(threshold_fraction),
         observed=float(observed_fraction),
+        comparator=comparator,
+        reason=reason,
+    )
+
+
+def _compare_continuous(
+    name: str,
+    observed: float,
+    threshold: float,
+    comparator: str,
+) -> GateCheck:
+    observed_value = float(observed)
+    threshold_value = float(threshold)
+    if comparator == "lte":
+        passed = observed_value <= threshold_value
+        relation = "<="
+    elif comparator == "gte":
+        passed = observed_value >= threshold_value
+        relation = ">="
+    else:
+        raise ValueError(f"unsupported comparator: {comparator}")
+    if passed:
+        reason = (
+            f"{name}: observed {observed_value} {relation} {threshold_value}"
+        )
+    else:
+        reason = (
+            f"{name}: observed {observed_value} not {relation} {threshold_value}"
+        )
+    return GateCheck(
+        name=name,
+        passed=passed,
+        threshold=threshold_value,
+        observed=observed_value,
         comparator=comparator,
         reason=reason,
     )
@@ -185,10 +245,10 @@ def evaluate_causal_gate(
             float(thresholds["max_random_control_harmful_drop"]),
             "lte",
         ),
-        _compare(
+        _compare_continuous(
             "max_harmless_ablation_kl",
-            to_fraction(ablation_harmless_kl),
-            to_fraction(thresholds["max_harmless_ablation_kl"]),
+            float(ablation_harmless_kl),
+            float(thresholds["max_harmless_ablation_kl"]),
             "lte",
         ),
     )
@@ -208,6 +268,7 @@ def build_pilot_evaluation(
     run_id: str,
     stage: str | None = None,
     exception_category: str | None = None,
+    error_code: str | None = None,
     message: str | None = None,
     implementation_commit: str | None = None,
 ) -> dict[str, Any]:
@@ -232,6 +293,8 @@ def build_pilot_evaluation(
         payload["stage"] = stage
     if exception_category is not None:
         payload["exception_category"] = exception_category
+    if error_code is not None:
+        payload["error_code"] = error_code
     if message is not None:
         payload["message"] = message
     if implementation_commit is not None:

@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import tarfile
 
 
 SCRIPT = Path(__file__).parents[3] / "tools" / "colab" / "run_refusal.py"
@@ -53,3 +54,38 @@ def test_huggingface_token_uses_standard_cache_path(tmp_path) -> None:
     assert MODULE.huggingface_token_path(tmp_path) == (
         tmp_path / ".cache" / "huggingface" / "token"
     )
+
+
+def _tiny_project(root) -> Path:
+    project = root / "refusal_direction"
+    project.mkdir()
+    (project / "hello.py").write_text("print('ok')\n", encoding="utf-8")
+    return project
+
+
+def test_gemma_archive_does_not_stamp_implementation_commit(tmp_path) -> None:
+    project = _tiny_project(tmp_path)
+    archive = MODULE.build_archive(
+        stamp_commit=False,
+        project=project,
+        staging=tmp_path / "staging",
+    )
+    with tarfile.open(archive, "r:gz") as handle:
+        names = handle.getnames()
+    assert "refusal_direction/IMPLEMENTATION_COMMIT" not in names
+    assert "refusal_direction/hello.py" in names
+
+
+def test_qwen_archive_stamps_exact_implementation_commit(tmp_path) -> None:
+    project = _tiny_project(tmp_path)
+    commit = "e" * 40
+    archive = MODULE.build_archive(
+        stamp_commit=True,
+        project=project,
+        staging=tmp_path / "staging",
+        commit=commit,
+    )
+    with tarfile.open(archive, "r:gz") as handle:
+        member = handle.extractfile("refusal_direction/IMPLEMENTATION_COMMIT")
+        assert member is not None
+        assert member.read().decode("utf-8").strip() == commit

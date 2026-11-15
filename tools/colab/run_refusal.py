@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -132,16 +133,52 @@ def _archive_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
     return info
 
 
-def build_archive() -> Path:
-    staging = ROOT / ".colab-staging"
+def current_implementation_commit(cwd: Path | None = None) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=cwd or ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    commit = completed.stdout.strip() if completed.returncode == 0 else ""
+    if not commit or commit.casefold() == "unknown":
+        raise ValueError("implementation commit is missing")
+    return commit
+
+
+def build_archive(
+    *,
+    stamp_commit: bool = False,
+    project: Path | None = None,
+    staging: Path | None = None,
+    commit: str | None = None,
+) -> Path:
+    project = project or PROJECT
+    staging = staging or (ROOT / ".colab-staging")
     staging.mkdir(exist_ok=True)
     archive = staging / "refusal_direction.tar.gz"
+
+    def filter_info(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        filtered = _archive_filter(info)
+        if filtered is None:
+            return None
+        if stamp_commit and Path(info.name).name == "IMPLEMENTATION_COMMIT":
+            return None
+        return filtered
+
     with tarfile.open(archive, "w:gz") as handle:
         handle.add(
-            PROJECT,
+            project,
             arcname="refusal_direction",
-            filter=_archive_filter,
+            filter=filter_info,
         )
+        if stamp_commit:
+            hashed = commit or current_implementation_commit()
+            payload = (hashed + "\n").encode("utf-8")
+            info = tarfile.TarInfo(name="refusal_direction/IMPLEMENTATION_COMMIT")
+            info.size = len(payload)
+            handle.addfile(info, io.BytesIO(payload))
     return archive
 
 
@@ -183,7 +220,7 @@ def main() -> int:
     elif args.action == "start":
         run(start_command(session, args.gpu))
     elif args.action == "sync":
-        archive = build_archive()
+        archive = build_archive(stamp_commit=args.profile == "qwen25-coder")
         run(
             upload_command(
                 session,

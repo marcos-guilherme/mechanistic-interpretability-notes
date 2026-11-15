@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .gates import (
+    OPERATIONAL_ERROR_MESSAGES,
     STATUS_BASELINE_GATE_FAILED,
     STATUS_CAUSAL_GATE_FAILED,
     STATUS_OPERATIONAL_ERROR,
@@ -44,12 +45,17 @@ ALLOWED_PROSE_KEYS = frozenset(
     {
         "reason",
         "abort_reason",
-        "message",
         "abort_gate",
         "exception_category",
+        "error_code",
         "status",
     }
 )
+ALLOWED_OPERATIONAL_MESSAGES = frozenset(OPERATIONAL_ERROR_MESSAGES.values())
+GENERATION_SPLIT_KEYS = {
+    "harmful_validation": "harmful_val",
+    "harmless_validation": "harmless_val",
+}
 HEX_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 PASS_STAGE_FILES = (
     "00_preflight.json",
@@ -126,8 +132,11 @@ def _walk_contains_leak(obj: Any, *, key: str | None = None) -> bool:
     if isinstance(obj, list):
         return any(_walk_contains_leak(item, key=key) for item in obj)
     if isinstance(obj, str):
-        if key is not None and str(key).casefold() in ALLOWED_PROSE_KEYS:
+        lowered = str(key).casefold() if key is not None else ""
+        if lowered in ALLOWED_PROSE_KEYS:
             return False
+        if lowered == "message":
+            return obj not in ALLOWED_OPERATIONAL_MESSAGES
         return _looks_like_raw_text(obj)
     return False
 
@@ -248,6 +257,94 @@ def _gate_fields_complete(evaluation: dict[str, Any], status: str) -> bool:
     return True
 
 
+def _commit_ok(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return bool(stripped) and stripped.casefold() != "unknown"
+
+
+def _run_id_ok(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _status_invariants(evaluation: dict[str, Any], status: str) -> bool:
+    baseline = evaluation.get("baseline_gate") or {}
+    causal = evaluation.get("causal_gate") or {}
+    baseline_passed = bool(baseline.get("passed"))
+    causal_passed = bool(causal.get("passed"))
+    operational_success = bool(evaluation.get("operational_success"))
+    if status == STATUS_BASELINE_GATE_FAILED:
+        return (not baseline_passed) and operational_success
+    if status == STATUS_CAUSAL_GATE_FAILED:
+        return baseline_passed and (not causal_passed) and operational_success
+    if status == STATUS_PASS:
+        return baseline_passed and causal_passed and operational_success
+    if status == STATUS_OPERATIONAL_ERROR:
+        return not operational_success
+    return False
+
+
+def _generation_summary_ok(
+    summary: dict[str, Any],
+    *,
+    sampled_ids: list[str] | None = None,
+    sampled_count: int | None = None,
+) -> bool:
+    if "n_valid" not in summary:
+        return True
+    try:
+        n_valid = int(summary["n_valid"])
+        n_invalid = int(summary["n_invalid"])
+        rate = float(summary["refusal_rate"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    valid_ids = [str(item) for item in summary.get("valid_ids") or []]
+    invalid_ids = [str(item) for item in summary.get("invalid_ids") or []]
+    flags = list(summary.get("refusal_flags") or [])
+    if n_valid != len(valid_ids) or n_valid != len(flags):
+        return False
+    if n_invalid != len(invalid_ids):
+        return False
+    if n_valid + n_invalid != len(valid_ids) + len(invalid_ids):
+        return False
+    if set(valid_ids) & set(invalid_ids):
+        return False
+    if sampled_count is not None and n_valid + n_invalid != sampled_count:
+        return False
+    if sampled_ids is not None and set(valid_ids) | set(invalid_ids) != set(
+        str(item) for item in sampled_ids
+    ):
+        return False
+    expected_rate = (sum(1 for flag in flags if flag) / n_valid) if n_valid else 0.0
+    return abs(rate - expected_rate) <= 1e-12
+
+
+def _generation_bookkeeping_ok(payloads: list[dict[str, Any]]) -> bool:
+    for payload in payloads:
+        results = payload.get("results") or {}
+        sample_sizes = results.get("sample_sizes") or {}
+        example_ids = results.get("example_ids") or {}
+        for field, split_name in GENERATION_SPLIT_KEYS.items():
+            summary = results.get(field)
+            if not isinstance(summary, dict):
+                continue
+            sampled_count = sample_sizes.get(split_name)
+            sampled_ids = example_ids.get(split_name)
+            if not _generation_summary_ok(
+                summary,
+                sampled_ids=list(sampled_ids) if sampled_ids is not None else None,
+                sampled_count=int(sampled_count) if sampled_count is not None else None,
+            ):
+                return False
+        conditions = results.get("conditions") or {}
+        if isinstance(conditions, dict):
+            for summary in conditions.values():
+                if isinstance(summary, dict) and not _generation_summary_ok(summary):
+                    return False
+    return True
+
+
 def _unique_candidate_grid(payload: dict[str, Any]) -> bool:
     scores = payload.get("results", {}).get("candidate_scores") or []
     if len(scores) != 28:
@@ -276,8 +373,11 @@ def validate_qwen_pilot(root: Path) -> dict[str, bool]:
         "no_raw_prompt_or_generation_leakage": True,
         "status_matches_result": True,
         "scientific_pass_requires_both_gates": True,
+        "status_invariants": True,
+        "generation_bookkeeping": True,
         "single_run_id": True,
         "code_provenance": True,
+        "operational_message_is_catalogued": True,
     }
     if not evaluation_path.is_file() or not status_path.is_file():
         return checks
@@ -405,31 +505,48 @@ def validate_qwen_pilot(root: Path) -> dict[str, bool]:
         )
     else:
         checks["scientific_pass_requires_both_gates"] = True
+    checks["status_invariants"] = _status_invariants(evaluation, status)
+    if status == STATUS_OPERATIONAL_ERROR:
+        checks["generation_bookkeeping"] = True
+    else:
+        checks["generation_bookkeeping"] = _generation_bookkeeping_ok(payloads)
 
-    run_ids = {
-        payload.get("provenance", {}).get("run_id")
-        for payload in payloads
-        if payload.get("provenance")
-    }
-    run_ids.add(evaluation.get("run_id"))
-    run_ids.discard(None)
-    checks["single_run_id"] = len(run_ids) == 1
+    run_ids: set[str] = set()
+    missing_run_id = not _run_id_ok(evaluation.get("run_id"))
+    for payload in payloads:
+        provenance = payload.get("provenance") or {}
+        if not provenance:
+            continue
+        if not _run_id_ok(provenance.get("run_id")):
+            missing_run_id = True
+            continue
+        run_ids.add(str(provenance.get("run_id")))
+    if _run_id_ok(evaluation.get("run_id")):
+        run_ids.add(str(evaluation.get("run_id")))
+    checks["single_run_id"] = (not missing_run_id) and len(run_ids) == 1
 
-    commits = {
-        payload.get("provenance", {}).get("implementation_commit")
-        for payload in payloads
-        if payload.get("provenance")
-    }
-    if evaluation.get("implementation_commit"):
-        commits.add(evaluation.get("implementation_commit"))
-    commits.discard(None)
-    checks["code_provenance"] = len(commits) == 1 and bool(next(iter(commits), ""))
-    if any(
-        payload.get("provenance")
-        and not payload.get("provenance", {}).get("implementation_commit")
-        for payload in payloads
-    ):
-        checks["code_provenance"] = False
+    commits: set[str] = set()
+    missing_commit = not _commit_ok(evaluation.get("implementation_commit"))
+    for payload in payloads:
+        provenance = payload.get("provenance") or {}
+        if not provenance:
+            continue
+        commit = provenance.get("implementation_commit")
+        if not _commit_ok(commit):
+            missing_commit = True
+            continue
+        commits.add(str(commit).strip())
+    if _commit_ok(evaluation.get("implementation_commit")):
+        commits.add(str(evaluation.get("implementation_commit")).strip())
+    checks["code_provenance"] = (not missing_commit) and len(commits) == 1
+
+    message = evaluation.get("message")
+    if message is None:
+        checks["operational_message_is_catalogued"] = True
+    else:
+        checks["operational_message_is_catalogued"] = (
+            message in ALLOWED_OPERATIONAL_MESSAGES
+        )
 
     eval_status = evaluation.get("status")
     state = status_payload.get("state")

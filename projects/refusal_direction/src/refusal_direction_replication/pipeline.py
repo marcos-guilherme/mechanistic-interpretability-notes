@@ -698,10 +698,34 @@ def _mean(values: Sequence[float]) -> float:
     return float(sum(values) / len(values))
 
 
+IMPLEMENTATION_COMMIT_FILENAME = "IMPLEMENTATION_COMMIT"
+
+
+def _implementation_commit_stamp_paths() -> list[Path]:
+    return [
+        Path("/content/refusal_direction") / IMPLEMENTATION_COMMIT_FILENAME,
+        Path(__file__).resolve().parents[2] / IMPLEMENTATION_COMMIT_FILENAME,
+    ]
+
+
+def _usable_commit(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or stripped.casefold() == "unknown":
+        return None
+    return stripped
+
+
 def implementation_commit_hash() -> str:
-    env = os.environ.get("REFUSAL_IMPLEMENTATION_COMMIT")
+    env = _usable_commit(os.environ.get("REFUSAL_IMPLEMENTATION_COMMIT"))
     if env:
-        return env.strip()
+        return env
+    for path in _implementation_commit_stamp_paths():
+        if path.is_file():
+            stamped = _usable_commit(path.read_text(encoding="utf-8"))
+            if stamped:
+                return stamped
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=Path(__file__).resolve().parent,
@@ -709,9 +733,12 @@ def implementation_commit_hash() -> str:
         text=True,
         check=False,
     )
-    if completed.returncode == 0 and completed.stdout.strip():
-        return completed.stdout.strip()
-    return "unknown"
+    git_commit = _usable_commit(
+        completed.stdout if completed.returncode == 0 else None
+    )
+    if git_commit:
+        return git_commit
+    raise ValueError("implementation commit is missing")
 
 
 def _provenance(
@@ -1522,8 +1549,9 @@ def generated_token_scores(
     batch_size: int,
     max_new_tokens: int,
     format_style: str = FORMAT_STYLE_GEMMA,
-) -> torch.Tensor:
-    collected = []
+) -> None:
+    if not examples:
+        raise ValueError("examples must not be empty")
     for start in range(0, len(examples), batch_size):
         texts = [item.text for item in examples[start : start + batch_size]]
         batch = _device_batch(
@@ -1545,15 +1573,16 @@ def generated_token_scores(
         scores = getattr(generated, "scores", None)
         if not scores:
             raise ValueError("generate did not return generated-token scores")
-        collected.append(
-            torch.stack(
-                [step.detach().float().cpu() for step in scores],
-                dim=1,
-            )
-        )
-    if not collected:
-        raise ValueError("examples must not be empty")
-    return torch.cat(collected)
+        for step in scores:
+            tensor = step.detach().float().cpu()
+            if tensor.numel() == 0:
+                raise ValueError(
+                    "empty generated-token scores during preflight"
+                )
+            if not torch.isfinite(tensor).all():
+                raise ValueError(
+                    "non-finite generated-token scores during preflight"
+                )
 
 
 def run_preflight_stage(
@@ -1620,7 +1649,7 @@ def run_preflight_stage(
             raise ValueError(
                 f"resolved revision {resolved} does not match requested {requested}"
             )
-        scores = generated_token_scores(
+        generated_token_scores(
             model,
             tokenizer,
             probes,
@@ -1628,10 +1657,6 @@ def run_preflight_stage(
             max_new_tokens=min(8, int(config["max_new_tokens"])),
             format_style=format_style,
         )
-        if not torch.isfinite(scores).all():
-            raise ValueError(
-                "non-finite generated-token scores during preflight"
-            )
         generate_responses(
             model,
             tokenizer,
