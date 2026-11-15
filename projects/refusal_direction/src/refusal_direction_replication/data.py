@@ -69,6 +69,18 @@ def hash_examples(examples: Sequence[PromptExample]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def normalize_prompt_text(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def prompt_content_hash(text: str) -> str:
+    return hashlib.sha256(normalize_prompt_text(text).encode("utf-8")).hexdigest()
+
+
+def content_hashes_for_examples(examples: Sequence[PromptExample]) -> list[str]:
+    return [prompt_content_hash(example.text) for example in examples]
+
+
 def load_local_prompt_corpus(path: Path, label: Label) -> list[PromptExample]:
     rows = json.loads(path.read_text(encoding="utf-8"))
     return [

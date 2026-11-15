@@ -6,14 +6,21 @@ from dataclasses import asdict
 import gc
 import hashlib
 import json
+import os
 from pathlib import Path
 import random
+import subprocess
 
 import torch
 import torch.nn.functional as F
 
 from .artifacts import ArtifactEnvelope, write_artifact
-from .data import PromptExample, hash_examples, load_local_prompt_corpus
+from .data import (
+    PromptExample,
+    content_hashes_for_examples,
+    hash_examples,
+    load_local_prompt_corpus,
+)
 from .directions import (
     CandidateDirection,
     candidate_grid,
@@ -27,6 +34,7 @@ from .interventions import (
 from .metrics import (
     CandidateScore,
     contains_refusal,
+    is_valid_generation,
     kl_divergence,
     mean_cross_entropy_delta,
     refusal_log_odds,
@@ -201,10 +209,51 @@ def _ids_from_splits(
     return {name: _ids_from_examples(items) for name, items in splits.items()}
 
 
-def summarize_generated_condition(outputs: Sequence[str]) -> dict:
+def summarize_generated_condition(
+    outputs: Sequence[str],
+    *,
+    examples: Sequence[PromptExample] | None = None,
+    count_valid: bool = False,
+) -> dict:
+    if not count_valid:
+        return {
+            "refusal_rate": refusal_rate(outputs),
+            "refusal_flags": [contains_refusal(output) for output in outputs],
+        }
+    valid_indices = [
+        index
+        for index, output in enumerate(outputs)
+        if is_valid_generation(output)
+    ]
+    valid_outputs = [outputs[index] for index in valid_indices]
+    if valid_outputs:
+        flags = [contains_refusal(output) for output in valid_outputs]
+        rate = sum(flags) / len(flags)
+    else:
+        flags = []
+        rate = 0.0
+    if examples is not None:
+        ids = [examples[index].id for index in range(len(outputs))]
+        valid_ids = [ids[index] for index in valid_indices]
+        invalid_ids = [
+            ids[index]
+            for index in range(len(outputs))
+            if index not in set(valid_indices)
+        ]
+    else:
+        valid_ids = [str(index) for index in valid_indices]
+        invalid_ids = [
+            str(index)
+            for index in range(len(outputs))
+            if index not in set(valid_indices)
+        ]
     return {
-        "refusal_rate": refusal_rate(outputs),
-        "refusal_flags": [contains_refusal(output) for output in outputs],
+        "refusal_rate": rate,
+        "refusal_flags": flags,
+        "n_valid": len(valid_indices),
+        "n_invalid": len(outputs) - len(valid_indices),
+        "valid_ids": valid_ids,
+        "invalid_ids": invalid_ids,
     }
 
 
@@ -532,6 +581,7 @@ def generate_responses(
     format_style: str = FORMAT_STYLE_GEMMA,
     pre_hooks: Sequence[tuple[object, object]] = (),
     forward_hooks: Sequence[tuple[object, object]] = (),
+    invalid_on_decode_error: bool = False,
 ) -> list[str]:
     responses = []
     for start in range(0, len(examples), batch_size):
@@ -556,13 +606,16 @@ def generate_responses(
                 pad_token_id=tokenizer.pad_token_id,
             )
         continuations = generated[:, prompt_length:]
-        responses.extend(
-            text.strip()
-            for text in tokenizer.batch_decode(
+        try:
+            decoded = tokenizer.batch_decode(
                 continuations,
                 skip_special_tokens=True,
             )
-        )
+        except Exception:
+            if not invalid_on_decode_error:
+                raise
+            decoded = ["\ufffd"] * continuations.shape[0]
+        responses.extend(text.strip() for text in decoded)
     if not responses:
         raise ValueError("examples must not be empty")
     return responses
@@ -645,15 +698,43 @@ def _mean(values: Sequence[float]) -> float:
     return float(sum(values) / len(values))
 
 
-def _provenance(model, dtype: torch.dtype, config: dict) -> dict:
+def implementation_commit_hash() -> str:
+    env = os.environ.get("REFUSAL_IMPLEMENTATION_COMMIT")
+    if env:
+        return env.strip()
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0 and completed.stdout.strip():
+        return completed.stdout.strip()
+    return "unknown"
+
+
+def _provenance(
+    model,
+    dtype: torch.dtype,
+    config: dict,
+    *,
+    run_id: str | None = None,
+) -> dict:
     model_revision = getattr(model.config, "_commit_hash", None)
-    return {
+    payload = {
         "upstream_commit": config["upstream_commit"],
         "model_name": config["model_name"],
         "requested_model_revision": config["model_revision"],
         "resolved_model_revision": model_revision,
         "runtime": runtime_info(dtype).to_dict(),
     }
+    if run_id is not None or _record_example_ids(config):
+        payload["run_id"] = run_id or config.get("run_id")
+        payload["implementation_commit"] = config.get(
+            "implementation_commit"
+        ) or implementation_commit_hash()
+    return payload
 
 
 def _write_raw_json(path: Path, payload: dict) -> None:
@@ -667,13 +748,25 @@ def _write_raw_json(path: Path, payload: dict) -> None:
 def _condition_payload(
     outputs: Sequence[str],
     scores: torch.Tensor,
+    *,
+    examples: Sequence[PromptExample] | None = None,
+    config: dict | None = None,
 ) -> dict:
-    generated = summarize_generated_condition(outputs)
+    count_valid = bool(config is not None and not config.get("filter_by_behavior", True))
+    generated = summarize_generated_condition(
+        outputs,
+        examples=examples,
+        count_valid=count_valid,
+    )
     return {
         **generated,
         "mean_refusal_log_odds": float(scores.mean()),
         "per_example_refusal_log_odds": scores.tolist(),
     }
+
+
+def _count_valid(config: dict) -> bool:
+    return not config.get("filter_by_behavior", True)
 
 
 def _load_model_for_config(config: dict):
@@ -690,6 +783,7 @@ def run_baseline_stage(
     root: Path,
     *,
     profile: str = "gemma_2b.json",
+    run_id: str | None = None,
 ) -> dict:
     root = root.resolve()
     config = load_config(root, profile=profile)
@@ -774,6 +868,7 @@ def run_baseline_stage(
         batch_size=config["batch_size"],
         max_new_tokens=config["max_new_tokens"],
         format_style=format_style,
+        invalid_on_decode_error=_count_valid(config),
     )
     harmless_outputs = generate_responses(
         model,
@@ -782,6 +877,7 @@ def run_baseline_stage(
         batch_size=config["batch_size"],
         max_new_tokens=config["max_new_tokens"],
         format_style=format_style,
+        invalid_on_decode_error=_count_valid(config),
     )
     harmless_losses = prompt_cross_entropy_losses(
         model,
@@ -811,6 +907,8 @@ def run_baseline_stage(
                 keep_positive=True,
                 config=config,
             ),
+            examples=harmful_val_filtered,
+            config=config,
         ),
         "harmless_validation": _condition_payload(
             harmless_outputs,
@@ -819,6 +917,8 @@ def run_baseline_stage(
                 keep_positive=False,
                 config=config,
             ),
+            examples=harmless_val_filtered,
+            config=config,
         ),
         "harmless_prompt_cross_entropy": {
             "mean": _mean(harmless_losses),
@@ -827,11 +927,15 @@ def run_baseline_stage(
     }
     if _record_example_ids(config):
         results["example_ids"] = _ids_from_splits(splits)
+        results["content_hashes"] = {
+            name: content_hashes_for_examples(items)
+            for name, items in splits.items()
+        }
     artifact = ArtifactEnvelope(
         experiment="baseline",
         config=config,
         results=results,
-        provenance=_provenance(model, dtype, config),
+        provenance=_provenance(model, dtype, config, run_id=run_id),
     )
     write_artifact(results_dir / "01_baseline.json", artifact)
     _write_raw_json(
@@ -849,6 +953,7 @@ def run_extract_stage(
     root: Path,
     *,
     profile: str = "gemma_2b.json",
+    run_id: str | None = None,
 ) -> dict:
     root = root.resolve()
     config = load_config(root, profile=profile)
@@ -926,11 +1031,15 @@ def run_extract_stage(
             "harmful_train": _ids_from_examples(harmful),
             "harmless_train": _ids_from_examples(harmless),
         }
+        results["content_hashes"] = {
+            "harmful_train": content_hashes_for_examples(harmful),
+            "harmless_train": content_hashes_for_examples(harmless),
+        }
     artifact = ArtifactEnvelope(
         experiment="extract_candidate_directions",
         config=config,
         results=results,
-        provenance=_provenance(model, dtype, config),
+        provenance=_provenance(model, dtype, config, run_id=run_id),
     )
     write_artifact(results_dir / "02_candidates.json", artifact)
     release_compute_resources(model, tokenizer)
@@ -941,6 +1050,7 @@ def run_intervention_stage(
     root: Path,
     *,
     profile: str = "gemma_2b.json",
+    run_id: str | None = None,
 ) -> dict:
     root = root.resolve()
     config = load_config(root, profile=profile)
@@ -1107,6 +1217,7 @@ def run_intervention_stage(
             format_style=format_style,
             pre_hooks=pre_hooks,
             forward_hooks=forward_hooks,
+            invalid_on_decode_error=_count_valid(config),
         )
         scores_for_condition = refusal_log_odds(
             logits,
@@ -1115,6 +1226,8 @@ def run_intervention_stage(
         aggregate_conditions[name] = _condition_payload(
             outputs,
             scores_for_condition,
+            examples=examples,
+            config=config,
         )
         raw_outputs[name] = outputs
 
@@ -1172,11 +1285,25 @@ def run_intervention_stage(
                 harmless
             ),
         }
+        results["content_hashes"] = {
+            f"harmful_{SPLIT_NAME_TO_SUFFIX[selection_split]}": content_hashes_for_examples(
+                selection_harmful
+            ),
+            f"harmless_{SPLIT_NAME_TO_SUFFIX[selection_split]}": content_hashes_for_examples(
+                selection_harmless
+            ),
+            f"harmful_{SPLIT_NAME_TO_SUFFIX[final_split]}": content_hashes_for_examples(
+                harmful
+            ),
+            f"harmless_{SPLIT_NAME_TO_SUFFIX[final_split]}": content_hashes_for_examples(
+                harmless
+            ),
+        }
     artifact = ArtifactEnvelope(
         experiment="causal_interventions",
         config=config,
         results=results,
-        provenance=_provenance(model, dtype, config),
+        provenance=_provenance(model, dtype, config, run_id=run_id),
     )
     write_artifact(results_dir / "03_interventions.json", artifact)
     _write_raw_json(
@@ -1191,6 +1318,7 @@ def run_evaluation_stage(
     root: Path,
     *,
     profile: str = "gemma_2b.json",
+    run_id: str | None = None,
 ) -> dict:
     root = root.resolve()
     config = load_config(root, profile=profile)
@@ -1347,11 +1475,16 @@ def run_evaluation_stage(
                 harmless
             ),
         }
+        results["content_hashes"] = {
+            f"harmless_{SPLIT_NAME_TO_SUFFIX[final_split]}": content_hashes_for_examples(
+                harmless
+            ),
+        }
     artifact = ArtifactEnvelope(
         experiment="final_evaluation",
         config=config,
         results=results,
-        provenance=_provenance(model, dtype, config),
+        provenance=_provenance(model, dtype, config, run_id=run_id),
     )
     write_artifact(results_dir / "final_evaluation.json", artifact)
     manifest = ArtifactEnvelope(
@@ -1371,7 +1504,7 @@ def run_evaluation_stage(
                 "final_evaluation.json",
             ],
         },
-        provenance=_provenance(model, dtype, config),
+        provenance=_provenance(model, dtype, config, run_id=run_id),
     )
     write_artifact(
         results_dir / "execution_manifest.json",
@@ -1381,12 +1514,55 @@ def run_evaluation_stage(
     return asdict(artifact)
 
 
+def generated_token_scores(
+    model,
+    tokenizer,
+    examples: Sequence[PromptExample],
+    *,
+    batch_size: int,
+    max_new_tokens: int,
+    format_style: str = FORMAT_STYLE_GEMMA,
+) -> torch.Tensor:
+    collected = []
+    for start in range(0, len(examples), batch_size):
+        texts = [item.text for item in examples[start : start + batch_size]]
+        batch = _device_batch(
+            model,
+            tokenize_instructions(
+                tokenizer,
+                texts,
+                format_style=format_style,
+            ),
+        )
+        generated = model.generate(
+            **batch,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            output_scores=True,
+            return_dict_in_generate=True,
+        )
+        scores = getattr(generated, "scores", None)
+        if not scores:
+            raise ValueError("generate did not return generated-token scores")
+        collected.append(
+            torch.stack(
+                [step.detach().float().cpu() for step in scores],
+                dim=1,
+            )
+        )
+    if not collected:
+        raise ValueError("examples must not be empty")
+    return torch.cat(collected)
+
+
 def run_preflight_stage(
     root: Path,
     *,
     profile: str = "qwen25_coder_7b.json",
     load_model=None,
     cuda_available: bool | None = None,
+    run_id: str | None = None,
 ) -> dict:
     root = root.resolve()
     config = load_config(root, profile=profile)
@@ -1438,15 +1614,24 @@ def run_preflight_stage(
             )
         probes = harmful + harmless
         format_style = _format_style(config)
-        logits = last_token_logits(
+        resolved = getattr(model.config, "_commit_hash", None)
+        requested = config["model_revision"]
+        if resolved != requested:
+            raise ValueError(
+                f"resolved revision {resolved} does not match requested {requested}"
+            )
+        scores = generated_token_scores(
             model,
             tokenizer,
             probes,
             batch_size=config["batch_size"],
+            max_new_tokens=min(8, int(config["max_new_tokens"])),
             format_style=format_style,
         )
-        if not torch.isfinite(logits).all():
-            raise ValueError("non-finite logits during preflight generation")
+        if not torch.isfinite(scores).all():
+            raise ValueError(
+                "non-finite generated-token scores during preflight"
+            )
         generate_responses(
             model,
             tokenizer,
@@ -1454,6 +1639,7 @@ def run_preflight_stage(
             batch_size=config["batch_size"],
             max_new_tokens=min(8, int(config["max_new_tokens"])),
             format_style=format_style,
+            invalid_on_decode_error=True,
         )
         results = {
             "cuda_available": True,
@@ -1475,7 +1661,7 @@ def run_preflight_stage(
             experiment="preflight",
             config=config,
             results=results,
-            provenance=_provenance(model, dtype, config),
+            provenance=_provenance(model, dtype, config, run_id=run_id),
         )
         write_artifact(results_dir / "00_preflight.json", artifact)
         return asdict(artifact)

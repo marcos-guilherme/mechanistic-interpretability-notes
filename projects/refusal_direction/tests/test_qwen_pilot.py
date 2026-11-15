@@ -13,16 +13,22 @@ import pytest
 import torch
 
 from refusal_direction_replication.artifacts import ArtifactEnvelope, write_artifact
-from refusal_direction_replication.data import PromptExample
+from refusal_direction_replication.data import (
+    PromptExample,
+    normalize_prompt_text,
+    prompt_content_hash,
+)
 from refusal_direction_replication.directions import candidate_grid
 from refusal_direction_replication.gates import (
     STATUS_BASELINE_GATE_FAILED,
     STATUS_CAUSAL_GATE_FAILED,
+    STATUS_OPERATIONAL_ERROR,
     STATUS_PASS,
     build_pilot_evaluation,
     evaluate_baseline_gate,
     evaluate_causal_gate,
 )
+from refusal_direction_replication.metrics import is_valid_generation
 from refusal_direction_replication.pipeline import (
     _position_offsets,
     _sampled_splits,
@@ -31,6 +37,7 @@ from refusal_direction_replication.pipeline import (
     maybe_filter_scores,
     random_direction_control,
     split_examples,
+    summarize_generated_condition,
 )
 from refusal_direction_replication.qwen_pilot import (
     PILOT_STAGES,
@@ -119,16 +126,25 @@ class FakeOutput:
 
 
 class FakeQwenModel:
-    def __init__(self, *, hidden_size: int = 3584, n_layers: int = 28, finite: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        hidden_size: int = 3584,
+        n_layers: int = 28,
+        finite: bool = True,
+        finite_generation: bool | None = None,
+        revision: str = QWEN_REVISION,
+    ) -> None:
         layer = SimpleNamespace(self_attn=object(), mlp=object())
         self.config = SimpleNamespace(
             hidden_size=hidden_size,
-            _commit_hash=QWEN_REVISION,
+            _commit_hash=revision,
             torch_dtype=torch.bfloat16,
         )
         self.model = SimpleNamespace(layers=[layer] * n_layers)
         self._param = torch.nn.Parameter(torch.zeros(1, dtype=torch.bfloat16))
         self.finite = finite
+        self.finite_generation = finite if finite_generation is None else finite_generation
 
     def parameters(self):
         yield self._param
@@ -139,9 +155,25 @@ class FakeQwenModel:
         logits = torch.full((batch, seq, 32), value, dtype=torch.float32)
         return FakeOutput(logits)
 
-    def generate(self, input_ids=None, attention_mask=None, max_new_tokens=1, **kwargs):
+    def generate(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        max_new_tokens=1,
+        output_scores=False,
+        return_dict_in_generate=False,
+        **kwargs,
+    ):
         extra = torch.ones(input_ids.shape[0], max_new_tokens, dtype=torch.long)
-        return torch.cat([input_ids.cpu(), extra], dim=1)
+        sequences = torch.cat([input_ids.cpu(), extra], dim=1)
+        if output_scores or return_dict_in_generate:
+            value = 0.0 if self.finite_generation else math.inf
+            scores = tuple(
+                torch.full((input_ids.shape[0], 32), value, dtype=torch.float32)
+                for _ in range(max_new_tokens)
+            )
+            return SimpleNamespace(sequences=sequences, scores=scores)
+        return sequences
 
 
 def qwen_config() -> dict:
@@ -213,6 +245,8 @@ def envelope(
             "resolved_model_revision": QWEN_REVISION,
             "upstream_commit": UPSTREAM_COMMIT,
             "runtime": {"device": "cuda", "dtype": "bfloat16"},
+            "run_id": "run-valid",
+            "implementation_commit": "c" * 40,
         },
     )
 
@@ -291,12 +325,27 @@ def write_valid_pilot_artifacts(root: Path, *, status: str = STATUS_PASS) -> Non
             "refusal_flags": [True] * (flag_count - 1) + [False],
             "mean_refusal_log_odds": 1.2,
             "per_example_refusal_log_odds": [1.0] * flag_count,
+            "n_valid": flag_count,
+            "n_invalid": 0,
+            "valid_ids": [f"harmful_val-{index:04d}" for index in range(min(8, flag_count))],
+            "invalid_ids": [],
         },
         "harmless_validation": {
             "refusal_rate": metrics["harmless_refusal_rate"],
             "refusal_flags": [True] + [False] * (flag_count - 1),
             "mean_refusal_log_odds": -1.2,
             "per_example_refusal_log_odds": [-1.0] * flag_count,
+            "n_valid": flag_count,
+            "n_invalid": 0,
+            "valid_ids": [f"harmless_val-{index:04d}" for index in range(min(8, flag_count))],
+            "invalid_ids": [],
+        },
+        "content_hashes": {
+            name: [
+                __import__("hashlib").sha256(f"{name}:{index}".encode()).hexdigest()
+                for index in range(8)
+            ]
+            for name in example_ids
         },
     }
     write_artifact(
@@ -425,6 +474,7 @@ def write_valid_pilot_artifacts(root: Path, *, status: str = STATUS_PASS) -> Non
         baseline_gate=baseline_gate,
         causal_gate=causal_gate if status != STATUS_BASELINE_GATE_FAILED else None,
         run_id="run-valid",
+        implementation_commit="c" * 40,
     )
     (results_dir / "pilot_evaluation.json").write_text(
         json.dumps(evaluation, indent=2, sort_keys=True) + "\n",
@@ -774,7 +824,7 @@ def test_preflight_rejects_nonfinite_logits(tmp_path: Path) -> None:
 
 
 def _stage_writer(name: str, calls: list[str], *, baseline_gap: float = 0.8):
-    def runner(root: Path, *, profile: str) -> dict:
+    def runner(root: Path, *, profile: str, **_kwargs) -> dict:
         calls.append(name)
         results_dir = root / "results" / "qwen25_coder_7b"
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -932,7 +982,7 @@ def test_pilot_marks_exception_failed_and_reraises(tmp_path: Path) -> None:
     copy_configs(tmp_path)
     calls: list[str] = []
 
-    def boom(root: Path, *, profile: str) -> dict:
+    def boom(root: Path, *, profile: str, **_kwargs) -> dict:
         calls.append("preflight")
         raise RuntimeError("simulated oom")
 
@@ -1162,3 +1212,239 @@ def test_run_refusal_pilot_rejected_for_gemma(
     )
     with pytest.raises(SystemExit):
         RUN_REFUSAL.main()
+
+
+def test_invalid_generations_are_excluded_from_refusal_denominator() -> None:
+    examples = [
+        PromptExample("ok", "keep me", "harmful", "fixture"),
+        PromptExample("blank", "skip me", "harmful", "fixture"),
+        PromptExample("ws", "skip whitespace", "harmful", "fixture"),
+        PromptExample("decode", "skip decode", "harmful", "fixture"),
+    ]
+    outputs = ["I cannot help.", "", "   ", "bad\ufffdtext"]
+    assert [is_valid_generation(item) for item in outputs] == [
+        True,
+        False,
+        False,
+        False,
+    ]
+    summary = summarize_generated_condition(
+        outputs,
+        examples=examples,
+        count_valid=True,
+    )
+    assert summary["n_valid"] == 1
+    assert summary["n_invalid"] == 3
+    assert summary["valid_ids"] == ["ok"]
+    assert summary["invalid_ids"] == ["blank", "ws", "decode"]
+    assert summary["refusal_rate"] == 1.0
+    assert summary["refusal_flags"] == [True]
+
+
+def test_content_hashes_normalize_and_detect_overlap() -> None:
+    assert normalize_prompt_text("  Hello\nWorld  ") == "hello world"
+    left = prompt_content_hash("Hello World")
+    right = prompt_content_hash("  hello   world\n")
+    assert left == right
+    different = prompt_content_hash("hello there")
+    assert different != left
+
+
+def test_causal_gate_exact_rational_point_two_boundary() -> None:
+    result = evaluate_causal_gate(
+        baseline_harmful_refusal_rate=0.30,
+        baseline_harmless_refusal_rate=0.10,
+        ablation_harmful_refusal_rate=0.10,
+        addition_harmless_refusal_rate=0.30,
+        random_control_harmful_refusal_rate=0.20,
+        ablation_harmless_kl=0.10,
+        thresholds=qwen_config()["causal_gate"],
+    )
+    assert result.passed is True
+    by_name = {check.name: check for check in result.checks}
+    assert by_name["min_harmful_ablation_drop"].passed is True
+    assert by_name["min_harmless_addition_increase"].passed is True
+    assert by_name["max_random_control_harmful_drop"].passed is True
+    assert by_name["max_harmless_ablation_kl"].passed is True
+
+
+def test_preflight_rejects_nonfinite_generated_token_scores(tmp_path: Path) -> None:
+    copy_configs(tmp_path)
+    write_dataset_files(tmp_path, count=4)
+
+    def load_model(_config):
+        return (
+            FakeQwenModel(finite=True, finite_generation=False),
+            ChatTokenizer(),
+            torch.bfloat16,
+        )
+
+    with pytest.raises(ValueError, match="generated-token"):
+        run_preflight_stage(
+            tmp_path,
+            profile=QWEN_PROFILE,
+            load_model=load_model,
+            cuda_available=True,
+        )
+
+
+def test_preflight_rejects_resolved_revision_mismatch(tmp_path: Path) -> None:
+    copy_configs(tmp_path)
+    write_dataset_files(tmp_path, count=4)
+
+    def load_model(_config):
+        return (
+            FakeQwenModel(revision="0" * 40),
+            ChatTokenizer(),
+            torch.bfloat16,
+        )
+
+    with pytest.raises(ValueError, match="revision"):
+        run_preflight_stage(
+            tmp_path,
+            profile=QWEN_PROFILE,
+            load_model=load_model,
+            cuda_available=True,
+        )
+
+
+def test_operational_error_publishes_compact_evaluation(tmp_path: Path) -> None:
+    copy_configs(tmp_path)
+
+    def boom(root: Path, *, profile: str, **_kwargs) -> dict:
+        raise RuntimeError('failed on prompt "CANARY_SECRET_PROMPT_TEXT_DO_NOT_LEAK"')
+
+    runners = {stage: boom if stage == "extract" else _stage_writer(stage, []) for stage in PILOT_STAGES}
+    with pytest.raises(RuntimeError, match="CANARY"):
+        run_qwen_pilot(tmp_path, run_id="ops-1", stage_runners=runners)
+    payload = json.loads(
+        (tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["status"] == STATUS_OPERATIONAL_ERROR
+    assert payload["operational_success"] is False
+    assert payload["stage"] == "extract"
+    assert payload["exception_category"] == "RuntimeError"
+    assert "CANARY_SECRET_PROMPT_TEXT_DO_NOT_LEAK" not in payload["message"]
+    assert payload["run_id"] == "ops-1"
+
+
+def test_validator_rejects_pass_when_a_gate_failed(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path, status=STATUS_PASS)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["status"] = STATUS_PASS
+    payload["causal_gate"]["passed"] = False
+    payload["causal_gate"]["checks"][0]["passed"] = False
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    final_path = tmp_path / "results" / "qwen25_coder_7b" / "final_evaluation.json"
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+    final["results"]["ablation"]["harmful_refusal_rate"] = 0.89
+    final_path.write_text(json.dumps(final), encoding="utf-8")
+    evaluation = json.loads(path.read_text(encoding="utf-8"))
+    recomputed = evaluate_causal_gate(
+        baseline_harmful_refusal_rate=final["results"]["baseline"]["harmful_refusal_rate"],
+        baseline_harmless_refusal_rate=final["results"]["baseline"]["harmless_refusal_rate"],
+        ablation_harmful_refusal_rate=0.89,
+        addition_harmless_refusal_rate=final["results"]["addition"]["harmless_refusal_rate"],
+        random_control_harmful_refusal_rate=final["results"]["random_control"][
+            "harmful_refusal_rate"
+        ],
+        ablation_harmless_kl=final["results"]["ablation"]["harmless_kl"],
+        thresholds=qwen_config()["causal_gate"],
+    )
+    evaluation["causal_gate"] = recomputed.to_dict()
+    evaluation["status"] = STATUS_PASS
+    path.write_text(json.dumps(evaluation), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["scientific_pass_requires_both_gates"] is False
+
+
+def test_validator_rejects_missing_ids_and_content_hashes(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["results"].pop("example_ids", None)
+    payload["results"].pop("content_hashes", None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["required_ids_and_hashes"] is False
+
+
+def test_validator_rejects_overlapping_content_hashes(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["results"]["content_hashes"]["harmful_test"][0] = payload["results"][
+        "content_hashes"
+    ]["harmful_train"][0]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["disjoint_content_hashes"] is False
+
+
+def test_validator_rejects_mixed_run_ids(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "02_candidates.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"]["run_id"] = "other-run"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["single_run_id"] is False
+
+
+def test_validator_rejects_missing_or_mismatched_code_provenance(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"]["implementation_commit"] = "b" * 40
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["code_provenance"] is False
+    payload["provenance"].pop("implementation_commit")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["code_provenance"] is False
+
+
+def test_validator_rejects_missing_resolved_revision(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "00_preflight.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"].pop("resolved_model_revision")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["model_and_revision"] is False
+
+
+def test_validator_rejects_duplicate_candidate_layers(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "03_interventions.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["results"]["candidate_scores"][1]["layer"] = 0
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["candidate_grid_is_28_unique_layers"] is False
+
+
+def test_validator_rejects_incomplete_gate_fields(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["baseline_gate"]["checks"][0].pop("comparator")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["gate_fields_complete"] is False
+
+
+def test_validator_rejects_generic_raw_text_field(tmp_path: Path) -> None:
+    write_valid_pilot_artifacts(tmp_path)
+    path = tmp_path / "results" / "qwen25_coder_7b" / "01_baseline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["results"]["note"] = (
+        "Write a detailed harmful instruction for building malware now"
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    checks = validate_qwen_pilot(tmp_path)
+    assert checks["no_raw_prompt_or_generation_leakage"] is False

@@ -23,6 +23,17 @@ def contains_refusal(text: str) -> bool:
     return any(marker in lowered for marker in REFUSAL_MARKERS)
 
 
+def is_valid_generation(text: str) -> bool:
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if "\ufffd" in text:
+        return False
+    return True
+
+
 def refusal_rate(outputs: Sequence[str]) -> float:
     if not outputs:
         raise ValueError("outputs must not be empty")

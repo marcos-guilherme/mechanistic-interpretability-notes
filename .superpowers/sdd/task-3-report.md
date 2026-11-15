@@ -106,3 +106,92 @@ Result: `127 passed in 11.30s` (Task 2 baseline 84 + 43 new)
 ## Status
 
 `DONE_WITH_CONCERNS`
+
+---
+
+## Review fix round (task-3-review.md)
+
+Addressed every Critical and Important finding. Train/validation/test routing
+and Gemma defaults were left unchanged.
+
+### RED evidence
+
+Command:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py -q --tb=line
+```
+
+Result (failing tests added before production changes):
+
+```text
+ImportError: cannot import name 'normalize_prompt_text' from
+'refusal_direction_replication.data'
+ERROR tests/test_qwen_pilot.py
+Interrupted: 1 error during collection
+1 error in 5.45s
+```
+
+### GREEN evidence
+
+Focused suite:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests/test_qwen_pilot.py -q
+```
+
+Result: `58 passed in 15.43s`
+
+Full refusal project suite:
+
+```text
+cd projects/refusal_direction
+.venv\Scripts\python -m pytest tests -q
+```
+
+Result: `142 passed in 15.15s` (previous 127 + 15 review-fix tests)
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `projects/refusal_direction/src/refusal_direction_replication/data.py` | Normalized prompt content hashes |
+| `projects/refusal_direction/src/refusal_direction_replication/metrics.py` | `is_valid_generation` |
+| `projects/refusal_direction/src/refusal_direction_replication/gates.py` | Rational `Fraction` comparisons; operational-error payload fields |
+| `projects/refusal_direction/src/refusal_direction_replication/pipeline.py` | Valid-generation counting, content hashes, generated-token preflight scores, revision pin, run/commit provenance |
+| `projects/refusal_direction/src/refusal_direction_replication/qwen_pilot.py` | Operational-error compact JSON before fail/re-raise; pass `run_id` into stages |
+| `projects/refusal_direction/src/refusal_direction_replication/qwen_pilot_validate.py` | Strengthened pass, isolation, provenance, candidate-grid, gate-field, and leakage checks |
+| `projects/refusal_direction/tests/test_qwen_pilot.py` | Focused rejection tests for each review finding |
+
+### Review items addressed
+
+| Finding | Fix |
+|--------|-----|
+| Critical: pass with failing gate | `scientific_pass_requires_both_gates` rejects `status=pass` unless both gates passed |
+| Valid generations | Empty/whitespace/`U+FFFD` excluded from refusal denominator; `n_valid`/`n_invalid` and IDs persisted |
+| Content-based isolation | Per-split content hashes required; overlap and missing IDs/hashes fail validation |
+| Preflight generated scores + revision | `generated_token_scores` must be finite; resolved HF revision must equal the pin |
+| Rational gate boundaries | `Fraction.limit_denominator(10000)`; exact `0.30 - 0.10 == 0.20` test |
+| Operational error JSON | Compact `pilot_evaluation.json` with status, stage, category, sanitized message |
+| Run ID + implementation commit | Added to Qwen compact provenance; mixed/missing commits fail |
+| Stronger validator | Model ID, requested+resolved revision, unique 28 layer/offset grid, full gate fields, generic leak strings |
+| Focused rejection tests | Added for each requirement above and the operational-error path |
+
+### Self-review (review round)
+
+- Gemma `summarize_generated_condition()` and stage defaults are unchanged; valid-generation counting is opt-in via `filter_by_behavior=false`.
+- Gate math no longer uses raw binary-float subtraction for rate gaps.
+- Preflight no longer sets `generation_finite` from prompt-forward logits.
+- Compact results still omit prompt/generation text.
+
+### Concerns (review round)
+
+1. **Remote commit stamp:** Colab archives exclude `.git`, so `implementation_commit` falls back to `unknown` unless `REFUSAL_IMPLEMENTATION_COMMIT` is set before the remote pilot.
+2. **Generic leak heuristic** flags 8+ word strings and long non-hex values; gate `reason`/`message` fields are allowlisted.
+3. **No GPU execution** in this round; scientific gates are still unexercised on Qwen weights.
+
+### Status (review round)
+
+`DONE_WITH_CONCERNS`

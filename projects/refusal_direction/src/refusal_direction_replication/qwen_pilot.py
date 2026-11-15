@@ -9,6 +9,7 @@ between stages.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -17,12 +18,14 @@ from typing import Any
 from .gates import (
     STATUS_BASELINE_GATE_FAILED,
     STATUS_CAUSAL_GATE_FAILED,
+    STATUS_OPERATIONAL_ERROR,
     STATUS_PASS,
     build_pilot_evaluation,
     evaluate_baseline_gate,
     evaluate_causal_gate,
 )
 from .pipeline import (
+    implementation_commit_hash,
     load_config,
     project_paths,
     release_compute_resources,
@@ -59,22 +62,28 @@ def resolve_run_id(artifacts_dir: Path, requested: str | None = None) -> str:
     return str(uuid.uuid4())
 
 
+def sanitize_exception_message(message: str, *, limit: int = 240) -> str:
+    cleaned = re.sub(r"(['\"]).{20,}\1", '"<redacted>"', message)
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:limit]
+
+
 def _default_stage_runners() -> dict[str, StageRunner]:
     return {
-        "preflight": lambda root, *, profile: run_preflight_stage(
-            root, profile=profile
+        "preflight": lambda root, *, profile, run_id=None: run_preflight_stage(
+            root, profile=profile, run_id=run_id
         ),
-        "baseline": lambda root, *, profile: run_baseline_stage(
-            root, profile=profile
+        "baseline": lambda root, *, profile, run_id=None: run_baseline_stage(
+            root, profile=profile, run_id=run_id
         ),
-        "extract": lambda root, *, profile: run_extract_stage(
-            root, profile=profile
+        "extract": lambda root, *, profile, run_id=None: run_extract_stage(
+            root, profile=profile, run_id=run_id
         ),
-        "interventions": lambda root, *, profile: run_intervention_stage(
-            root, profile=profile
+        "interventions": lambda root, *, profile, run_id=None: run_intervention_stage(
+            root, profile=profile, run_id=run_id
         ),
-        "evaluation": lambda root, *, profile: run_evaluation_stage(
-            root, profile=profile
+        "evaluation": lambda root, *, profile, run_id=None: run_evaluation_stage(
+            root, profile=profile, run_id=run_id
         ),
     }
 
@@ -98,8 +107,8 @@ def _baseline_gate_from_artifact(path: Path, config: dict[str, Any]):
     harmful = results["harmful_validation"]
     harmless = results["harmless_validation"]
     return evaluate_baseline_gate(
-        harmful_count=len(harmful["refusal_flags"]),
-        harmless_count=len(harmless["refusal_flags"]),
+        harmful_count=int(harmful.get("n_valid", len(harmful["refusal_flags"]))),
+        harmless_count=int(harmless.get("n_valid", len(harmless["refusal_flags"]))),
         harmful_refusal_rate=float(harmful["refusal_rate"]),
         harmless_refusal_rate=float(harmless["refusal_rate"]),
         thresholds=config["baseline_gate"],
@@ -189,6 +198,7 @@ def run_qwen_pilot(
 
     runners = stage_runners or _default_stage_runners()
     releaser = release_resources or release_compute_resources
+    commit = implementation_commit_hash()
     last_evaluation: dict[str, Any] | None = None
 
     for stage in PILOT_STAGES:
@@ -197,7 +207,7 @@ def run_qwen_pilot(
         try:
             store.initialize(stage=stage, total_units=1)
             store.begin_running()
-            runners[stage](root, profile=profile)
+            runners[stage](root, profile=profile, run_id=resolved_run_id)
             if stage == "baseline":
                 baseline_gate = _baseline_gate_from_artifact(
                     results_dir / "01_baseline.json",
@@ -210,6 +220,7 @@ def run_qwen_pilot(
                         baseline_gate=baseline_gate,
                         causal_gate=None,
                         run_id=resolved_run_id,
+                        implementation_commit=commit,
                     )
                     _write_pilot_evaluation(results_dir, last_evaluation)
                     store.abort(gate="baseline", reason=baseline_gate.reason)
@@ -232,6 +243,7 @@ def run_qwen_pilot(
                     baseline_gate=baseline_gate,
                     causal_gate=causal_gate,
                     run_id=resolved_run_id,
+                    implementation_commit=commit,
                 )
                 _write_pilot_evaluation(results_dir, last_evaluation)
                 if not causal_gate.passed:
@@ -239,8 +251,23 @@ def run_qwen_pilot(
                     return last_evaluation
             store.complete_stage()
         except Exception as exc:
+            last_evaluation = build_pilot_evaluation(
+                status=STATUS_OPERATIONAL_ERROR,
+                operational_success=False,
+                baseline_gate=None,
+                causal_gate=None,
+                run_id=resolved_run_id,
+                stage=stage,
+                exception_category=type(exc).__name__,
+                message=sanitize_exception_message(str(exc)),
+                implementation_commit=commit,
+            )
             try:
-                store.fail(str(exc))
+                _write_pilot_evaluation(results_dir, last_evaluation)
+            except Exception:
+                pass
+            try:
+                store.fail(sanitize_exception_message(str(exc)))
             except Exception:
                 pass
             raise
@@ -254,6 +281,7 @@ def run_qwen_pilot(
             baseline_gate=None,
             causal_gate=None,
             run_id=resolved_run_id,
+            implementation_commit=commit,
         )
         existing = results_dir / "pilot_evaluation.json"
         if existing.is_file():
