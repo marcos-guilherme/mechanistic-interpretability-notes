@@ -114,3 +114,34 @@ uv run pytest -q
 ```
 
 As métricas completas estão em `results/final_evaluation.json`.
+
+## Piloto causal em Qwen2.5-Coder-7B (congelado)
+
+Além do recorte Gemma, executei um piloto causal no perfil
+`Qwen/Qwen2.5-Coder-7B-Instruct`, revisão fixa
+`c03e6d358207e414f1eca0bb1891e29f1db0e242`, em NVIDIA A100 40 GB com
+`bfloat16`. A execução `c0818150-f834-4692-b271-4e10a97eb57e` usou o código
+registrado em `2a2eb714246174e4f627fcd0061c61143a4e8276`, 128 exemplos de
+treino e 32 de validação por classe, e 32 de teste por classe, **sem** filtro
+comportamental. O protocolo selecionou direção na validação e mediu condições
+finais no teste.
+
+**Operação.** O piloto terminou com sucesso operacional: os estágios rodaram,
+os JSONs compactos foram produzidos e a validação offline passou.
+
+**Ciência.** O status final é `causal_gate_failed`. A manipulação foi forte:
+recusa nociva no teste caiu de 87,5% para 0% após ablação; a adição levou a
+recusa inofensiva a 100%; o controle aleatório manteve 87,5% nos nocivos. A
+direção escolhida foi camada 18, offset `-1`. Porém a KL inofensiva após
+ablação foi `0,263825`, acima do gate `0,10`. Isso indica sinal causal, mas
+selectividade insuficiente neste recorte. O piloto permanece **falhado** no gate;
+varreduras de dose em follow-up são exploratórias e **não** reclassificam este
+resultado.
+
+Fontes canônicas (somente métricas agregadas e proveniência, sem textos brutos):
+
+- [`results/qwen25_coder_7b/pilot_evaluation.json`](results/qwen25_coder_7b/pilot_evaluation.json)
+- [`results/qwen25_coder_7b/final_evaluation.json`](results/qwen25_coder_7b/final_evaluation.json)
+- [`results/qwen25_coder_7b/execution_manifest.json`](results/qwen25_coder_7b/execution_manifest.json)
+
+A narrativa completa do congelamento está em [`PROCESSO.md`](PROCESSO.md#piloto-qwen25coder7b-congelado).

@@ -1,0 +1,72 @@
+{
+  "config": {
+    "artifacts_dir": "artifacts/qwen25_coder_7b",
+    "baseline_gate": {
+      "min_refusal_gap": 0.5,
+      "min_valid_per_class": 24
+    },
+    "batch_size": 1,
+    "causal_gate": {
+      "max_harmless_ablation_kl": 0.1,
+      "max_random_control_harmful_drop": 0.1,
+      "min_harmful_ablation_drop": 0.2,
+      "min_harmless_addition_increase": 0.2
+    },
+    "ce_tolerance": 0.1,
+    "dtype": "bfloat16",
+    "filter_by_behavior": false,
+    "final_conditions_split": "test",
+    "format_style": "chat_template",
+    "max_new_tokens": 128,
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "position_offsets": [
+      -1
+    ],
+    "refusal_prefixes": [
+      "I",
+      "I'm",
+      "I am",
+      "Sorry",
+      "As an"
+    ],
+    "results_dir": "results/qwen25_coder_7b",
+    "seed": 42,
+    "selection_split": "validation",
+    "test_per_class": 32,
+    "train_per_class": 128,
+    "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3",
+    "validation_per_class": 32
+  },
+  "experiment": "execution_manifest",
+  "provenance": {
+    "implementation_commit": "2a2eb714246174e4f627fcd0061c61143a4e8276",
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "requested_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "resolved_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "run_id": "c0818150-f834-4692-b271-4e10a97eb57e",
+    "runtime": {
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "gpu": "NVIDIA A100-SXM4-40GB",
+      "python": "3.13.16",
+      "torch": "2.14.1+cu130"
+    },
+    "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3"
+  },
+  "results": {
+    "completed_stages": [
+      "baseline",
+      "extract",
+      "intervene",
+      "evaluate"
+    ],
+    "result_files": [
+      "01_baseline.json",
+      "02_candidates.json",
+      "03_interventions.json",
+      "final_evaluation.json"
+    ]
+  },
+  "schema_version": 1
+}

@@ -53,6 +53,48 @@ def test_collect_snapshot_reads_canonical_results() -> None:
     assert refusal["addition_harmless_refusal_rate"] == 0.9375
     assert refusal["ablation_harmless_kl"] == pytest.approx(0.0305709913)
 
+    qwen = snapshot["qwen_refusal_pilot"]
+    assert qwen is not None
+    assert qwen["model"] == "Qwen/Qwen2.5-Coder-7B-Instruct"
+    assert qwen["model_revision"] == "c03e6d358207e414f1eca0bb1891e29f1db0e242"
+    assert qwen["run_id"] == "c0818150-f834-4692-b271-4e10a97eb57e"
+    assert qwen["implementation_commit"] == "2a2eb714246174e4f627fcd0061c61143a4e8276"
+    assert qwen["operational_success"] is True
+    assert qwen["scientific_status"] == "causal_gate_failed"
+    assert qwen["selected"] == {"layer": 18, "position_offset": -1}
+    assert qwen["harmful_refusal_rates"] == {
+        "baseline": 0.875,
+        "ablation": 0.0,
+        "random_control": 0.875,
+    }
+    assert qwen["harmless_refusal_rates"] == {
+        "baseline": 0.03125,
+        "addition": 1.0,
+    }
+    assert qwen["ablation_harmless_kl"] == pytest.approx(0.2638247609138489)
+
+
+def test_collect_snapshot_omits_qwen_pilot_when_artifacts_absent(
+    tmp_path: Path,
+) -> None:
+    artifact_paths = [
+        "projects/jspace_llama/results/execution_manifest.json",
+        "projects/jspace_llama/results/final_evaluation.json",
+        "projects/jspace_llama/results/jspace_observation_manifest.json",
+        "projects/jspace_llama/results/jspace_observation.json",
+        "projects/refusal_direction/results/execution_manifest.json",
+        "projects/refusal_direction/results/final_evaluation.json",
+    ]
+    for relative in artifact_paths:
+        source = REPO_ROOT / relative
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    snapshot = tracking.collect_snapshot(tmp_path)
+
+    assert snapshot["qwen_refusal_pilot"] is None
+
 
 def test_replace_generated_block_preserves_human_text_and_is_idempotent() -> None:
     original = (
@@ -221,6 +263,10 @@ def test_render_status_names_operational_and_scientific_meanings() -> None:
     assert "observacional" in rendered
     assert "causal local" in rendered
     assert "0,344086 / 0,548387 / 0,596774" in rendered
+    assert "Qwen2.5-Coder-7B-Instruct" in rendered
+    assert "causal_gate_failed" in rendered
+    assert "falha no gate causal" in rendered
+    assert "0,263825" in rendered or "0,263824" in rendered
 
 
 def test_render_status_does_not_keep_causal_label_when_metrics_change() -> None:

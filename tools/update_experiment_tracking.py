@@ -119,6 +119,166 @@ def _integer(
     return value
 
 
+def _collect_qwen_refusal_pilot(
+    root: Path,
+    refusal_results: Path,
+) -> dict[str, Any] | None:
+  """Lê o piloto Qwen congelado, se os JSONs compactos estiverem presentes."""
+
+  qwen_dir = refusal_results / "qwen25_coder_7b"
+  pilot_path = qwen_dir / "pilot_evaluation.json"
+  evaluation_path = qwen_dir / "final_evaluation.json"
+  if not pilot_path.is_file() or not evaluation_path.is_file():
+    return None
+
+  pilot = _load_json(pilot_path, root)
+  qwen_evaluation = _load_json(evaluation_path, root)
+
+  selected = _required(
+    qwen_evaluation,
+    ("results", "selected"),
+    evaluation_path,
+    root,
+  )
+  if not isinstance(selected, dict):
+    raise _invalid_type(
+      evaluation_path,
+      root,
+      ("results", "selected"),
+      "objeto",
+    )
+
+  return {
+    "model": _text(
+      _required(
+        qwen_evaluation,
+        ("config", "model_name"),
+        evaluation_path,
+        root,
+      ),
+      ("config", "model_name"),
+      evaluation_path,
+      root,
+    ),
+    "model_revision": _text(
+      _required(
+        qwen_evaluation,
+        ("config", "model_revision"),
+        evaluation_path,
+        root,
+      ),
+      ("config", "model_revision"),
+      evaluation_path,
+      root,
+    ),
+    "run_id": _text(
+      _required(pilot, ("run_id",), pilot_path, root),
+      ("run_id",),
+      pilot_path,
+      root,
+    ),
+    "implementation_commit": _text(
+      _required(pilot, ("implementation_commit",), pilot_path, root),
+      ("implementation_commit",),
+      pilot_path,
+      root,
+    ),
+    "operational_success": bool(
+      _required(pilot, ("operational_success",), pilot_path, root)
+    ),
+    "scientific_status": _text(
+      _required(pilot, ("status",), pilot_path, root),
+      ("status",),
+      pilot_path,
+      root,
+    ),
+    "selected": {
+      "layer": _integer(
+        _required(selected, ("layer",), evaluation_path, root),
+        ("results", "selected", "layer"),
+        evaluation_path,
+        root,
+      ),
+      "position_offset": _integer(
+        _required(selected, ("position_offset",), evaluation_path, root),
+        ("results", "selected", "position_offset"),
+        evaluation_path,
+        root,
+      ),
+    },
+    "harmful_refusal_rates": {
+      "baseline": _finite_number(
+        _required(
+          qwen_evaluation,
+          ("results", "baseline", "harmful_refusal_rate"),
+          evaluation_path,
+          root,
+        ),
+        ("results", "baseline", "harmful_refusal_rate"),
+        evaluation_path,
+        root,
+      ),
+      "ablation": _finite_number(
+        _required(
+          qwen_evaluation,
+          ("results", "ablation", "harmful_refusal_rate"),
+          evaluation_path,
+          root,
+        ),
+        ("results", "ablation", "harmful_refusal_rate"),
+        evaluation_path,
+        root,
+      ),
+      "random_control": _finite_number(
+        _required(
+          qwen_evaluation,
+          ("results", "random_control", "harmful_refusal_rate"),
+          evaluation_path,
+          root,
+        ),
+        ("results", "random_control", "harmful_refusal_rate"),
+        evaluation_path,
+        root,
+      ),
+    },
+    "harmless_refusal_rates": {
+      "baseline": _finite_number(
+        _required(
+          qwen_evaluation,
+          ("results", "baseline", "harmless_refusal_rate"),
+          evaluation_path,
+          root,
+        ),
+        ("results", "baseline", "harmless_refusal_rate"),
+        evaluation_path,
+        root,
+      ),
+      "addition": _finite_number(
+        _required(
+          qwen_evaluation,
+          ("results", "addition", "harmless_refusal_rate"),
+          evaluation_path,
+          root,
+        ),
+        ("results", "addition", "harmless_refusal_rate"),
+        evaluation_path,
+        root,
+      ),
+    },
+    "ablation_harmless_kl": _finite_number(
+      _required(
+        qwen_evaluation,
+        ("results", "ablation", "harmless_kl"),
+        evaluation_path,
+        root,
+      ),
+      ("results", "ablation", "harmless_kl"),
+      evaluation_path,
+      root,
+    ),
+  }
+
+
 def _string_list(
     value: Any,
     keys: Sequence[str],
@@ -370,6 +530,7 @@ def collect_snapshot(repo_root: Path) -> dict[str, Any]:
         "jspace_causal": jspace_causal,
         "jspace_observation": jspace_observation,
         "refusal_direction": refusal_direction,
+        "qwen_refusal_pilot": _collect_qwen_refusal_pilot(root, refusal_results),
     }
 
 
@@ -436,6 +597,34 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
         else "Conclusão científica: o resultado requer **reavaliação**."
     )
 
+    qwen_block = ""
+    qwen = snapshot.get("qwen_refusal_pilot")
+    if qwen is not None:
+        qwen_rates = qwen["harmful_refusal_rates"]
+        harmless_rates = qwen["harmless_refusal_rates"]
+        qwen_selected = qwen["selected"]
+        operational = "concluída" if qwen["operational_success"] else "incompleta"
+        qwen_block = (
+            "**Direção de Recusa (piloto Qwen).** "
+            f"Modelo `{qwen['model']}` na revisão "
+            f"`{qwen['model_revision']}`; execução "
+            f"`{qwen['run_id']}`. Operação {operational}; "
+            f"Conclusão científica: **falha no gate causal** "
+            f"(`{qwen['scientific_status']}`): manipulação forte, "
+            "mas KL inofensiva após ablação acima do limite 0,10. "
+            f"Direção na camada {qwen_selected['layer']}, posição "
+            f"{qwen_selected['position_offset']}. Recusa nociva (teste, "
+            f"splits sem filtro): baseline {_percentage(qwen_rates['baseline'])}, "
+            f"ablação {_percentage(qwen_rates['ablation'])}, controle "
+            f"{_percentage(qwen_rates['random_control'])}; recusa inofensiva: "
+            f"baseline {_percentage(harmless_rates['baseline'])}, adição "
+            f"{_percentage(harmless_rates['addition'])}; KL inofensiva após "
+            f"ablação `{_decimal(qwen['ablation_harmless_kl'], 6)}`. "
+            "[Piloto](../projects/refusal_direction/results/qwen25_coder_7b/"
+            "pilot_evaluation.json) · [avaliação](../projects/refusal_direction/"
+            "results/qwen25_coder_7b/final_evaluation.json).\n"
+        )
+
     return (
         "### Retrato automático dos resultados\n\n"
         "**J-space causal.** "
@@ -473,6 +662,7 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
         "03_interventions.json) · "
         "[avaliação](../projects/refusal_direction/results/"
         "final_evaluation.json).\n"
+        f"{qwen_block}"
     )
 
 

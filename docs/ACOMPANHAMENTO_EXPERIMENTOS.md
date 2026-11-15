@@ -23,6 +23,7 @@ executáveis.
 **J-space atlas.** Estado operacional: `success` na execução `2fcb8a49-136f-4868-91cc-f98f9dc2e57d`, com 93 itens. Conclusão científica: retrato **observacional**, não evidência causal. Na faixa de camadas, pass@1/5/10: J-lens `0,344086 / 0,548387 / 0,596774`; logit lens `0,284946 / 0,392473 / 0,435484`. [Manifesto](../projects/jspace_llama/results/jspace_observation_manifest.json) · [resultados](../projects/jspace_llama/results/jspace_observation.json).
 
 **Direção de Recusa.** Modelo `google/gemma-2b-it`; 4 estágios completos (baseline, extração, intervenção, avaliação). Conclusão científica: evidência **causal local**. Direção selecionada na camada 12, posição -1. Recusa nociva: baseline 100%, ablação 0%, controle aleatório 100%; adição em pedidos inofensivos 93,75%; KL inofensiva após ablação `0,030571`. [Manifesto](../projects/refusal_direction/results/execution_manifest.json) · [intervenções](../projects/refusal_direction/results/03_interventions.json) · [avaliação](../projects/refusal_direction/results/final_evaluation.json).
+**Direção de Recusa (piloto Qwen).** Modelo `Qwen/Qwen2.5-Coder-7B-Instruct` na revisão `c03e6d358207e414f1eca0bb1891e29f1db0e242`; execução `c0818150-f834-4692-b271-4e10a97eb57e`. Operação concluída; Conclusão científica: **falha no gate causal** (`causal_gate_failed`): manipulação forte, mas KL inofensiva após ablação acima do limite 0,10. Direção na camada 18, posição -1. Recusa nociva (teste, splits sem filtro): baseline 87,50%, ablação 0%, controle 87,50%; recusa inofensiva: baseline 3,12%, adição 100%; KL inofensiva após ablação `0,263825`. [Piloto](../projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json) · [avaliação](../projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json).
 <!-- END GENERATED STATUS -->
 
 ## Duas noções de sucesso
@@ -230,6 +231,35 @@ final não usado na seleção e mediria a sensibilidade ao filtro, à posição,
 coeficiente de adição e à definição de recusa. Só depois ampliaria a conclusão
 para outros modelos ou distribuições. Esses limites e extensões estão no
 [`PROCESSO.md`](../projects/refusal_direction/PROCESSO.md#limites-e-próximos-passos).
+
+## Estudo 2b: piloto Qwen2.5-Coder-7B (congelado)
+
+### Estado atual
+
+O piloto causal em `Qwen/Qwen2.5-Coder-7B-Instruct`, revisão
+`c03e6d358207e414f1eca0bb1891e29f1db0e242`, está **congelado** como evidência
+de referência. A execução `c0818150-f834-4692-b271-4e10a97eb57e` terminou com
+sucesso operacional, mas o status científico permanece `causal_gate_failed`. Eu
+não trato isso como falha de infraestrutura: o pipeline rodou, os JSONs
+compactos existem e a validação offline passou. A falha é no gate de
+selectividade (KL inofensiva após ablação acima de 0,10), não na conclusão de
+que a manipulação foi forte.
+
+### Leitura rápida dos números
+
+Em 32 exemplos de teste por classe, sem filtro comportamental: baseline nocivo
+87,5% de recusa e inofensivo 3,125%; após ablação, 0% nos nocivos; após
+adição, 100% nos inofensivos; controle aleatório 87,5% nos nocivos. Direção
+na camada 18, offset `-1`. KL inofensiva pós-ablação: `0,263825`. Detalhes e
+proveniência em
+[`PROCESSO.md`](../projects/refusal_direction/PROCESSO.md#piloto-qwen25coder7b-congelado)
+e nos JSONs em `projects/refusal_direction/results/qwen25_coder_7b/`.
+
+### Relação com follow-up de dose
+
+Qualquer varredura de dose que eu fizer depois é **exploratória**. Ela pode
+informar intensidade, mas **não** reclassifica retroativamente este piloto como
+aprovado. Mantenho a distinção entre operação concluída e gate causal falhado.
 
 ## Modelo leve para futuras entradas
 

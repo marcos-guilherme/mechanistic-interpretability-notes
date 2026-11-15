@@ -42,8 +42,12 @@ gerações.
 
 - [Visão geral, escopo e instruções de reprodução](../../projects/refusal_direction/README.md)
 - [Processo de estudo e reprodução](../../projects/refusal_direction/PROCESSO.md)
-- [Avaliação final canônica](../../projects/refusal_direction/results/final_evaluation.json)
-- [Manifesto da execução](../../projects/refusal_direction/results/execution_manifest.json)
+- [Avaliação final canônica (Gemma)](../../projects/refusal_direction/results/final_evaluation.json)
+- [Manifesto da execução (Gemma)](../../projects/refusal_direction/results/execution_manifest.json)
+- Piloto causal **congelado** em `Qwen/Qwen2.5-Coder-7B-Instruct`
+  (`causal_gate_failed`; operação concluída, gate de selectividade falhou):
+  [pilot_evaluation.json](../../projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json)
+  · [final_evaluation.json](../../projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json)
 
 ### J-space Llama: tentativa causal e atlas observacional
 

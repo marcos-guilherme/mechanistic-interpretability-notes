@@ -396,3 +396,73 @@ também precisaria verificar a sensibilidade ao filtro, à posição, ao
 coeficiente de adição e à definição de recusa. Até lá, mantenho a conclusão
 deliberadamente restrita: reproduzi o padrão causal de uma direção de recusa
 neste recorte do Gemma 2B IT.
+
+## Piloto Qwen2.5-Coder-7B (congelado)
+
+### Por que este piloto existe
+
+Depois do Gemma, quis testar o mesmo esqueleto causal em um modelo
+instruction-tuned maior e voltado a código, com splits de seleção e teste
+separados e **sem** filtro comportamental prévio. O objetivo foi ver se o
+padrão ablação/adição/controle se mantinha quando a validação escolhe a
+direção e o teste avalia o efeito final, com gates numéricos explícitos.
+
+### Execução e proveniência
+
+| Campo | Valor |
+| --- | --- |
+| Modelo | `Qwen/Qwen2.5-Coder-7B-Instruct` |
+| Revisão | `c03e6d358207e414f1eca0bb1891e29f1db0e242` |
+| Run | `c0818150-f834-4692-b271-4e10a97eb57e` |
+| Commit de implementação | `2a2eb714246174e4f627fcd0061c61143a4e8276` |
+| GPU / dtype | NVIDIA A100 40 GB, `bfloat16` |
+| Amostras | 128 treino e 32 validação por classe; 32 teste por classe |
+
+Os JSONs compactos vivem em `results/qwen25_coder_7b/`. Eles carregam métricas,
+configuração e proveniência, mas não prompts, gerações, tensores, `status.json`,
+`events.jsonl` nem outros artefatos brutos (esses ficam fora do Git).
+
+### Resultados numéricos (split de teste)
+
+Linha de base sem filtro: recusa nociva `0,875`, recusa inofensiva `0,03125`.
+Direção selecionada na validação: camada 18, offset `-1`.
+
+| Condição | Recusa nociva | Recusa inofensiva |
+| --- | --- | --- |
+| Baseline | 0,875 | 0,03125 |
+| Ablação | 0,0 | (não é métrica final de adição) |
+| Adição | (não é métrica nociva final) | 1,0 |
+| Controle aleatório (nocivos) | 0,875 | — |
+
+KL inofensiva após ablação: `0,2638247609138489` (limite do gate: `0,10`).
+
+### Operação versus ciência
+
+**Sucesso operacional.** O piloto concluiu o pipeline, publicou os JSONs
+compactos esperados e passou pela validação offline (`operational_success:
+true` em
+[`pilot_evaluation.json`](results/qwen25_coder_7b/pilot_evaluation.json)).
+
+**Falha científica no gate.** O status final é `causal_gate_failed`. Os
+subgates de queda nociva, aumento inofensivo e controle aleatório passaram; o
+que falhou foi `max_harmless_ablation_kl`. Interpreto assim:
+
+- há um sinal forte de manipulação causal (ablação zera recusa nociva, adição
+  satura recusa inofensiva, controle não imita a ablação);
+- a intervenção não preserva o comportamento inofensivo dentro do limite
+  acordado;
+- este piloto **permanece falhado**, mesmo que um follow-up exploratório de
+  dose varra intensidades diferentes.
+
+Qualquer varredura de dose futura é hipótese nova. Ela não reescreve
+retrospectivamente a classificação desta execução.
+
+### Fontes canônicas do piloto
+
+- [`00_preflight.json`](results/qwen25_coder_7b/00_preflight.json)
+- [`01_baseline.json`](results/qwen25_coder_7b/01_baseline.json)
+- [`02_candidates.json`](results/qwen25_coder_7b/02_candidates.json)
+- [`03_interventions.json`](results/qwen25_coder_7b/03_interventions.json)
+- [`final_evaluation.json`](results/qwen25_coder_7b/final_evaluation.json)
+- [`pilot_evaluation.json`](results/qwen25_coder_7b/pilot_evaluation.json)
+- [`execution_manifest.json`](results/qwen25_coder_7b/execution_manifest.json)
