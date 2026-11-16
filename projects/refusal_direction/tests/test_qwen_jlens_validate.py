@@ -42,6 +42,8 @@ def _envelope(experiment: str, config: dict, results: dict) -> ArtifactEnvelope:
             "resolved_model_revision": QWEN_REVISION,
             "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
             "dataset_repo_id": config["dataset_repo_id"],
+            "dataset_config": config["dataset_config"],
+            "dataset_split": config["dataset_split"],
             "dataset_revision": config["dataset_revision"],
             "source_dose_run_id": SOURCE_DOSE_RUN_ID,
         },
@@ -105,6 +107,7 @@ def write_jlens_tree(root: Path, *, tiny: bool = True) -> Path:
         "fit_hashes": [item["content_hash"] for item in fit],
         "holdout_hashes": [item["content_hash"] for item in holdout],
         "corpus_hash": "c" * 64,
+        "config_hash": "d" * 64,
     }
     write_artifact(
         results / "00_jlens_prepare.json",
@@ -168,6 +171,9 @@ def write_jlens_tree(root: Path, *, tiny: bool = True) -> Path:
         "implementation_commit": COMMIT,
         "model_revision": QWEN_REVISION,
         "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
+        "dataset_repo_id": config["dataset_repo_id"],
+        "dataset_config": config["dataset_config"],
+        "dataset_split": config["dataset_split"],
         "dataset_revision": config["dataset_revision"],
         "source_dose_run_id": SOURCE_DOSE_RUN_ID,
         "source_dose_status": "pass",
@@ -514,3 +520,110 @@ def test_validator_recomputes_lens_hash_and_holdout_item_stats(tmp_path: Path) -
     fit_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     checks = validate_qwen_jlens(root)
     assert checks["checkpoint_and_lens_identity"] is False
+
+
+def test_validator_rejects_config_dataset_drift(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    config_path = root / "configs" / JLENS_PROFILE
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["dataset_revision"] = "0" * 40
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["model_dataset_upstream_revisions"] is False
+
+
+def test_validator_rejects_missing_dataset_config_and_split(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    prepare_path = root / "results" / "qwen25_coder_7b_jlens" / "00_jlens_prepare.json"
+    payload = json.loads(prepare_path.read_text(encoding="utf-8"))
+    payload["provenance"].pop("dataset_config", None)
+    payload["provenance"].pop("dataset_split", None)
+    prepare_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["model_dataset_upstream_revisions"] is False
+
+
+def test_validator_rejects_foreign_run_events(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    events_path = root / "artifacts" / "qwen25_coder_7b_jlens" / "events.jsonl"
+    extra = {
+        "event": "checkpoint",
+        "run_id": "other-run",
+        "n_done": 50,
+        "stage": "fit",
+        "state": "running",
+    }
+    events_path.write_text(
+        events_path.read_text(encoding="utf-8") + json.dumps(extra) + "\n",
+        encoding="utf-8",
+    )
+    checks = validate_qwen_jlens(root)
+    assert checks["run_status_events_manifest"] is False
+
+
+def test_validator_rejects_dim_batch_and_projection_rule_mismatch(
+    tmp_path: Path,
+) -> None:
+    root = write_jlens_tree(tmp_path)
+    fit_path = root / "results" / "qwen25_coder_7b_jlens" / "02_jlens_fit.json"
+    fit = json.loads(fit_path.read_text(encoding="utf-8"))
+    fit["results"]["selected_dim_batch"] = 16
+    fit_path.write_text(json.dumps(fit, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["probe_order_and_projection"] is False
+    root = write_jlens_tree(tmp_path / "projection")
+    probe_path = root / "results" / "qwen25_coder_7b_jlens" / "01_jlens_probe.json"
+    probe = json.loads(probe_path.read_text(encoding="utf-8"))
+    probe["results"]["projected_limit_seconds"] = 99999
+    probe["results"]["exceeds_limit"] = False
+    probe_path.write_text(json.dumps(probe, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["probe_order_and_projection"] is False
+
+
+def test_validator_rejects_missing_evaluation_hashes(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    evaluation_path = root / "results" / "qwen25_coder_7b_jlens" / "jlens_evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    evaluation.pop("corpus_hash", None)
+    evaluation.pop("config_hash", None)
+    evaluation_path.write_text(json.dumps(evaluation, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["checkpoint_and_lens_identity"] is False
+    assert checks["model_dataset_upstream_revisions"] is False
+
+
+def test_validator_rejects_negative_and_nonmonotonic_hits(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_jlens_validate import (
+        _metric_from_counts,
+        _recompose_by_layer,
+    )
+
+    root = write_jlens_tree(tmp_path)
+    holdout_path = root / "results" / "qwen25_coder_7b_jlens" / "03_jlens_holdout.json"
+    holdout = json.loads(holdout_path.read_text(encoding="utf-8"))
+    first_id = next(iter(holdout["results"]["by_item"]))
+    first_layer = next(iter(holdout["results"]["by_item"][first_id]))
+    block = holdout["results"]["by_item"][first_id][first_layer]
+    block["jlens_hits@1"] = 4
+    block["jlens_hits@5"] = 2
+    block["jlens_hits@10"] = -1
+    source_layers = [int(key) for key in holdout["results"]["by_layer"]]
+    holdout["results"]["by_layer"] = _recompose_by_layer(
+        holdout["results"]["by_item"], source_layers
+    )
+    for method, prefix in (("jlens", "jlens"), ("logit_lens", "logit_lens")):
+        n_pos = rank_sum = hits1 = hits5 = hits10 = 0
+        for layers in holdout["results"]["by_item"].values():
+            for cell in layers.values():
+                n_pos += int(cell.get("n_positions") or 0)
+                rank_sum += int(cell.get(f"{prefix}_rank_sum") or 0)
+                hits1 += int(cell.get(f"{prefix}_hits@1") or 0)
+                hits5 += int(cell.get(f"{prefix}_hits@5") or 0)
+                hits10 += int(cell.get(f"{prefix}_hits@10") or 0)
+        holdout["results"]["overall"][method] = _metric_from_counts(
+            n_pos=n_pos, rank_sum=rank_sum, hits1=hits1, hits5=hits5, hits10=hits10
+        )
+    holdout_path.write_text(json.dumps(holdout, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["holdout_metric_arithmetic"] is False

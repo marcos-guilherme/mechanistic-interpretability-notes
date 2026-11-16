@@ -13,7 +13,10 @@ from .pipeline import load_config
 from .qwen_dose_validate import validate_qwen_dose
 from .qwen_dose import sha256_file
 from .qwen_jlens import (
+    DATASET_CONFIG,
     DATASET_REPO_ID,
+    DATASET_REVISION,
+    DATASET_SPLIT,
     DIM_BATCH_PROBE_ORDER,
     EXPECTED_D_MODEL,
     EXPECTED_N_LAYERS,
@@ -23,6 +26,7 @@ from .qwen_jlens import (
     HOLDOUT_COUNT,
     JLENS_PROFILE,
     JLENS_UPSTREAM_COMMIT,
+    MAX_PROJECTED_SECONDS,
     QWEN_MODEL,
     QWEN_REVISION,
     SHA256_RE,
@@ -30,6 +34,7 @@ from .qwen_jlens import (
     SOURCE_DOSE_RUN_ID,
     jlens_metadata_contains_leak,
     load_fit_checkpoint,
+    require_dataset_identity,
     validate_checkpoint_identity,
     validate_checkpoint_payload,
     validate_fitted_lens,
@@ -194,6 +199,10 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         checks["model_dataset_upstream_revisions"] = False
     if config.get("jlens_upstream_commit") != JLENS_UPSTREAM_COMMIT:
         checks["model_dataset_upstream_revisions"] = False
+    try:
+        require_dataset_identity(config)
+    except ValueError:
+        checks["model_dataset_upstream_revisions"] = False
     package_config_path = Path(__file__).resolve().parents[2] / "configs" / JLENS_PROFILE
     if package_config_path.is_file():
         package_config = json.loads(package_config_path.read_text(encoding="utf-8"))
@@ -242,16 +251,16 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         path for path in sorted(results_dir.glob("*.json")) if path.is_file()
     ]
     payloads = [_load(path) for path in compact_files]
-    expected_dataset_revision = config.get("dataset_revision")
-    expected_dataset_repo = config.get("dataset_repo_id", DATASET_REPO_ID)
-    expected_source_dose = config.get("source_dose_run_id", SOURCE_DOSE_RUN_ID)
+    expected_source_dose = SOURCE_DOSE_RUN_ID
     expected_provenance = {
         "model_name": QWEN_MODEL,
         "requested_model_revision": QWEN_REVISION,
         "resolved_model_revision": QWEN_REVISION,
         "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
-        "dataset_repo_id": expected_dataset_repo,
-        "dataset_revision": expected_dataset_revision,
+        "dataset_repo_id": DATASET_REPO_ID,
+        "dataset_config": DATASET_CONFIG,
+        "dataset_split": DATASET_SPLIT,
+        "dataset_revision": DATASET_REVISION,
         "source_dose_run_id": expected_source_dose,
         "run_id": evaluation.get("run_id"),
         "implementation_commit": evaluation.get("implementation_commit"),
@@ -267,7 +276,13 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 checks["model_dataset_upstream_revisions"] = False
             if payload.get("jlens_upstream_commit") != JLENS_UPSTREAM_COMMIT:
                 checks["model_dataset_upstream_revisions"] = False
-            if payload.get("dataset_revision") != expected_dataset_revision:
+            if payload.get("dataset_repo_id") != DATASET_REPO_ID:
+                checks["model_dataset_upstream_revisions"] = False
+            if payload.get("dataset_config") != DATASET_CONFIG:
+                checks["model_dataset_upstream_revisions"] = False
+            if payload.get("dataset_split") != DATASET_SPLIT:
+                checks["model_dataset_upstream_revisions"] = False
+            if payload.get("dataset_revision") != DATASET_REVISION:
                 checks["model_dataset_upstream_revisions"] = False
             if payload.get("run_id") != evaluation.get("run_id"):
                 checks["run_status_events_manifest"] = False
@@ -294,6 +309,15 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             checks["run_status_events_manifest"] = False
         run_ids.add(provenance.get("run_id"))
         results = payload.get("results") or {}
+        required_hashes = ()
+        if path.name == "00_jlens_prepare.json":
+            required_hashes = ("corpus_hash", "config_hash")
+        elif path.name == "02_jlens_fit.json":
+            required_hashes = ("corpus_hash", "config_hash")
+        for hash_name in required_hashes:
+            if hash_name not in results or not _is_sha256(results.get(hash_name)):
+                checks["model_dataset_upstream_revisions"] = False
+                checks["checkpoint_and_lens_identity"] = False
         for hash_name in ("corpus_hash", "config_hash", "lens_sha256"):
             if hash_name in results and not _is_sha256(results.get(hash_name)):
                 checks["model_dataset_upstream_revisions"] = False
@@ -305,6 +329,10 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             values = list(results.get(hash_list_name) or [])
             if values and any(not _is_sha256(item) for item in values):
                 checks["model_dataset_upstream_revisions"] = False
+    for hash_name in ("corpus_hash", "config_hash"):
+        if hash_name not in evaluation or not _is_sha256(evaluation.get(hash_name)):
+            checks["model_dataset_upstream_revisions"] = False
+            checks["checkpoint_and_lens_identity"] = False
     for hash_name in ("corpus_hash", "config_hash", "lens_sha256"):
         if hash_name in evaluation and not _is_sha256(evaluation.get(hash_name)):
             checks["model_dataset_upstream_revisions"] = False
@@ -314,6 +342,7 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         seen_config.add(str(evaluation.get("config_hash")))
     if len(seen_corpus) > 1 or len(seen_config) > 1:
         checks["model_dataset_upstream_revisions"] = False
+        checks["checkpoint_and_lens_identity"] = False
 
     prepare_path = results_dir / "00_jlens_prepare.json"
     if prepare_path.is_file():
@@ -357,14 +386,14 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 checks["probe_order_and_projection"] = False
         elif selected not in DIM_BATCH_PROBE_ORDER:
             checks["probe_order_and_projection"] = False
-        if probe.get("exceeds_limit") and status == "pass":
+        if int(probe.get("projected_limit_seconds") or -1) != MAX_PROJECTED_SECONDS:
             checks["probe_order_and_projection"] = False
-        if (
-            not probe.get("exceeds_limit")
-            and float(probe.get("projected_seconds") or 0) > float(
-                probe.get("projected_limit_seconds") or 0
-            )
-        ):
+        projected_seconds = float(probe.get("projected_seconds") or 0)
+        projected_limit = float(probe.get("projected_limit_seconds") or 0)
+        exceeds_limit = bool(probe.get("exceeds_limit"))
+        if exceeds_limit != (projected_seconds > projected_limit):
+            checks["probe_order_and_projection"] = False
+        if exceeds_limit and status == "pass":
             checks["probe_order_and_projection"] = False
         attempts = list(probe.get("attempts") or [])
         order = list(probe.get("probe_order") or [])
@@ -437,6 +466,15 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 n_positions = int(block.get("n_positions") or 0)
                 if n_positions <= 0:
                     checks["holdout_complete"] = False
+                for prefix in ("jlens", "logit_lens"):
+                    rank_sum = int(block.get(f"{prefix}_rank_sum") or 0)
+                    hits1 = int(block.get(f"{prefix}_hits@1") or 0)
+                    hits5 = int(block.get(f"{prefix}_hits@5") or 0)
+                    hits10 = int(block.get(f"{prefix}_hits@10") or 0)
+                    if rank_sum < 0 or hits1 < 0 or hits5 < 0 or hits10 < 0:
+                        checks["holdout_metric_arithmetic"] = False
+                    if not hits1 <= hits5 <= hits10 <= n_positions:
+                        checks["holdout_metric_arithmetic"] = False
                 cell_count += 1
         if cell_count != HOLDOUT_COUNT * len(source_layers):
             checks["holdout_complete"] = False
@@ -541,12 +579,15 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             fit_results = (
                 _load(fit_path).get("results") if fit_path.is_file() else {}
             ) or {}
-            identity_corpus = (
-                fit_results.get("corpus_hash") or evaluation.get("corpus_hash")
-            )
-            identity_config = (
-                fit_results.get("config_hash") or evaluation.get("config_hash")
-            )
+            identity_corpus = fit_results.get("corpus_hash")
+            identity_config = fit_results.get("config_hash")
+            eval_corpus = evaluation.get("corpus_hash")
+            eval_config = evaluation.get("config_hash")
+            if identity_corpus != eval_corpus or identity_config != eval_config:
+                checks["checkpoint_and_lens_identity"] = False
+            if not identity_corpus or not identity_config:
+                checks["checkpoint_and_lens_identity"] = False
+                checks["model_dataset_upstream_revisions"] = False
             validate_checkpoint_identity(
                 checkpoint,
                 source_layers=config["source_layers"],
@@ -576,10 +617,31 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 checks["checkpoint_and_lens_identity"] = False
             if status == "pass" and int(checkpoint.get("n_done") or -1) != FIT_COUNT:
                 checks["checkpoint_and_lens_identity"] = False
+            if checkpoint.get("corpus_hash") != identity_corpus:
+                checks["checkpoint_and_lens_identity"] = False
+            if checkpoint.get("config_hash") != identity_config:
+                checks["checkpoint_and_lens_identity"] = False
             for hash_name in ("corpus_hash", "config_hash"):
                 if not _is_sha256(checkpoint.get(hash_name)):
                     checks["checkpoint_and_lens_identity"] = False
                     checks["model_dataset_upstream_revisions"] = False
+            if status == "pass":
+                probe_selected = (
+                    (_load(results_dir / "01_jlens_probe.json").get("results") or {})
+                    if (results_dir / "01_jlens_probe.json").is_file()
+                    else {}
+                ).get("selected_dim_batch")
+                fit_selected = fit_results.get("selected_dim_batch")
+                eval_selected = evaluation.get("selected_dim_batch")
+                ckpt_selected = checkpoint.get("dim_batch")
+                selected_values = (
+                    probe_selected,
+                    fit_selected,
+                    eval_selected,
+                    ckpt_selected,
+                )
+                if None in selected_values or len(set(selected_values)) != 1:
+                    checks["probe_order_and_projection"] = False
         except Exception:
             checks["checkpoint_and_lens_identity"] = False
 
@@ -604,6 +666,12 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 json.loads(line)
                 for line in events_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
+            ]
+            expected_run = evaluation.get("run_id")
+            if any(item.get("run_id") != expected_run for item in events):
+                checks["run_status_events_manifest"] = False
+            events = [
+                item for item in events if item.get("run_id") == expected_run
             ]
             names = {item.get("event") for item in events}
             if status == "pass" and not {"probe_choice", "checkpoint", "stage_completed"} <= names:

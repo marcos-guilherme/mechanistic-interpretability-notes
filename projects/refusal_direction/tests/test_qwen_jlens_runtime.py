@@ -517,10 +517,16 @@ def test_runtime_records_resolved_revision_lens_hash_and_lifecycle(
     assert payload["status"] == "pass"
     results = tmp_path / "results" / "qwen25_coder_7b_jlens"
     artifacts = tmp_path / "artifacts" / "qwen25_coder_7b_jlens"
+    config = load_config(tmp_path, profile=JLENS_PROFILE)
     prepare = json.loads((results / "00_jlens_prepare.json").read_text(encoding="utf-8"))
+    fit = json.loads((results / "02_jlens_fit.json").read_text(encoding="utf-8"))
     assert prepare["provenance"]["resolved_model_revision"] == observed
     assert prepare["provenance"]["requested_model_revision"] == QWEN_REVISION
-    fit = json.loads((results / "02_jlens_fit.json").read_text(encoding="utf-8"))
+    assert prepare["provenance"]["dataset_repo_id"] == config["dataset_repo_id"]
+    assert prepare["provenance"]["dataset_config"] == "python"
+    assert prepare["provenance"]["dataset_split"] == "train"
+    assert prepare["provenance"]["dataset_revision"] == config["dataset_revision"]
+    assert prepare["results"]["config_hash"] == fit["results"]["config_hash"]
     lens_path = artifacts / FINAL_LENS_FILENAME
     assert fit["results"]["lens_sha256"] == sha256_file(lens_path)
     assert fit["results"]["lens_bytes"] == lens_path.stat().st_size
@@ -622,6 +628,40 @@ def test_readout_rejects_nonfinite_model_logits() -> None:
             source_layers=[0],
             skip_first=16,
             max_seq_len=128,
+        )
+
+
+def test_runtime_rejects_dataset_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_dose(tmp_path)
+    config_path = tmp_path / "configs" / JLENS_PROFILE
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["dataset_revision"] = "deadbeef" * 5
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    from refusal_direction_replication import qwen_jlens_runtime as runtime
+
+    install_runtime_fakes(monkeypatch)
+    with pytest.raises(ValueError, match="dataset identity"):
+        run_qwen_jlens(
+            tmp_path,
+            run_id="jlens-run-dataset",
+            load_rows=lambda **_kwargs: [_row(index) for index in range(130)],
+            load_model=lambda **_kwargs: (
+                SimpleNamespace(
+                    n_layers=4,
+                    d_model=8,
+                    config=SimpleNamespace(_commit_hash=QWEN_REVISION),
+                ),
+                CountingTokenizer(),
+            ),
+            wrap_model=lambda hf_model, tok: hf_model,
+            jacobian_for_prompt_fn=fake_jacobian,
+            lens_cls=FakeLens,
+            release_resources=lambda: None,
+            clock=lambda: 0.0,
+            assert_contract=lambda: None,
         )
 
 

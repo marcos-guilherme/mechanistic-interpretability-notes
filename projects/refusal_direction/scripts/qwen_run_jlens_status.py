@@ -31,6 +31,10 @@ def summarize_status_for_display(payload: dict) -> str:
         f"state={payload['state']}",
         f"progress={payload['completed_units']}/{payload['total_units']}",
     ]
+    if "fit_completed_units" in payload and "fit_total_units" in payload:
+        parts.append(
+            f"fit_progress={payload['fit_completed_units']}/{payload['fit_total_units']}"
+        )
     message = payload.get("message")
     if message:
         parts.append(f"message={message}")

@@ -26,6 +26,7 @@ from .qwen_dose import sha256_file
 from .qwen_jlens import (
     CHECKPOINT_FILENAME,
     DATASET_CONFIG,
+    DATASET_IDENTITY,
     DATASET_REPO_ID,
     DATASET_REVISION,
     DATASET_SPLIT,
@@ -48,6 +49,7 @@ from .qwen_jlens import (
     corpus_hash,
     load_exclusion_hashes,
     load_fit_checkpoint,
+    require_dataset_identity,
     probe_dim_batch,
     project_fit_duration,
     rank_one_based,
@@ -110,8 +112,10 @@ def _jlens_provenance(
         "jlens_upstream_commit": config.get(
             "jlens_upstream_commit", JLENS_UPSTREAM_COMMIT
         ),
-        "dataset_repo_id": config.get("dataset_repo_id", DATASET_REPO_ID),
-        "dataset_revision": config.get("dataset_revision", DATASET_REVISION),
+        "dataset_repo_id": DATASET_IDENTITY["dataset_repo_id"],
+        "dataset_config": DATASET_IDENTITY["dataset_config"],
+        "dataset_split": DATASET_IDENTITY["dataset_split"],
+        "dataset_revision": DATASET_IDENTITY["dataset_revision"],
         "source_dose_run_id": config.get("source_dose_run_id", SOURCE_DOSE_RUN_ID),
     }
 
@@ -153,11 +157,12 @@ def resolve_jlens_run_id(
 def default_load_rows(config: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     from datasets import load_dataset
 
+    require_dataset_identity(config)
     return load_dataset(
-        config.get("dataset_repo_id", DATASET_REPO_ID),
-        config.get("dataset_config", DATASET_CONFIG),
-        split=config.get("dataset_split", DATASET_SPLIT),
-        revision=config.get("dataset_revision", DATASET_REVISION),
+        DATASET_REPO_ID,
+        DATASET_CONFIG,
+        split=DATASET_SPLIT,
+        revision=DATASET_REVISION,
         streaming=True,
     )
 
@@ -269,6 +274,9 @@ def build_jlens_evaluation(
         "implementation_commit": implementation_commit,
         "model_revision": model_revision,
         "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
+        "dataset_repo_id": DATASET_REPO_ID,
+        "dataset_config": DATASET_CONFIG,
+        "dataset_split": DATASET_SPLIT,
         "dataset_revision": DATASET_REVISION,
         "source_dose_run_id": source_dose_run_id,
         "source_dose_status": source_dose_status,
@@ -378,6 +386,7 @@ def run_qwen_jlens(
     assert_contract: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     config = load_config(root, profile=profile)
+    require_dataset_identity(config)
     results_dir, artifacts_dir = project_paths(root, config)
     results_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -485,6 +494,7 @@ def run_qwen_jlens(
         )
         _write_raw_corpus(artifacts_dir / "corpus.jsonl", corpus)
         compact = compact_corpus_records(corpus, exclusion=exclusion)
+        compact["config_hash"] = hashed_config
         _write_compact(
             results_dir / "00_jlens_prepare.json",
             experiment="jlens_prepare",

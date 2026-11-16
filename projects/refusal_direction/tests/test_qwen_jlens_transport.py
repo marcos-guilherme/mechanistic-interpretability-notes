@@ -75,6 +75,9 @@ def test_jlens_allowlist_accepts_compact_status_and_tensors() -> None:
     assert is_allowed_jlens_fetch_member(
         "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
     )
+    assert is_allowed_jlens_fetch_member(
+        "artifacts/qwen25_coder_7b_jlens/jlens_resume_bundle.json"
+    )
     assert not is_allowed_jlens_fetch_member("artifacts/qwen25_coder_7b_jlens/corpus.jsonl")
     assert not is_allowed_jlens_fetch_member("results/qwen25_coder_7b/final_evaluation.json")
     assert not is_allowed_jlens_fetch_member(
@@ -329,7 +332,17 @@ def test_optional_checkpoint_upload_and_validated_install(
         checkpoint,
     )
     (artifacts / "status.json").write_text(
-        json.dumps({"run_id": "jlens-run-1", "state": "running", "current_stage": "fit"})
+        json.dumps(
+            {
+                "run_id": "jlens-run-1",
+                "state": "running",
+                "current_stage": "fit",
+                "completed_units": 8,
+                "total_units": 100,
+                "fit_completed_units": 8,
+                "fit_total_units": 100,
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -413,3 +426,201 @@ def test_resume_bundle_requires_checkpoint_status_and_events(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="status.json"):
         optional_local_jlens_resume_bundle(project)
+
+
+def _write_resume_members(
+    directory: Path,
+    *,
+    run_id: str = "jlens-run-1",
+    n_done: int = 8,
+    dim_batch: int = 16,
+) -> tuple[Path, Path, Path]:
+    import torch
+
+    directory.mkdir(parents=True, exist_ok=True)
+    checkpoint = directory / "jlens_fit_checkpoint.pt"
+    torch.save(
+        {
+            "jacobian_sum": {0: torch.eye(4), 1: torch.eye(4), 2: torch.eye(4)},
+            "n_done": n_done,
+            "next_idx": n_done,
+            "source_layers": [0, 1, 2],
+            "target_layer": 3,
+            "skip_first": 16,
+            "corpus_hash": "c" * 64,
+            "config_hash": "d" * 64,
+            "model_revision": "c" * 40,
+            "implementation_commit": "a" * 40,
+            "run_id": run_id,
+            "dim_batch": dim_batch,
+        },
+        checkpoint,
+    )
+    status = directory / "status.json"
+    status.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": "qwen25_coder_7b_jlens.json",
+                "run_id": run_id,
+                "current_stage": "fit",
+                "state": "running",
+                "completed_units": n_done,
+                "total_units": 100,
+                "fit_completed_units": n_done,
+                "fit_total_units": 100,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    events = directory / "events.jsonl"
+    events.write_text(
+        json.dumps(
+            {
+                "event": "checkpoint",
+                "run_id": run_id,
+                "n_done": n_done,
+                "stage": "fit",
+                "state": "running",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return checkpoint, status, events
+
+
+def test_resume_bundle_rejects_mismatched_run_and_progress(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_colab_transport import (
+        validate_jlens_resume_bundle,
+    )
+
+    checkpoint, status, events = _write_resume_members(tmp_path / "ok")
+    validate_jlens_resume_bundle(checkpoint=checkpoint, status=status, events=events)
+    other_status = tmp_path / "other_status.json"
+    other_status.write_text(
+        json.dumps(
+            {
+                "run_id": "other-run",
+                "current_stage": "fit",
+                "completed_units": 8,
+                "fit_completed_units": 8,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="run"):
+        validate_jlens_resume_bundle(
+            checkpoint=checkpoint, status=other_status, events=events
+        )
+    progress_status = tmp_path / "progress.json"
+    progress_status.write_text(
+        json.dumps(
+            {
+                "run_id": "jlens-run-1",
+                "current_stage": "fit",
+                "completed_units": 3,
+                "fit_completed_units": 3,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="progress"):
+        validate_jlens_resume_bundle(
+            checkpoint=checkpoint, status=progress_status, events=events
+        )
+
+
+def test_resume_install_rolls_back_writes_marker_and_consumes_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    from refusal_direction_replication import qwen_colab_transport as transport
+
+    project = tmp_path / "project"
+    old_ckpt, old_status, old_events = _write_resume_members(
+        project / "artifacts" / "qwen25_coder_7b_jlens",
+        run_id="old-run",
+        n_done=1,
+    )
+    staged_dir = tmp_path / "staging"
+    staged_ckpt, staged_status, staged_events = _write_resume_members(
+        staged_dir, run_id="new-run", n_done=8
+    )
+
+    original = transport._stream_install_regular_file
+
+    def boom(**kwargs):
+        if kwargs["destination"].name == "events.jsonl":
+            raise OSError("disk full")
+        return original(**kwargs)
+
+    monkeypatch.setattr(transport, "_stream_install_regular_file", boom)
+    with pytest.raises(OSError, match="disk full"):
+        atomic_install_jlens_resume(
+            checkpoint=staged_ckpt,
+            status=staged_status,
+            events=staged_events,
+            project=project,
+        )
+    restored = torch.load(old_ckpt, map_location="cpu", weights_only=True)
+    assert restored["run_id"] == "old-run"
+    assert restored["n_done"] == 1
+    assert json.loads(old_status.read_text(encoding="utf-8"))["run_id"] == "old-run"
+    assert "old-run" in old_events.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(transport, "_stream_install_regular_file", original)
+    staged_ckpt, staged_status, staged_events = _write_resume_members(
+        staged_dir, run_id="new-run", n_done=8
+    )
+    installed = atomic_install_jlens_resume(
+        checkpoint=staged_ckpt,
+        status=staged_status,
+        events=staged_events,
+        project=project,
+    )
+    assert installed is not None
+    marker = project / "artifacts" / "qwen25_coder_7b_jlens" / "jlens_resume_bundle.json"
+    assert marker.is_file()
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["run_id"] == "new-run"
+    assert payload["n_done"] == 8
+    assert not staged_ckpt.exists()
+    assert not staged_status.exists()
+    assert not staged_events.exists()
+
+
+def test_status_reader_shows_fit_progress(tmp_path: Path) -> None:
+    import shutil
+
+    spec = importlib.util.spec_from_file_location("qwen_run_jlens_status", JLENS_STATUS)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    shutil.copytree(ROOT / "configs", tmp_path / "configs")
+    artifacts = tmp_path / "artifacts" / "qwen25_coder_7b_jlens"
+    artifacts.mkdir(parents=True)
+    (artifacts / "status.json").write_text(
+        json.dumps(
+            {
+                "profile": "qwen25_coder_7b_jlens.json",
+                "run_id": "jlens-run-1",
+                "current_stage": "holdout",
+                "state": "completed",
+                "completed_units": 20,
+                "total_units": 20,
+                "fit_completed_units": 100,
+                "fit_total_units": 100,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert module.main_with_root(tmp_path) == 0
+    assert "progress=20/20" in module.last_stdout_summary
+    assert "fit_progress=100/100" in module.last_stdout_summary

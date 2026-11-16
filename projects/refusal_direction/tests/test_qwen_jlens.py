@@ -118,8 +118,34 @@ def test_jlens_profile_is_isolated_from_pilot_and_dose() -> None:
     assert jlens["dataset_config"] == "python"
     assert jlens["dataset_split"] == "train"
     assert jlens["dataset_revision"] == DATASET_REVISION
+    from refusal_direction_replication.qwen_jlens import require_dataset_identity
+
+    require_dataset_identity(jlens)
     assert jlens["source_dose_run_id"] == SOURCE_DOSE_RUN_ID
     assert "dose_grid" not in jlens
+
+
+def test_require_dataset_identity_rejects_drift() -> None:
+    from refusal_direction_replication.qwen_jlens import require_dataset_identity
+
+    config = load_config(ROOT, profile=JLENS_PROFILE)
+    require_dataset_identity(config)
+    drifted = dict(config)
+    drifted["dataset_revision"] = "0" * 40
+    with pytest.raises(ValueError, match="dataset identity"):
+        require_dataset_identity(drifted)
+    drifted = dict(config)
+    drifted["dataset_config"] = "javascript"
+    with pytest.raises(ValueError, match="dataset identity"):
+        require_dataset_identity(drifted)
+    drifted = dict(config)
+    drifted["dataset_split"] = "test"
+    with pytest.raises(ValueError, match="dataset identity"):
+        require_dataset_identity(drifted)
+    drifted = dict(config)
+    drifted["dataset_repo_id"] = "other/repo"
+    with pytest.raises(ValueError, match="dataset identity"):
+        require_dataset_identity(drifted)
 
 
 def test_corpus_keeps_code_and_docstring_and_deduplicates() -> None:

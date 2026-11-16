@@ -36,6 +36,12 @@ DATASET_REPO_ID = "code-search-net/code_search_net"
 DATASET_CONFIG = "python"
 DATASET_SPLIT = "train"
 DATASET_REVISION = "bd0cf261e357a3eb5c8fba490d23ec1a1cd59555"
+DATASET_IDENTITY = {
+    "dataset_repo_id": DATASET_REPO_ID,
+    "dataset_config": DATASET_CONFIG,
+    "dataset_split": DATASET_SPLIT,
+    "dataset_revision": DATASET_REVISION,
+}
 SOURCE_DOSE_RUN_ID = "d76d0e7f-1e86-4953-8eac-de1c352708d2"
 EXPECTED_N_LAYERS = 28
 EXPECTED_D_MODEL = 3584
@@ -76,6 +82,15 @@ REQUIRED_JLENS_SYMBOLS = (
     "JacobianLens",
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def require_dataset_identity(config: Mapping[str, Any]) -> None:
+    for field_name, expected in DATASET_IDENTITY.items():
+        actual = config.get(field_name)
+        if actual != expected:
+            raise ValueError(
+                f"dataset identity {field_name}: {actual!r} != {expected!r}"
+            )
 
 
 class DimBatchOOMError(RuntimeError):
