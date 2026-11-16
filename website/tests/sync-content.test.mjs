@@ -594,6 +594,34 @@ test('rejeita origem ausente, JSON inválido e symlink que escapa da raiz', asyn
   });
 });
 
+test('rejeita evidência JSON com texto bruto ou credencial', async (t) => {
+  for (const [field, value] of [
+    ['prompt', 'conteúdo que não pode ser publicado'],
+    ['generation', 'saída bruta do modelo'],
+    ['token', 'hf_valor_sensível'],
+    ['password', 'segredo'],
+    ['raw_prompt', 'conteúdo que não pode ser publicado'],
+    ['prompt_text', 'conteúdo que não pode ser publicado'],
+    ['generated_text', 'saída bruta do modelo'],
+    ['access_token', 'segredo'],
+    ['client_secret', 'segredo'],
+    ['private_key', 'segredo'],
+  ]) {
+    await t.test(field, async (t) => {
+      const root = await makeFixture(t);
+      await writeFile(
+        path.join(root, 'results', 'result.json'),
+        `${JSON.stringify({safe: {nested: {[field]: value}}})}\n`,
+      );
+
+      await assert.rejects(
+        syncContent({root}),
+        new RegExp(`campo proibido.*${field}.*result\\.json`, 'i'),
+      );
+    });
+  }
+});
+
 test('é determinístico, idempotente e --check detecta stale sem escrever', async (t) => {
   const root = await makeFixture(t);
   const generated = path.join(root, 'website', '.generated');

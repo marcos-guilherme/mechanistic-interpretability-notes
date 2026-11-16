@@ -33,11 +33,67 @@ const FILE_FIELDS = {
   destination: 'string',
   kind: 'string',
 };
+const EVIDENCE_FORBIDDEN_KEYS = new Set([
+  'api_key',
+  'apikey',
+  'authorization',
+  'completion',
+  'completions',
+  'credential',
+  'credentials',
+  'generated',
+  'generation',
+  'generations',
+  'hf_token',
+  'instruction',
+  'output',
+  'outputs',
+  'password',
+  'prompt',
+  'prompts',
+  'raw',
+  'response',
+  'responses',
+  'secret',
+  'text',
+  'token',
+  'tokens',
+]);
+const EVIDENCE_FORBIDDEN_KEY_PATTERNS = [
+  /(?:^|_)(?:prompt|instruction|generation|output|response|completion)_(?:text|content|body|value|raw|payload)$/,
+  /(?:^|_)(?:raw|generated)_(?:text|prompt|instruction|generation|output|response|completion)(?:_|$)/,
+  /(?:^|_)(?:access_token|auth_token|hf_token|api_key|client_secret|private_key|password|credentials?)(?:_|$)/,
+];
 
 export class ManifestError extends Error {
   constructor(message) {
     super(message);
     this.name = 'ManifestError';
+  }
+}
+
+function assertSafeEvidenceJson(value, source, trail = []) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      assertSafeEvidenceJson(item, source, [...trail, String(index)]);
+    });
+    return;
+  }
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    const pathLabel = [...trail, key].join('.');
+    const normalizedKey = key.toLocaleLowerCase('en-US');
+    if (
+      EVIDENCE_FORBIDDEN_KEYS.has(normalizedKey)
+      || EVIDENCE_FORBIDDEN_KEY_PATTERNS.some((pattern) => pattern.test(normalizedKey))
+    ) {
+      throw new ManifestError(
+        `campo proibido em evidência pública: ${pathLabel} (${source})`,
+      );
+    }
+    assertSafeEvidenceJson(nested, source, [...trail, key]);
   }
 }
 
@@ -1160,11 +1216,13 @@ async function buildStaging({root, rootRealPath, manifest, stagingPath}) {
   for (const evidence of manifest.allowed_evidence) {
     if (evidence.kind !== 'license') {
       const contents = await readFile(sourcePaths.get(evidence.source), 'utf8');
+      let payload;
       try {
-        JSON.parse(contents);
+        payload = JSON.parse(contents);
       } catch {
         throw new ManifestError(`JSON inválido: ${evidence.source}`);
       }
+      assertSafeEvidenceJson(payload, evidence.source);
     }
   }
 

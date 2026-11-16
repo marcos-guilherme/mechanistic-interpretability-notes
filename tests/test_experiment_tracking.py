@@ -73,6 +73,34 @@ def test_collect_snapshot_reads_canonical_results() -> None:
     }
     assert qwen["ablation_harmless_kl"] == pytest.approx(0.2638247609138489)
 
+    followup = snapshot["qwen_refusal_followup"]
+    assert followup is not None
+    assert followup["dose"]["status"] == "pass"
+    assert followup["dose"]["selected_pair"] == {
+        "ablation": 0.2,
+        "addition": 0.5,
+    }
+    assert followup["jlens"]["status"] == "pass"
+    assert followup["jlens"]["n_fit"] == 100
+    assert followup["jlens"]["n_holdout"] == 20
+    assert followup["jlens"]["benchmark_deduplicated"] is False
+    assert followup["code_eval"]["status"] == "pass"
+    assert followup["code_eval"]["human_review_status"] == "pending"
+    assert followup["code_eval"]["metrics"]["mitre"]["ablation"] == {
+        "refusal_rate": 0.0,
+        "mean_kl": pytest.approx(4.391125907190144),
+    }
+    assert followup["code_eval"]["metrics"]["humaneval_plus"]["baseline"] == {
+        "refusal_rate": 0.0,
+        "mean_kl": None,
+        "pass_at_1": 0.40625,
+    }
+    assert followup["code_eval"]["metrics"]["humaneval_plus"]["ablation"] == {
+        "refusal_rate": 0.0,
+        "mean_kl": pytest.approx(0.022580120799830183),
+        "pass_at_1": 0.40625,
+    }
+
 
 def test_collect_snapshot_omits_qwen_pilot_when_artifacts_absent(
     tmp_path: Path,
@@ -267,6 +295,15 @@ def test_render_status_names_operational_and_scientific_meanings() -> None:
     assert "causal_gate_failed" in rendered
     assert "selectividade insuficiente" in rendered
     assert "0,263825" in rendered
+    assert "Follow-up Qwen" in rendered
+    assert "20%" in rendered
+    assert "50%" in rendered
+    assert "40,62%" in rendered
+    assert "21,88%" in rendered
+    assert "revisão humana pendente" in rendered
+    assert "não foi deduplicado" in rendered
+    assert "KL alta" in rendered
+    assert "não é uma sandbox completa" in rendered
 
 
 def test_render_status_puts_blank_line_between_gemma_and_qwen_blocks() -> None:
@@ -343,4 +380,35 @@ def test_collect_snapshot_rejects_wrong_json_field_type(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(tracking.TrackingError, match="esperado texto"):
+        tracking.collect_snapshot(tmp_path)
+
+
+def test_collect_snapshot_rejects_non_boolean_operational_status(
+    tmp_path: Path,
+) -> None:
+    artifact_paths = [
+        "projects/jspace_llama/results/execution_manifest.json",
+        "projects/jspace_llama/results/final_evaluation.json",
+        "projects/jspace_llama/results/jspace_observation_manifest.json",
+        "projects/jspace_llama/results/jspace_observation.json",
+        "projects/refusal_direction/results/execution_manifest.json",
+        "projects/refusal_direction/results/final_evaluation.json",
+        "projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json",
+        "projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json",
+    ]
+    for relative in artifact_paths:
+        source = REPO_ROOT / relative
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    pilot_path = (
+        tmp_path
+        / "projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json"
+    )
+    pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
+    pilot["operational_success"] = "false"
+    pilot_path.write_text(json.dumps(pilot), encoding="utf-8")
+
+    with pytest.raises(tracking.TrackingError, match="esperado booleano"):
         tracking.collect_snapshot(tmp_path)

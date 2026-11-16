@@ -119,6 +119,17 @@ def _integer(
     return value
 
 
+def _boolean(
+    value: Any,
+    keys: Sequence[str],
+    source: Path,
+    root: Path,
+) -> bool:
+    if not isinstance(value, bool):
+        raise _invalid_type(source, root, keys, "booleano")
+    return value
+
+
 _QWEN_SCIENTIFIC_CONCLUSIONS: dict[str, tuple[str, str]] = {
     "causal_gate_failed": (
         "selectividade insuficiente",
@@ -203,8 +214,11 @@ def _collect_qwen_refusal_pilot(
             pilot_path,
             root,
         ),
-        "operational_success": bool(
-            _required(pilot, ("operational_success",), pilot_path, root)
+        "operational_success": _boolean(
+            _required(pilot, ("operational_success",), pilot_path, root),
+            ("operational_success",),
+            pilot_path,
+            root,
         ),
         "scientific_status": _text(
             _required(pilot, ("status",), pilot_path, root),
@@ -298,6 +312,190 @@ def _collect_qwen_refusal_pilot(
             evaluation_path,
             root,
         ),
+    }
+
+
+def _collect_qwen_refusal_followup(
+    root: Path,
+    refusal_results: Path,
+) -> dict[str, Any] | None:
+    """Lê dose, J-lens e avaliação de código quando os três estão completos."""
+
+    dose_path = (
+        refusal_results / "qwen25_coder_7b_dose" / "dose_followup_evaluation.json"
+    )
+    jlens_path = (
+        refusal_results / "qwen25_coder_7b_jlens" / "jlens_evaluation.json"
+    )
+    jlens_prepare_path = (
+        refusal_results / "qwen25_coder_7b_jlens" / "00_jlens_prepare.json"
+    )
+    code_path = (
+        refusal_results / "qwen25_coder_7b_code_eval" / "04_finalize.json"
+    )
+    paths = (dose_path, jlens_path, jlens_prepare_path, code_path)
+    if not all(path.is_file() for path in paths):
+        return None
+
+    dose = _load_json(dose_path, root)
+    jlens = _load_json(jlens_path, root)
+    jlens_prepare = _load_json(jlens_prepare_path, root)
+    code = _load_json(code_path, root)
+
+    selected_pair = _required(dose, ("selected_pair",), dose_path, root)
+    if not isinstance(selected_pair, dict):
+        raise _invalid_type(dose_path, root, ("selected_pair",), "objeto")
+
+    code_metrics = _required(code, ("results", "metrics"), code_path, root)
+    if not isinstance(code_metrics, dict):
+        raise _invalid_type(code_path, root, ("results", "metrics"), "objeto")
+
+    def condition_metrics(
+        dataset: str,
+        condition: str,
+        *,
+        include_pass_at_1: bool = False,
+    ) -> dict[str, Any]:
+        keys = ("results", "metrics", dataset, condition)
+        value = _required(code, keys, code_path, root)
+        if not isinstance(value, dict):
+            raise _invalid_type(code_path, root, keys, "objeto")
+        mean_kl = _required(value, ("mean_kl",), code_path, root)
+        result: dict[str, Any] = {
+            "refusal_rate": _finite_number(
+                _required(value, ("refusal_rate",), code_path, root),
+                (*keys, "refusal_rate"),
+                code_path,
+                root,
+            ),
+            "mean_kl": (
+                None
+                if mean_kl is None
+                else _finite_number(mean_kl, (*keys, "mean_kl"), code_path, root)
+            ),
+        }
+        if include_pass_at_1:
+            result["pass_at_1"] = _finite_number(
+                _required(value, ("pass_at_1",), code_path, root),
+                (*keys, "pass_at_1"),
+                code_path,
+                root,
+            )
+        return result
+
+    return {
+        "dose": {
+            "run_id": _text(
+                _required(dose, ("run_id",), dose_path, root),
+                ("run_id",),
+                dose_path,
+                root,
+            ),
+            "status": _text(
+                _required(dose, ("status",), dose_path, root),
+                ("status",),
+                dose_path,
+                root,
+            ),
+            "selected_pair": {
+                name: _finite_number(
+                    _required(selected_pair, (name,), dose_path, root),
+                    ("selected_pair", name),
+                    dose_path,
+                    root,
+                )
+                for name in ("ablation", "addition")
+            },
+        },
+        "jlens": {
+            "run_id": _text(
+                _required(jlens, ("run_id",), jlens_path, root),
+                ("run_id",),
+                jlens_path,
+                root,
+            ),
+            "status": _text(
+                _required(jlens, ("status",), jlens_path, root),
+                ("status",),
+                jlens_path,
+                root,
+            ),
+            "n_fit": _integer(
+                _required(jlens, ("n_fit",), jlens_path, root),
+                ("n_fit",),
+                jlens_path,
+                root,
+            ),
+            "n_holdout": _integer(
+                _required(jlens, ("n_holdout",), jlens_path, root),
+                ("n_holdout",),
+                jlens_path,
+                root,
+            ),
+            "benchmark_deduplicated": _boolean(
+                _required(
+                    jlens_prepare,
+                    ("results", "benchmark_deduplicated"),
+                    jlens_prepare_path,
+                    root,
+                ),
+                ("results", "benchmark_deduplicated"),
+                jlens_prepare_path,
+                root,
+            ),
+        },
+        "code_eval": {
+            "run_id": _text(
+                _required(code, ("provenance", "run_id"), code_path, root),
+                ("provenance", "run_id"),
+                code_path,
+                root,
+            ),
+            "status": _text(
+                _required(code, ("results", "status"), code_path, root),
+                ("results", "status"),
+                code_path,
+                root,
+            ),
+            "human_review_status": _text(
+                _required(
+                    code,
+                    ("results", "human_review_status"),
+                    code_path,
+                    root,
+                ),
+                ("results", "human_review_status"),
+                code_path,
+                root,
+            ),
+            "scientific_limitations": _string_list(
+                _required(
+                    code,
+                    ("results", "scientific_limitations"),
+                    code_path,
+                    root,
+                ),
+                ("results", "scientific_limitations"),
+                code_path,
+                root,
+            ),
+            "metrics": {
+                dataset: {
+                    condition: condition_metrics(
+                        dataset,
+                        condition,
+                        include_pass_at_1=dataset == "humaneval_plus",
+                    )
+                    for condition in (
+                        "baseline",
+                        "ablation",
+                        "addition",
+                        "random_control",
+                    )
+                }
+                for dataset in ("mitre", "mitre_frr", "humaneval_plus")
+            },
+        },
     }
 
 
@@ -553,6 +751,9 @@ def collect_snapshot(repo_root: Path) -> dict[str, Any]:
         "jspace_observation": jspace_observation,
         "refusal_direction": refusal_direction,
         "qwen_refusal_pilot": _collect_qwen_refusal_pilot(root, refusal_results),
+        "qwen_refusal_followup": _collect_qwen_refusal_followup(
+            root, refusal_results
+        ),
     }
 
 
@@ -648,6 +849,57 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
             "results/qwen25_coder_7b/final_evaluation.json).\n"
         )
 
+    qwen_followup_block = ""
+    followup = snapshot.get("qwen_refusal_followup")
+    if followup is not None:
+        dose = followup["dose"]
+        jlens = followup["jlens"]
+        code_eval = followup["code_eval"]
+        metrics = code_eval["metrics"]
+        review = (
+            "revisão humana pendente"
+            if code_eval["human_review_status"] == "pending"
+            else f"revisão humana `{code_eval['human_review_status']}`"
+        )
+        deduplication = (
+            "foi deduplicado contra os benchmarks"
+            if jlens["benchmark_deduplicated"]
+            else "não foi deduplicado contra os benchmarks"
+        )
+        evalplus_warning = (
+            "O EvalPlus não é uma sandbox completa."
+            if "evalplus_reliability_guard_is_not_a_complete_security_sandbox"
+            in code_eval["scientific_limitations"]
+            else ""
+        )
+        qwen_followup_block = (
+            "\n**Follow-up Qwen.** A varredura exploratória escolheu ablação "
+            f"{_percentage(dose['selected_pair']['ablation'])} e adição "
+            f"{_percentage(dose['selected_pair']['addition'])}; seu status foi "
+            f"`{dose['status']}`, sem reclassificar o piloto original. A J-lens "
+            f"específica ficou com status `{jlens['status']}` após "
+            f"{jlens['n_fit']} itens de ajuste e {jlens['n_holdout']} de "
+            "holdout. Na avaliação de código, a ablação mudou a recusa MITRE "
+            f"de {_percentage(metrics['mitre']['baseline']['refusal_rate'])} "
+            f"para {_percentage(metrics['mitre']['ablation']['refusal_rate'])} "
+            "e conservou o pass@1 HumanEval+ em "
+            f"{_percentage(metrics['humaneval_plus']['ablation']['pass_at_1'])}; "
+            "a adição reduziu esse pass@1 para "
+            f"{_percentage(metrics['humaneval_plus']['addition']['pass_at_1'])}. "
+            "Há KL alta na ablação para MITRE "
+            f"(`{_decimal(metrics['mitre']['ablation']['mean_kl'], 5)}`) e no "
+            "MITRE-FRR "
+            f"(`{_decimal(metrics['mitre_frr']['ablation']['mean_kl'], 5)}`). "
+            f"O corpus da lente {deduplication}; o resultado automático tem "
+            f"{review}. {evalplus_warning} "
+            "[dose](../projects/refusal_direction/results/"
+            "qwen25_coder_7b_dose/dose_followup_evaluation.json) · "
+            "[J-lens](../projects/refusal_direction/results/"
+            "qwen25_coder_7b_jlens/jlens_evaluation.json) · "
+            "[avaliação de código](../projects/refusal_direction/results/"
+            "qwen25_coder_7b_code_eval/04_finalize.json).\n"
+        )
+
     return (
         "### Retrato automático dos resultados\n\n"
         "**J-space causal.** "
@@ -686,6 +938,7 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
         "[avaliação](../projects/refusal_direction/results/"
         "final_evaluation.json).\n"
         f"{qwen_block}"
+        f"{qwen_followup_block}"
     )
 
 

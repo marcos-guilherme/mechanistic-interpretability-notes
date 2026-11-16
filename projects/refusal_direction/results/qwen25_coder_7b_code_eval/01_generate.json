@@ -1,0 +1,97 @@
+{
+  "config": {
+    "ablation_coefficient": 0.2,
+    "addition_coefficient": 0.5,
+    "artifacts_dir": "artifacts/qwen25_coder_7b_code_eval",
+    "batch_size": 1,
+    "dataset_size": 32,
+    "dtype": "bfloat16",
+    "evalplus_dataset_version": "v0.1.10",
+    "evalplus_memory_bytes": 1073741824,
+    "evalplus_parallelism": 1,
+    "evalplus_repository": "evalplus/evalplus",
+    "evalplus_revision": "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e",
+    "evalplus_timeout_seconds": 60,
+    "format_style": "chat_template",
+    "jlens_max_seq_len": 2048,
+    "jlens_upstream": "anthropics/jacobian-lens",
+    "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+    "manual_review_sample_size": 32,
+    "manual_review_seed": 2027,
+    "max_new_tokens": 256,
+    "mitre_frr_relative_path": "CybersecurityBenchmarks/datasets/mitre_frr/mitre_frr.json",
+    "mitre_relative_path": "CybersecurityBenchmarks/datasets/mitre/mitre_benchmark_100_per_category_with_augmentation.json",
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "purplellama_repository": "meta-llama/PurpleLlama",
+    "purplellama_revision": "0654501399e7cbd560db9501965dc09c567a5563",
+    "random_control_coefficient": 0.2,
+    "random_control_seed": 1042,
+    "results_dir": "results/qwen25_coder_7b_code_eval",
+    "scientific_limitations": [
+      "human_review_pending_until_completed_by_a_real_reviewer",
+      "evalplus_reliability_guard_is_not_a_complete_security_sandbox",
+      "execution_is_restricted_to_the_ephemeral_colab_vm",
+      "mitre_and_mitre_frr_generations_are_never_executed"
+    ],
+    "seed": 42,
+    "selection_seed": 2026,
+    "source_direction": "artifacts/qwen25_coder_7b/selected_direction.pt",
+    "source_dose_evaluation": "results/qwen25_coder_7b_dose/dose_followup_evaluation.json",
+    "source_jlens_evaluation": "results/qwen25_coder_7b_jlens/jlens_evaluation.json",
+    "source_lens": "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
+  },
+  "experiment": "code_eval_generate",
+  "provenance": {
+    "config_sha256": "bfc8af85a414bf0e23aebe37e339abd90e7e9123fb5db70948944d3a8d91c6e6",
+    "evalplus_revision": "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e",
+    "implementation_commit": "3cd0b3852b5b8f6cc1b7c2967a1b86652302adc7",
+    "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "purplellama_revision": "0654501399e7cbd560db9501965dc09c567a5563",
+    "requested_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "resolved_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "run_id": "5d214feb-e870-4e30-a783-0950a11b09f3",
+    "source_artifact_hashes": {
+      "direction": "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
+      "dose_evaluation": "6c49a775ebbe9a3ca7c18b80ab54ada064caa759d2fadcdb69b942f79f7d3986",
+      "jlens_evaluation": "6067ec0bd1dd1f0a42b9cf6cd27052800b5d6e0856d47d50984fcd085905a07a",
+      "lens": "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e"
+    },
+    "source_dose_run_id": "d76d0e7f-1e86-4953-8eac-de1c352708d2",
+    "source_jlens_run_id": "e23b9570-130e-4b9a-8000-fb91255b29d8"
+  },
+  "results": {
+    "conditions": {
+      "ablation": {
+        "coefficient": 0.2
+      },
+      "addition": {
+        "coefficient": 0.5
+      },
+      "baseline": {
+        "coefficient": 0.0
+      },
+      "random_control": {
+        "coefficient": 0.2
+      }
+    },
+    "datasets": {
+      "humaneval_plus": 32,
+      "mitre": 32,
+      "mitre_frr": 32
+    },
+    "lexicon_sha256": "4b344e1ddd7070e6d62c0e91268bc055407d9282332904c85b6be6bdbd92eb7b",
+    "lexicon_token_ids": [
+      40,
+      19152,
+      2121,
+      30040,
+      17444
+    ],
+    "random_control_seed": 1042,
+    "selected_layer": 18,
+    "selected_offset": -1
+  },
+  "schema_version": 1
+}

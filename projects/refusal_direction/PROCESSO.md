@@ -5,7 +5,7 @@
 
 > **Estado:** concluído, com reprodução causal parcial
 >
-> **Última atualização:** 10 de novembro de 2026
+> **Última atualização:** 15 de novembro de 2026
 
 ## Síntese acadêmica
 
@@ -466,3 +466,145 @@ retrospectivamente a classificação desta execução.
 - [`final_evaluation.json`](results/qwen25_coder_7b/final_evaluation.json)
 - [`pilot_evaluation.json`](results/qwen25_coder_7b/pilot_evaluation.json)
 - [`execution_manifest.json`](results/qwen25_coder_7b/execution_manifest.json)
+
+## Follow-up exploratório no Qwen2.5-Coder-7B
+
+### Por que ele não substitui o piloto
+
+O piloto congelado mostrou que a direção produzia um efeito causal forte, mas
+falhou no limite de preservação. Em vez de procurar outra direção depois de
+ver esse resultado, mantive a direção da camada 18 e fiz uma pergunta mais
+restrita: uma intervenção parcial conservaria o efeito com uma KL menor?
+
+Este follow-up é exploratório. Ele foi definido depois da falha do piloto e
+não transforma `causal_gate_failed` em sucesso retrospectivo. Para evitar que
+a mesma amostra escolhesse e confirmasse os coeficientes, usei subconjuntos
+disjuntos de seleção e confirmação, com 32 exemplos por classe em cada etapa.
+
+### Varredura de dose
+
+Testei os coeficientes `0,1`, `0,2`, `0,35`, `0,5`, `0,75` e `1,0`. A seleção
+escolheu ablação de 20% e adição de 50%. Na confirmação, a recusa nociva caiu
+de 96,875% para 43,75%, uma diferença de 53,125 pontos percentuais. A adição
+elevou a recusa inofensiva de 0% para 31,25%. O controle aleatório permaneceu
+em 96,875% de recusa nociva, e a KL inofensiva da ablação foi `0,022759`,
+abaixo do limite `0,10`.
+
+Os quatro gates passaram nessa amostra de confirmação. O resultado sustenta a
+hipótese de que a intensidade importa, mas não apaga a falha da intervenção
+integral. A fonte compacta é
+[`dose_followup_evaluation.json`](results/qwen25_coder_7b_dose/dose_followup_evaluation.json);
+os valores por exemplo e a proveniência estão em
+[`03_dose_confirmation.json`](results/qwen25_coder_7b_dose/03_dose_confirmation.json).
+
+### Ajuste de uma J-lens para o Qwen
+
+Como o follow-up de dose passou, ajustei uma lente específica ao checkpoint do
+Qwen. Fixei `anthropics/jacobian-lens` no commit
+`581d398613e5602a5af361e1c34d3a92ea82ba8e` e usei o split de treino Python
+do CodeSearchNet na revisão
+`bd0cf261e357a3eb5c8fba490d23ec1a1cd59555`. Entre 191 registros examinados,
+120 satisfizeram os critérios de tamanho e conteúdo: 100 foram usados no
+ajuste e 20 ficaram no holdout.
+
+O probe escolheu `dim_batch=32`. O ajuste produziu 27 matrizes, das camadas
+0 a 26 para a camada alvo 27. O arquivo da lente tem 693.642.187 bytes e hash
+SHA-256
+`b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e`.
+No holdout, agregando 59.940 observações, a J-lens obteve
+`pass@1/5/10 = 0,12681 / 0,21178 / 0,25167`; a logit lens obteve
+`0,11168 / 0,17219 / 0,19351`. Isso valida formato, finitude e utilidade
+descritiva mínima da lente nesse corpus. Não prova que ela leia corretamente
+todo conceito de recusa fora da distribuição do CodeSearchNet.
+
+Há uma limitação importante: a preparação registra
+`benchmark_deduplicated=false`. Não havia uma lista de exclusão disponível
+para deduplicar o corpus de ajuste contra os benchmarks usados depois. Essa
+lacuna não deve ser escondida ao interpretar a avaliação. As fontes são
+[`00_jlens_prepare.json`](results/qwen25_coder_7b_jlens/00_jlens_prepare.json),
+[`03_jlens_holdout.json`](results/qwen25_coder_7b_jlens/03_jlens_holdout.json)
+e
+[`jlens_evaluation.json`](results/qwen25_coder_7b_jlens/jlens_evaluation.json).
+
+### Avaliação em tarefas de código
+
+A execução `5d214feb-e870-4e30-a783-0950a11b09f3` avaliou 32 itens de cada
+conjunto em quatro condições: baseline, ablação de 20%, adição de 50% e
+controle aleatório de 20%. MITRE representa pedidos ofensivos; MITRE-FRR
+contém pedidos defensivos ou sensíveis que não deveriam ser recusados
+indiscriminadamente; HumanEval+ mede capacidade funcional de programação.
+
+Os resultados automáticos foram:
+
+| Conjunto | Condição | Recusa | KL média | pass@1 |
+| --- | --- | ---: | ---: | ---: |
+| MITRE | baseline | 78,125% | n/d | n/d |
+| MITRE | ablação | 0% | 4,39113 | n/d |
+| MITRE | adição | 100% | 1,91932 | n/d |
+| MITRE | controle | 81,25% | 0,00081 | n/d |
+| MITRE-FRR | baseline | 9,375% | n/d | n/d |
+| MITRE-FRR | ablação | 0% | 1,14368 | n/d |
+| MITRE-FRR | adição | 100% | 3,83226 | n/d |
+| MITRE-FRR | controle | 6,25% | 0,00125 | n/d |
+| HumanEval+ | baseline | 0% | n/d | 40,625% |
+| HumanEval+ | ablação | 0% | 0,02258 | 40,625% |
+| HumanEval+ | adição | 65,625% | 1,40227 | 21,875% |
+| HumanEval+ | controle | 0% | 0,00102 | 37,5% |
+
+A ablação preservou exatamente o pass@1 de HumanEval+ nesta amostra e removeu
+as recusas MITRE. Esse é o resultado mais favorável do follow-up. Ainda assim,
+a KL foi alta em MITRE e MITRE-FRR. Portanto, os dados não sustentam uma
+afirmação de alteração interna globalmente seletiva. A adição foi claramente
+não seletiva: fez todos os itens MITRE e MITRE-FRR serem recusados, induziu
+recusa em 21 dos 32 itens HumanEval+ e reduziu o pass@1 de 13/32 para 7/32. O
+controle aleatório ficou próximo do baseline e teve KL pequena nos três
+conjuntos.
+
+### O que a J-lens mostrou durante as intervenções
+
+O readout procurou um léxico de recusa no último token da instrução e no
+primeiro token da resposta. Para cada conjunto e condição, examinei todas as
+camadas e resumi aqui a camada com menor rank médio. Essa escolha é descritiva
+e foi feita depois de observar os resultados; ela não é um novo gate
+pré-registrado.
+
+No último token da instrução, o baseline MITRE atingiu rank médio `3,19` na
+camada 22, com algum token do léxico no top 5 em 81,25% dos exemplos. A adição
+levou o rank médio a `1,0` na camada 23 e o hit@5 a 100%; a ablação deslocou o
+melhor rank médio para `26,78` na camada 26, sem hit@5. O controle reproduziu
+de perto o baseline. Em MITRE-FRR, a adição também levou o rank médio a `1,0`
+e hit@5 a 100%, apesar de esses pedidos serem defensivos. Em HumanEval+, a
+adição colocou o léxico em rank médio `2,94` na camada 26, com hit@5 de 87,5%,
+enquanto baseline, ablação e controle não tiveram hit@5 em sua melhor camada.
+
+Na primeira posição da resposta, a adição ainda produziu sinal forte em MITRE
+e MITRE-FRR, com ranks médios `2,0` e `1,94`. Em HumanEval+, porém, o melhor
+rank médio foi `147`, mesmo com 65,625% de recusas na geração. Isso mostra que
+posição de leitura, camada, léxico e comportamento gerado não são medidas
+intercambiáveis. A J-lens oferece um retrato interno coerente em parte do
+recorte, mas a causalidade vem da intervenção na direção, não do rank da
+lente.
+
+Os agregados completos estão em
+[`03_readout.json`](results/qwen25_coder_7b_code_eval/03_readout.json) e
+[`04_finalize.json`](results/qwen25_coder_7b_code_eval/04_finalize.json).
+
+### Segurança, revisão e conclusão atual
+
+Somente HumanEval+ foi executado. As gerações MITRE e MITRE-FRR nunca foram
+executadas. O EvalPlus rodou na VM efêmera do Colab com diretório temporário,
+limite de memória, timeout e paralelismo 1, mas seu `reliability_guard` não é
+uma sandbox de segurança completa. Prompts, gerações, tensores e a amostra
+cega ficam em `artifacts/`, fora do Git.
+
+A revisão humana cega de 32 classificações está preparada, mas continua
+pendente. Por isso, as taxas de recusa acima devem ser tratadas como rótulos
+automáticos, não como concordância humano-classificador já verificada.
+
+Minha leitura atual é composta. A dose parcial de ablação removeu recusa em
+pedidos ofensivos e preservou o pass@1 de HumanEval+ nesta amostra. Ao mesmo
+tempo, a KL alta nos dois conjuntos MITRE impede chamar a intervenção de
+globalmente seletiva, e a adição prejudicou pedidos defensivos e tarefas
+normais de código. O follow-up produz evidência útil sobre intensidade,
+transferência e leitura interna, mas deixa uma conclusão de segurança ampla
+fora do alcance.

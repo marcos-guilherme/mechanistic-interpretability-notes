@@ -25,6 +25,8 @@ executáveis.
 **Direção de Recusa.** Modelo `google/gemma-2b-it`; 4 estágios completos (baseline, extração, intervenção, avaliação). Conclusão científica: evidência **causal local**. Direção selecionada na camada 12, posição -1. Recusa nociva: baseline 100%, ablação 0%, controle aleatório 100%; adição em pedidos inofensivos 93,75%; KL inofensiva após ablação `0,030571`. [Manifesto](../projects/refusal_direction/results/execution_manifest.json) · [intervenções](../projects/refusal_direction/results/03_interventions.json) · [avaliação](../projects/refusal_direction/results/final_evaluation.json).
 
 **Direção de Recusa (piloto Qwen).** Modelo `Qwen/Qwen2.5-Coder-7B-Instruct` na revisão `c03e6d358207e414f1eca0bb1891e29f1db0e242`; execução `c0818150-f834-4692-b271-4e10a97eb57e`. Operação concluída; Conclusão científica: **selectividade insuficiente** (`causal_gate_failed`): manipulação forte, mas KL inofensiva após ablação acima do limite 0,10. Direção na camada 18, posição -1. Recusa nociva (teste, splits sem filtro): baseline 87,50%, ablação 0%, controle 87,50%; recusa inofensiva: baseline 3,12%, adição 100%; KL inofensiva após ablação `0,263825`. [Piloto](../projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json) · [avaliação](../projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json).
+
+**Follow-up Qwen.** A varredura exploratória escolheu ablação 20% e adição 50%; seu status foi `pass`, sem reclassificar o piloto original. A J-lens específica ficou com status `pass` após 100 itens de ajuste e 20 de holdout. Na avaliação de código, a ablação mudou a recusa MITRE de 78,12% para 0% e conservou o pass@1 HumanEval+ em 40,62%; a adição reduziu esse pass@1 para 21,88%. Há KL alta na ablação para MITRE (`4,39113`) e no MITRE-FRR (`1,14368`). O corpus da lente não foi deduplicado contra os benchmarks; o resultado automático tem revisão humana pendente. O EvalPlus não é uma sandbox completa. [dose](../projects/refusal_direction/results/qwen25_coder_7b_dose/dose_followup_evaluation.json) · [J-lens](../projects/refusal_direction/results/qwen25_coder_7b_jlens/jlens_evaluation.json) · [avaliação de código](../projects/refusal_direction/results/qwen25_coder_7b_code_eval/04_finalize.json).
 <!-- END GENERATED STATUS -->
 
 ## Duas noções de sucesso
@@ -261,6 +263,68 @@ e nos JSONs em `projects/refusal_direction/results/qwen25_coder_7b/`.
 Qualquer varredura de dose que eu fizer depois é **exploratória**. Ela pode
 informar intensidade, mas **não** reclassifica retroativamente este piloto como
 aprovado. Mantenho a distinção entre operação concluída e gate causal falhado.
+
+## Estudo 2c: follow-up Qwen em código
+
+### Estado atual
+
+O follow-up concluiu três etapas: varredura de dose, ajuste de uma J-lens
+específica e avaliação em MITRE, MITRE-FRR e HumanEval+. A execução é
+reproduzível a partir dos artefatos compactos, mas a revisão humana das
+classificações de recusa ainda está pendente. O resultado não reclassifica o
+piloto original.
+
+### Cronologia
+
+**1. Reformulação após o gate falhado.** Mantive a direção da camada 18 e
+perguntei se uma dose parcial poderia reduzir a KL sem eliminar o efeito. Usei
+splits disjuntos para escolher e confirmar os coeficientes. A confirmação
+selecionou ablação de 20% e adição de 50%. A recusa nociva caiu 53,125 pontos,
+a KL inofensiva ficou em `0,022759`, e o controle aleatório não reproduziu o
+efeito. Fonte:
+[`dose_followup_evaluation.json`](../projects/refusal_direction/results/qwen25_coder_7b_dose/dose_followup_evaluation.json).
+
+**2. Ajuste da J-lens.** Ajustei 27 matrizes com 100 itens do CodeSearchNet e
+reservei 20 itens para holdout. No agregado do holdout, a J-lens superou a
+logit lens em pass@1, pass@5 e pass@10. O preparo registra que não houve
+deduplicação contra os benchmarks posteriores. Fontes:
+[`jlens_evaluation.json`](../projects/refusal_direction/results/qwen25_coder_7b_jlens/jlens_evaluation.json)
+e
+[`03_jlens_holdout.json`](../projects/refusal_direction/results/qwen25_coder_7b_jlens/03_jlens_holdout.json).
+
+**3. Avaliação comportamental em código.** Em 32 itens MITRE, a ablação reduziu
+a recusa de 78,125% para 0%. Em 32 itens HumanEval+, preservou o pass@1 em
+40,625%. A adição foi menos seletiva: levou MITRE e MITRE-FRR a 100% de
+recusa, induziu 65,625% de recusas no HumanEval+ e reduziu seu pass@1 para
+21,875%. O controle ficou próximo do baseline.
+
+**4. Preservação não uniforme.** A KL da ablação foi `0,02258` no HumanEval+,
+mas `4,39113` no MITRE e `1,14368` no MITRE-FRR. Portanto, preservação de
+capacidade em uma amostra não equivale a uma perturbação interna pequena em
+todas as distribuições.
+
+**5. Leitura pela J-lens.** No último token da instrução, a adição colocou o
+léxico de recusa em rank médio 1 nas melhores camadas de MITRE e MITRE-FRR.
+No HumanEval+, chegou a rank médio `2,94`, enquanto baseline, ablação e
+controle não tiveram hit@5 em sua melhor camada. Esse padrão acompanha a
+indução comportamental de recusa, mas o readout continua observacional.
+
+**6. Limites e segurança.** Somente HumanEval+ foi executado; código gerado a
+partir de MITRE e MITRE-FRR nunca foi executado. O `reliability_guard` do
+EvalPlus reduz riscos operacionais, mas não constitui uma sandbox completa.
+Prompts e gerações ficam fora do Git. A amostra cega de 32 classificações foi
+preparada, porém ainda precisa de uma pessoa revisora. Fontes:
+[`04_finalize.json`](../projects/refusal_direction/results/qwen25_coder_7b_code_eval/04_finalize.json)
+e
+[`execution_manifest.json`](../projects/refusal_direction/results/qwen25_coder_7b_code_eval/execution_manifest.json).
+
+### Decisão atual
+
+Considero que a ablação parcial transferiu para código com preservação de
+pass@1 no HumanEval+ desta amostra. Não considero demonstrada uma seletividade
+global, porque a KL foi alta nos dois conjuntos MITRE e a adição causou
+recusas amplas. Antes de ampliar a conclusão, falta concluir a revisão humana
+e repetir o estudo com novas amostras.
 
 ## Modelo leve para futuras entradas
 

@@ -48,6 +48,9 @@ gerações.
   (`causal_gate_failed`; operação concluída, gate de selectividade falhou):
   [pilot_evaluation.json](../../projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json)
   · [final_evaluation.json](../../projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json)
+- Follow-up exploratório no Qwen, sem reclassificar o piloto: [dose](../../projects/refusal_direction/results/qwen25_coder_7b_dose/dose_followup_evaluation.json)
+  · [J-lens](../../projects/refusal_direction/results/qwen25_coder_7b_jlens/jlens_evaluation.json)
+  · [avaliação de código](../../projects/refusal_direction/results/qwen25_coder_7b_code_eval/04_finalize.json)
 
 ### J-space Llama: tentativa causal e atlas observacional
 

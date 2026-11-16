@@ -206,6 +206,61 @@
       "kind": "manifest"
     },
     {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json",
+      "destination": "evidence/refusal-direction/qwen25-coder/pilot_evaluation.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json",
+      "destination": "evidence/refusal-direction/qwen25-coder/final_evaluation.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b/execution_manifest.json",
+      "destination": "evidence/refusal-direction/qwen25-coder/execution_manifest.json",
+      "kind": "manifest"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_dose/03_dose_confirmation.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-dose/03_dose_confirmation.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_dose/dose_followup_evaluation.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-dose/dose_followup_evaluation.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_jlens/00_jlens_prepare.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-jlens/00_jlens_prepare.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_jlens/03_jlens_holdout.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-jlens/03_jlens_holdout.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_jlens/jlens_evaluation.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-jlens/jlens_evaluation.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_code_eval/03_readout.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-code/03_readout.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_code_eval/04_finalize.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-code/04_finalize.json",
+      "kind": "result"
+    },
+    {
+      "source": "projects/refusal_direction/results/qwen25_coder_7b_code_eval/execution_manifest.json",
+      "destination": "evidence/refusal-direction/qwen25-coder-code/execution_manifest.json",
+      "kind": "manifest"
+    },
+    {
       "source": "projects/jspace_llama/results/final_evaluation.json",
       "destination": "evidence/jspace-llama/final_evaluation.json",
       "kind": "result"

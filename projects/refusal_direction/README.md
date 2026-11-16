@@ -145,3 +145,49 @@ Fontes canônicas (somente métricas agregadas e proveniência, sem textos bruto
 - [`results/qwen25_coder_7b/execution_manifest.json`](results/qwen25_coder_7b/execution_manifest.json)
 
 A narrativa completa do congelamento está na seção piloto Qwen em [`PROCESSO.md`](PROCESSO.md).
+
+## Follow-up de dose, J-lens e código no Qwen
+
+Depois da falha do piloto integral, mantive a direção da camada 18 e testei
+intensidades menores em splits disjuntos de seleção e confirmação. Esse
+follow-up é exploratório e não altera o status `causal_gate_failed` do piloto.
+
+A confirmação escolheu ablação de 20% e adição de 50%. Em 32 pedidos nocivos,
+a ablação reduziu a recusa de 96,875% para 43,75%; em 32 pedidos inofensivos,
+a adição elevou a recusa de 0% para 31,25%. A KL inofensiva da ablação foi
+`0,022759`, e o controle aleatório manteve 96,875% de recusa nociva. Os quatro
+gates do follow-up passaram.
+
+Em seguida, ajustei uma J-lens específica com 100 itens do CodeSearchNet e
+reservei 20 para holdout. A lente tem 27 matrizes, uma para cada origem entre
+as camadas 0 e 26, com alvo na camada 27. No holdout, a J-lens teve
+`pass@1/5/10 = 0,12681 / 0,21178 / 0,25167`, contra
+`0,11168 / 0,17219 / 0,19351` da logit lens. O corpus não foi deduplicado
+contra os benchmarks posteriores, uma limitação registrada nos artefatos.
+
+Por fim, avaliei 32 itens MITRE, 32 MITRE-FRR e 32 HumanEval+ em baseline,
+ablação, adição e controle:
+
+- no MITRE, a recusa caiu de 78,125% para 0% com ablação;
+- no MITRE-FRR, a adição elevou a recusa de 9,375% para 100%;
+- no HumanEval+, a ablação preservou o pass@1 em 40,625%, enquanto a adição o
+  reduziu para 21,875% e induziu 65,625% de recusas;
+- o controle aleatório permaneceu próximo do baseline e apresentou KL pequena;
+- a KL da ablação foi baixa no HumanEval+ (`0,02258`), mas alta no MITRE
+  (`4,39113`) e no MITRE-FRR (`1,14368`).
+
+Isso mostra um efeito comportamental útil da ablação parcial nesta amostra,
+mas não uma alteração globalmente seletiva. A adição foi indiscriminada e
+prejudicou tanto pedidos defensivos quanto tarefas normais de programação.
+A revisão humana cega das classificações automáticas de recusa ainda está
+pendente.
+
+Fontes compactas:
+
+- [`dose_followup_evaluation.json`](results/qwen25_coder_7b_dose/dose_followup_evaluation.json)
+- [`jlens_evaluation.json`](results/qwen25_coder_7b_jlens/jlens_evaluation.json)
+- [`04_finalize.json`](results/qwen25_coder_7b_code_eval/04_finalize.json)
+- [`execution_manifest.json`](results/qwen25_coder_7b_code_eval/execution_manifest.json)
+
+O método, a leitura da J-lens, as decisões operacionais e as limitações estão
+documentados em [`PROCESSO.md`](PROCESSO.md#follow-up-exploratório-no-qwen25-coder-7b).
