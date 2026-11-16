@@ -5,7 +5,7 @@
 
 > **Estado:** concluído, com reprodução causal parcial
 >
-> **Última atualização:** 15 de novembro de 2026
+> **Última atualização:** 16 de novembro de 2026
 
 ## Síntese acadêmica
 
@@ -608,3 +608,57 @@ globalmente seletiva, e a adição prejudicou pedidos defensivos e tarefas
 normais de código. O follow-up produz evidência útil sobre intensidade,
 transferência e leitura interna, mas deixa uma conclusão de segurança ampla
 fora do alcance.
+
+## Laboratório visual Qwen (novembro 2026)
+
+### Decisão: ferramenta separada do experimento
+
+O follow-up em batch já tinha fechado métricas, gates e leituras agregadas da
+J-lens. Quis uma forma de **inspecionar** a mesma direção congelada e a mesma
+lente sem misturar isso ao pipeline de notebooks, `fetch` e JSONs em
+`results/`. Por isso criei o perfil `qwen25-coder-lab` e o pacote
+`qwen_lab_*`: motor de intervenção, readout incremental e controller Gradio
+com contratos próprios.
+
+Essa separação é deliberada. O laboratório **não** reabre seleção de direção,
+não mede KL em amostra fixa, não substitui o piloto com status
+`causal_gate_failed` e não converte ranks da lente em nova evidência causal. É
+exploração qualitativa e pedagógica sobre artefatos já congelados.
+
+O desenho está em
+[`docs/superpowers/specs/2026-11-16-qwen-intervention-lab-design.md`](../../docs/superpowers/specs/2026-11-16-qwen-intervention-lab-design.md).
+A operação passo a passo está em
+[`LABORATORIO_QWEN.md`](LABORATORIO_QWEN.md).
+
+### Caderno de bordo
+
+**Implementação (tarefas 1 a 4).** Contratos em `qwen_lab.py`, readout ao vivo,
+runtime com uma geração concorrente, app Gradio pinado em 5.49.1, transporte
+Colab com direção e lente fatiadas, auth de uso único e recusa explícita de
+`fetch` no orquestrador. Testes locais do pacote lab passaram com Gradio no pin
+(174 testes no relatório da tarefa 4, antes do smoke de hardware).
+
+**Smoke em A100, 16 de novembro de 2026.** GPU A100-SXM4-40GB; modelo e revisão
+do JSON `qwen25_coder_7b_lab.json`; hashes verificados da direção (`0b1cff5e...`)
+e da lente (`b700a78c...`). A cadeia start, sync, bootstrap, auth-hf e lab
+subiu com autenticação temporária funcionando. Testei baseline e ablação 20%
+com um prompt inofensivo de programação, temperatura 0, camada J-lens 18, top-k
+5 e limite de 6 novos tokens. Ambas as condições chegaram ao passo 6 com estado
+de limite de tokens e mantiveram token emitido e top-k da lente atualizados em
+sincronia. Não registro aqui o texto do prompt nem trechos de geração.
+
+**Incidente de startup.** Na primeira subida a URL demorou porque o stdout do
+processo remoto estava bufferizado. Corrigi em `71788f6` com `python -u` no
+lançador em `colab_start_lab.py`. Na segunda tentativa a URL pública apareceu em
+cerca de 40 segundos.
+
+**Exportação e encerramento.** Iniciei validação de exportação pela interface,
+mas a sessão Colab encerrou antes da ação. Os testes locais de exportação
+explícita cobrem o schema e a ausência de segredos; falta ainda um smoke
+remoto que confirme o download do JSON através do relay. Ao final rodei
+`colab sessions` e confirmei nenhuma sessão ativa.
+
+**Interpretação registrada.** A interface mostra previsões da J-lens, não
+“pensamentos” do modelo. Nada neste smoke altera as conclusões do piloto, da
+dose, do ajuste de lente em batch ou da avaliação MITRE/HumanEval+ documentadas
+acima.

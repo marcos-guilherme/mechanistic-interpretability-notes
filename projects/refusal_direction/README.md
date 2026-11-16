@@ -191,3 +191,18 @@ Fontes compactas:
 
 O método, a leitura da J-lens, as decisões operacionais e as limitações estão
 documentados em [`PROCESSO.md`](PROCESSO.md#follow-up-exploratório-no-qwen25-coder-7b).
+
+## Laboratório visual Qwen (A100)
+
+Depois do follow-up em batch, separei um **laboratório Gradio** para explorar a
+mesma direção e J-lens congeladas de forma interativa, sem novo protocolo de
+métricas. O perfil Colab `qwen25-coder-lab` sobe o motor, a leitura ao vivo e a
+interface com autenticação temporária; `fetch` não se aplica a esse perfil.
+
+Em 16 de novembro de 2026 o smoke em A100 confirmou autenticação, publicação da
+URL e geração sincronizada em baseline e ablação 20% com parâmetros fixos
+(descritos no caderno de bordo). Exportação pela interface ficou pendente de
+smoke remoto; os testes locais cobrem o contrato de exportação explícita.
+
+Guia operacional completo: [`LABORATORIO_QWEN.md`](LABORATORIO_QWEN.md). Contexto
+e decisões no [`PROCESSO.md`](PROCESSO.md#laboratório-visual-qwen-novembro-2026).
