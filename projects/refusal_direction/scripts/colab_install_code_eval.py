@@ -150,6 +150,36 @@ def smoke_evalplus_contract(
     return sanitized
 
 
+def assemble_staged_lens() -> Path:
+    destination = Path(REMOTE_CODE_EVAL_LENS_STAGING)
+    parts = sorted(destination.parent.glob(destination.name + ".part*"))
+    if not parts:
+        if destination.is_file():
+            return destination
+        raise FileNotFoundError("code-eval lens staging parts are missing")
+    expected = [
+        destination.name + f".part{index:03d}" for index in range(len(parts))
+    ]
+    if [part.name for part in parts] != expected:
+        raise ValueError("code-eval lens staging parts are not contiguous")
+    temporary = destination.with_name(destination.name + ".assembling")
+    try:
+        with temporary.open("wb") as output:
+            for part in parts:
+                if not part.is_file() or part.stat().st_size <= 0:
+                    raise ValueError(f"invalid code-eval lens part: {part.name}")
+                with part.open("rb") as incoming:
+                    while chunk := incoming.read(8 * 1024**2):
+                        output.write(chunk)
+        temporary.replace(destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    for part in parts:
+        part.unlink()
+    return destination
+
+
 def main() -> int:
     if JLENS_UPSTREAM_SPEC.rsplit("@", 1)[-1] != JLENS_COMMIT:
         raise ValueError("Jacobian-lens install spec differs from the pinned commit")
@@ -161,9 +191,10 @@ def main() -> int:
     if _installed_commit("evalplus") != EVALPLUS_COMMIT:
         raise ValueError("installed EvalPlus commit differs from the pinned commit")
     smoke_evalplus_contract()
+    staged_lens = assemble_staged_lens()
     atomic_install_code_eval_sources(
         staged_direction=Path(REMOTE_CODE_EVAL_DIRECTION_STAGING),
-        staged_lens=Path(REMOTE_CODE_EVAL_LENS_STAGING),
+        staged_lens=staged_lens,
         project=REMOTE_ROOT,
     )
     return 0

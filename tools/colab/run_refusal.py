@@ -26,11 +26,37 @@ EXCLUDED_PARTS = {
     "__pycache__",
     "artifacts",
 }
+CODE_EVAL_LENS_CHUNK_BYTES = 64 * 1024**2
+REMOTE_CODE_EVAL_LENS_STAGING = "/content/code_eval_source_lens.pt"
 
 
 def huggingface_token_path(home: Path | None = None) -> Path:
     base = home if home is not None else Path.home()
     return base / ".cache" / "huggingface" / "token"
+
+
+def split_code_eval_lens(
+    source: Path,
+    staging: Path,
+    *,
+    chunk_bytes: int = CODE_EVAL_LENS_CHUNK_BYTES,
+) -> list[Path]:
+    if chunk_bytes <= 0:
+        raise ValueError("chunk_bytes must be positive")
+    staging.mkdir(parents=True, exist_ok=True)
+    for old in staging.glob("lens.part*"):
+        old.unlink()
+    parts: list[Path] = []
+    with source.open("rb") as incoming:
+        index = 0
+        while payload := incoming.read(chunk_bytes):
+            part = staging / f"lens.part{index:03d}"
+            part.write_bytes(payload)
+            parts.append(part)
+            index += 1
+    if not parts:
+        raise ValueError("code-eval lens is empty")
+    return parts
 
 
 def start_command(session: str, gpu: str) -> list[str]:
@@ -376,13 +402,18 @@ def main() -> int:
                     "/content/code_eval_source_direction.pt",
                 )
             )
-            run(
-                upload_command(
-                    session,
-                    source_lens,
-                    "/content/code_eval_source_lens.pt",
-                )
+            lens_parts = split_code_eval_lens(
+                source_lens,
+                ROOT / ".colab-staging" / "code-eval-lens-parts",
             )
+            for index, part in enumerate(lens_parts):
+                run(
+                    upload_command(
+                        session,
+                        part,
+                        f"{REMOTE_CODE_EVAL_LENS_STAGING}.part{index:03d}",
+                    )
+                )
         if args.profile == "qwen25-coder-jlens":
             for local_path, remote in optional_jlens_resume_bundle(PROJECT):
                 run(upload_command(session, local_path, remote))

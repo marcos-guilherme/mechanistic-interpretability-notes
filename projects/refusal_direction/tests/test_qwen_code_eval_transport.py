@@ -368,7 +368,28 @@ def test_colab_profile_routes_sync_bootstrap_run_status_and_fetch(
     module.main()
     uploaded = [item for command in commands for item in command]
     assert REMOTE_CODE_EVAL_DIRECTION_STAGING in uploaded
-    assert REMOTE_CODE_EVAL_LENS_STAGING in uploaded
+    assert any(
+        str(item).startswith(REMOTE_CODE_EVAL_LENS_STAGING + ".part")
+        for item in uploaded
+    )
+
+
+def test_code_eval_installer_reassembles_contiguous_lens_parts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _installer()
+    destination = tmp_path / "lens.pt"
+    monkeypatch.setattr(
+        module,
+        "REMOTE_CODE_EVAL_LENS_STAGING",
+        str(destination),
+    )
+    (tmp_path / "lens.pt.part000").write_bytes(b"first")
+    (tmp_path / "lens.pt.part001").write_bytes(b"second")
+    assert module.assemble_staged_lens() == destination
+    assert destination.read_bytes() == b"firstsecond"
+    assert not list(tmp_path.glob("lens.pt.part*"))
 
 
 def test_code_eval_scripts_exist_and_pin_dependencies() -> None:
