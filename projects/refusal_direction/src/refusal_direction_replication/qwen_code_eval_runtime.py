@@ -1007,6 +1007,50 @@ def _write_terminal_files(
     )
 
 
+def _reconcile_terminal_status(
+    store: RunProgressStore,
+    evaluation: Mapping[str, Any],
+) -> None:
+    if evaluation.get("status") == STATUS_PASS:
+        stage = "finalize"
+        state = "completed"
+        event = "stage_completed"
+        completed = total = 1
+    else:
+        stage = str(evaluation.get("stage") or "prepare")
+        state = "failed"
+        event = "failed"
+        completed = 0
+        total = stage_total_units(stage)
+    store.write_terminal_snapshot(
+        {
+            "schema_version": 1,
+            "profile": store.profile,
+            "run_id": store.run_id,
+            "current_stage": stage,
+            "state": state,
+            "completed_units": completed,
+            "total_units": total,
+        }
+    )
+    if not store.has_matching_event(
+        event=event,
+        state=state,
+        stage=stage,
+        completed_units=completed,
+        total_units=total,
+    ):
+        store.append_public_event(
+            {
+                "event": event,
+                "stage": stage,
+                "state": state,
+                "completed_units": completed,
+                "total_units": total,
+            }
+        )
+
+
 def run_qwen_code_eval(
     root: Path,
     *,
@@ -1031,6 +1075,7 @@ def run_qwen_code_eval(
         implementation_commit=commit,
         source=source,
     )
+    store = RunProgressStore(artifacts_dir, profile=profile, run_id=resolved_run)
     terminal_path = results_dir / EVALUATION_FILENAME
     if terminal_path.is_file():
         terminal = _read_json(terminal_path)
@@ -1040,8 +1085,8 @@ def run_qwen_code_eval(
             raise ValueError("stale code-eval terminal implementation_commit")
         if terminal.get("source_artifact_hashes") != source["source_artifact_hashes"]:
             raise ValueError("stale code-eval terminal source hashes")
+        _reconcile_terminal_status(store, terminal)
         return terminal
-    store = RunProgressStore(artifacts_dir, profile=profile, run_id=resolved_run)
     runner = stage_runner or _default_stage_runner
     last: dict[str, Any] | None = None
     for stage in CODE_EVAL_STAGES:
@@ -1083,7 +1128,6 @@ def run_qwen_code_eval(
                 results=results,
                 provenance=provenance,
             )
-            store.complete_stage()
             last = results
             if stage == "finalize":
                 _write_terminal_files(
@@ -1092,6 +1136,7 @@ def run_qwen_code_eval(
                     provenance=provenance,
                     evaluation=results,
                 )
+            store.complete_stage()
         except Exception as exc:
             category, error_code, message = classify_operational_error(exc)
             failure = {

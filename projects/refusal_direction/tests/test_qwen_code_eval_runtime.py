@@ -209,6 +209,17 @@ def test_orchestrator_resumes_completed_stages_and_finalizes_pending_review(
     assert first["status"] == "pass"
     assert first["human_review_status"] == "pending"
 
+    atomic_write_json(
+        tmp_path / "artifacts/qwen25_coder_7b_code_eval/status.json",
+        {
+            "profile": "qwen25_coder_7b_code_eval.json",
+            "run_id": "code-eval-run",
+            "current_stage": "generate",
+            "state": "running",
+            "completed_units": 7,
+            "total_units": 384,
+        },
+    )
     calls.clear()
     second = run_qwen_code_eval(
         tmp_path,
