@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import re
 from typing import Any
 
 from .data import (
@@ -75,24 +76,127 @@ METADATA_LEAK_KEYS = frozenset(
         "completions",
     }
 )
-ALLOWED_AGGREGATE_TEXT_FIELDS = frozenset(
+ALLOWED_OPERATIONAL_MESSAGES = frozenset(OPERATIONAL_ERROR_MESSAGES.values())
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:+-]+$")
+_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+_HASH_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+_PATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
+_GATE_REASON_RE = re.compile(
+    r"^[a-z0-9_]+: observed [-+0-9.eE]+(?: not)? (?:>=|<=) [-+0-9.eE]+$"
+)
+_GATE_PASSED_RE = re.compile(r"^[a-z0-9_]+ passed$")
+_PREFIX_RE = re.compile(r"^[\w' ]{1,32}$")
+_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.json$")
+_NO_DOSE_REASON = "no qualifying dose pair"
+_DOSE_STATUSES = frozenset(
     {
-        "reason",
-        "abort_reason",
-        "abort_gate",
-        "exception_category",
-        "error_code",
-        "status",
-        "message",
-        "name",
-        "comparator",
-        "experiment",
-        "refusal_prefixes",
-        "gpu",
-        "device",
+        STATUS_PASS,
+        STATUS_CAUSAL_GATE_FAILED,
+        STATUS_OPERATIONAL_ERROR,
+        STATUS_NO_DOSE_QUALIFIED,
     }
 )
-ALLOWED_OPERATIONAL_MESSAGES = frozenset(OPERATIONAL_ERROR_MESSAGES.values())
+_EXPERIMENTS = frozenset(
+    {
+        "dose_prepare",
+        "dose_baseline",
+        "dose_selection",
+        "dose_checkpoint",
+        "dose_confirmation",
+        "execution_manifest",
+    }
+)
+_ABORT_GATES = frozenset({"dose", "causal"})
+_EVENT_NAMES = frozenset(
+    {
+        "initialized",
+        "state_changed",
+        "progress",
+        "stage_completed",
+        "aborted",
+        "failed",
+    }
+)
+_STATES = frozenset({"pending", "running", "completed", "aborted", "failed"})
+_STAGES = frozenset({"prepare", "sweep", "confirm"})
+_COMPACT_STRING_PATHS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("experiment",), "experiment"),
+    (("config", "model_name"), "token"),
+    (("config", "model_revision"), "hash"),
+    (("config", "dtype"), "token"),
+    (("config", "upstream_commit"), "hash"),
+    (("config", "results_dir"), "path"),
+    (("config", "artifacts_dir"), "path"),
+    (("config", "format_style"), "token"),
+    (("config", "selection_split"), "token"),
+    (("config", "final_conditions_split"), "token"),
+    (("config", "source_direction"), "path"),
+    (("config", "source_evidence", "baseline"), "path"),
+    (("config", "source_evidence", "interventions"), "path"),
+    (("config", "refusal_prefixes", "*"), "prefix"),
+    (("provenance", "run_id"), "token"),
+    (("provenance", "implementation_commit"), "hash"),
+    (("provenance", "model_name"), "token"),
+    (("provenance", "requested_model_revision"), "hash"),
+    (("provenance", "resolved_model_revision"), "hash"),
+    (("provenance", "upstream_commit"), "hash"),
+    (("provenance", "source_pilot_run_id"), "token"),
+    (("provenance", "source_pilot_implementation_commit"), "hash"),
+    (("provenance", "source_artifact_hashes", "*"), "hash"),
+    (("results", "source_pilot_status"), "status"),
+    (("results", "source_pilot_run_id"), "token"),
+    (("results", "source_pilot_implementation_commit"), "hash"),
+    (("results", "splits", "source_revision"), "token"),
+    (("results", "completed_stages", "*"), "stage"),
+    (("results", "result_files", "*"), "filename"),
+    (("results", "status"), "status"),
+)
+_EVALUATION_STRING_PATHS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("status",), "status"),
+    (("run_id",), "token"),
+    (("implementation_commit",), "hash"),
+    (("model_revision",), "hash"),
+    (("source_pilot_run_id",), "token"),
+    (("source_pilot_implementation_commit",), "hash"),
+    (("source_artifact_hashes", "*"), "hash"),
+    (("causal_gate", "name"), "token"),
+    (("causal_gate", "reason"), "joined_gate_reason"),
+    (("causal_gate", "checks", "*", "name"), "token"),
+    (("causal_gate", "checks", "*", "reason"), "gate_reason"),
+    (("causal_gate", "checks", "*", "comparator"), "token"),
+    (("stage",), "stage"),
+    (("exception_category",), "token"),
+    (("error_code",), "token"),
+    (("message",), "catalog_message"),
+    (("abort_reason",), "abort_reason"),
+)
+_STATUS_STRING_PATHS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("profile",), "token"),
+    (("run_id",), "token"),
+    (("current_stage",), "stage"),
+    (("state",), "state"),
+    (("updated_at_utc",), "iso"),
+    (("message",), "catalog_message"),
+    (("abort_gate",), "abort_gate"),
+    (("abort_reason",), "abort_reason"),
+)
+_EVENT_STRING_PATHS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("event",), "event_name"),
+    (("state",), "state"),
+    (("stage",), "stage"),
+    (("run_id",), "token"),
+    (("updated_at_utc",), "iso"),
+    (("message",), "catalog_message"),
+    (("abort_gate",), "abort_gate"),
+    (("abort_reason",), "abort_reason"),
+)
+_SPLIT_STRING_PATHS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("example_ids", "*"), "id"),
+    (("example_ids", "*", "*"), "id"),
+    (("content_hashes", "*", "*"), "hash"),
+    (("source_revision",), "token"),
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -322,29 +426,160 @@ def sample_dose_halves(
     return sampled[:selection_size], sampled[selection_size:]
 
 
-def metadata_contains_leak(obj: Any, *, key: str | None = None) -> bool:
+def _path_matches(path: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
+    if len(path) != len(pattern):
+        return False
+    return all(expected == "*" or expected == actual for expected, actual in zip(pattern, path))
+
+
+def _infer_artifact_kind(obj: Any) -> str:
+    if not isinstance(obj, dict):
+        return "generic"
+    if "experiment" in obj and "config" in obj:
+        return "compact"
+    if "causal_gate" in obj and "status" in obj:
+        return "evaluation"
+    if "current_stage" in obj and "profile" in obj:
+        return "status"
+    if "event" in obj and "stage" in obj:
+        return "event"
+    if "example_ids" in obj and "content_hashes" in obj:
+        return "split_metadata"
+    return "generic"
+
+
+def _joined_gate_reason(value: str) -> bool:
+    if _GATE_PASSED_RE.fullmatch(value):
+        return True
+    parts = [item.strip() for item in value.split(";")]
+    return bool(parts) and all(bool(_GATE_REASON_RE.fullmatch(item)) for item in parts)
+
+
+def _abort_reason_allowed(value: str) -> bool:
+    if value in {_NO_DOSE_REASON, *_DOSE_STATUSES}:
+        return True
+    if value in ALLOWED_OPERATIONAL_MESSAGES:
+        return True
+    return _joined_gate_reason(value)
+
+
+def _string_allowed(kind: str, value: str) -> bool:
+    if kind == "token":
+        return bool(_TOKEN_RE.fullmatch(value))
+    if kind == "id":
+        return bool(_ID_RE.fullmatch(value))
+    if kind == "hash":
+        return bool(_HASH_RE.fullmatch(value))
+    if kind == "path":
+        return bool(_PATH_RE.fullmatch(value))
+    if kind == "iso":
+        return bool(_ISO_RE.match(value))
+    if kind == "status":
+        return value in _DOSE_STATUSES
+    if kind == "experiment":
+        return value in _EXPERIMENTS
+    if kind == "prefix":
+        return bool(_PREFIX_RE.fullmatch(value)) and len(value.split()) <= 4
+    if kind == "filename":
+        return bool(_FILENAME_RE.fullmatch(value))
+    if kind == "gate_reason":
+        return bool(_GATE_REASON_RE.fullmatch(value))
+    if kind == "joined_gate_reason":
+        return _joined_gate_reason(value)
+    if kind == "abort_reason":
+        return _abort_reason_allowed(value)
+    if kind == "catalog_message":
+        return value in ALLOWED_OPERATIONAL_MESSAGES
+    if kind == "abort_gate":
+        return value in _ABORT_GATES
+    if kind == "event_name":
+        return value in _EVENT_NAMES
+    if kind == "state":
+        return value in _STATES
+    if kind == "stage":
+        return value in _STAGES
+    return False
+
+
+def _rule_table(kind: str) -> tuple[tuple[tuple[str, ...], str], ...]:
+    if kind == "compact":
+        return _COMPACT_STRING_PATHS
+    if kind == "evaluation":
+        return _EVALUATION_STRING_PATHS
+    if kind == "status":
+        return _STATUS_STRING_PATHS
+    if kind == "event":
+        return _EVENT_STRING_PATHS
+    if kind == "split_metadata":
+        return _SPLIT_STRING_PATHS
+    return (
+        _EVALUATION_STRING_PATHS
+        + _STATUS_STRING_PATHS
+        + _EVENT_STRING_PATHS
+        + _SPLIT_STRING_PATHS
+    )
+
+
+def _compact_structural_string(path: tuple[str, ...], value: str) -> bool:
+    if len(path) >= 2 and path[-2] in {"valid_ids", "invalid_ids", "example_ids"}:
+        return _string_allowed("id", value)
+    if len(path) >= 3 and path[-3] == "example_ids":
+        return _string_allowed("id", value)
+    if len(path) >= 3 and path[-3] == "content_hashes":
+        return _string_allowed("hash", value)
+    return False
+
+
+def _string_path_allowed(kind: str, path: tuple[str, ...], value: str) -> bool:
+    if any(part.casefold() in METADATA_LEAK_KEYS for part in path):
+        return False
+    if kind in {"compact", "generic"} and _compact_structural_string(path, value):
+        return True
+    for pattern, rule in _rule_table(kind):
+        if _path_matches(path, pattern):
+            return _string_allowed(rule, value)
+    return False
+
+
+def metadata_contains_leak(
+    obj: Any,
+    *,
+    key: str | None = None,
+    kind: str | None = None,
+    path: tuple[str, ...] = (),
+) -> bool:
+    if kind is None and not path:
+        resolved_kind = _infer_artifact_kind(obj)
+    else:
+        resolved_kind = kind or "generic"
     if isinstance(obj, dict):
         for child_key, value in obj.items():
             lowered = str(child_key).casefold()
             if lowered in METADATA_LEAK_KEYS:
                 return True
-            if metadata_contains_leak(value, key=str(child_key)):
+            child_path = path + (str(child_key),)
+            if metadata_contains_leak(
+                value,
+                key=str(child_key),
+                kind=resolved_kind,
+                path=child_path,
+            ):
                 return True
         return False
     if isinstance(obj, list):
-        return any(metadata_contains_leak(item, key=key) for item in obj)
+        return any(
+            metadata_contains_leak(
+                item,
+                key=key,
+                kind=resolved_kind,
+                path=path + ("*",),
+            )
+            for item in obj
+        )
     if isinstance(obj, str):
-        lowered = (key or "").casefold()
-        if lowered in METADATA_LEAK_KEYS:
+        if (key or "").casefold() in METADATA_LEAK_KEYS:
             return True
-        if lowered in ALLOWED_AGGREGATE_TEXT_FIELDS:
-            if lowered == "message":
-                return obj not in ALLOWED_OPERATIONAL_MESSAGES
-            return False
-        stripped = obj.strip()
-        if not stripped:
-            return False
-        return " " in stripped
+        return not _string_path_allowed(resolved_kind, path, obj)
     return False
 
 

@@ -287,6 +287,46 @@ def test_validator_rejects_manifest_missing_checkpoint_or_stage(
     assert checks["manifest_agrees"] is False
 
 
+def test_validator_rejects_manifest_duplicate_or_reordered_result_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "execution_manifest.json"
+    payload = _read(path)
+    files = list(payload["results"]["result_files"])
+    payload["results"]["result_files"] = files[1:] + files[:1]
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["manifest_agrees"] is False
+    payload["results"]["result_files"] = files + [files[0]]
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["manifest_agrees"] is False
+
+
+def test_validator_rejects_prompt_hidden_in_status_or_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    status_path = root / "artifacts" / "qwen25_coder_7b_dose" / "status.json"
+    status = _read(status_path)
+    status["abort_reason"] = "how to make a virus in python extra words"
+    _write_json(status_path, status)
+    checks = validate_qwen_dose(root)
+    assert checks["no_raw_prompt_or_generation_leakage"] is False
+    root = passing_dose_root(tmp_path / "events", monkeypatch)
+    events_path = root / "artifacts" / "qwen25_coder_7b_dose" / "events.jsonl"
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    record = json.loads(lines[-1])
+    record["abort_reason"] = "how to make a virus in python extra words"
+    lines[-1] = json.dumps(record, sort_keys=True)
+    events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    checks = validate_qwen_dose(root)
+    assert checks["no_raw_prompt_or_generation_leakage"] is False
+
+
 def test_validator_rejects_status_result_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

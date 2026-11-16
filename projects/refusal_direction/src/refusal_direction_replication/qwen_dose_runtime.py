@@ -7,13 +7,11 @@ splits, and confirms one frozen coefficient pair.
 
 from __future__ import annotations
 
-import gc
 import json
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-
-import torch
 
 from .artifacts import ArtifactEnvelope, atomic_write_json, write_artifact
 from .data import PromptExample, content_hashes_for_examples
@@ -41,6 +39,7 @@ from .pipeline import (
     load_config,
     project_paths,
     random_direction_control,
+    release_compute_resources,
     transformer_module_lists,
 )
 from .qwen_dose import (
@@ -172,6 +171,31 @@ def _forget_compute_refs(
     return None, None, None
 
 
+def _sanitize_exception_refs(exc: BaseException) -> None:
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        ident = id(current)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        tb = current.__traceback__
+        if tb is not None:
+            traceback.clear_frames(tb)
+        current.__traceback__ = None
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if (
+            current.__context__ is not None
+            and current.__context__ is not current.__cause__
+        ):
+            stack.append(current.__context__)
+        current.__cause__ = None
+        current.__context__ = None
+        current.__suppress_context__ = True
+
+
 def _release_resource_holder(
     holder: dict[str, Any],
     release_resources: Callable[[], None] | None = None,
@@ -180,9 +204,7 @@ def _release_resource_holder(
     holder["tokenizer"] = None
     if release_resources is not None:
         release_resources()
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    release_compute_resources(None, None)
 
 
 def _completed_stages_for_status(status: str) -> list[str]:
@@ -218,7 +240,20 @@ def _result_files_for_status(
             "execution_manifest.json",
         ]
     named.extend(coefficient_checkpoint_name(item) for item in grid)
-    return named
+    return _typed_unique_result_files(named)
+
+
+def _typed_unique_result_files(files: Sequence[str]) -> list[str]:
+    typed: list[str] = []
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, str) or not item:
+            raise ValueError("result_files must be a list of non-empty strings")
+        if item in seen:
+            raise ValueError(f"duplicate result file: {item}")
+        seen.add(item)
+        typed.append(item)
+    return typed
 
 
 def _terminal_observability(
@@ -610,7 +645,7 @@ def _write_manifest(
         config=config,
         results={
             "completed_stages": list(completed_stages),
-            "result_files": list(result_files),
+            "result_files": _typed_unique_result_files(result_files),
             "status": status,
         },
         provenance=provenance,
@@ -1319,6 +1354,7 @@ def run_qwen_dose(
                 store.fail(message)
             except Exception:
                 pass
+            _sanitize_exception_refs(exc)
             raise
         finally:
             release_loaded()

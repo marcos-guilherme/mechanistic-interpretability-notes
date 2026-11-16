@@ -179,11 +179,19 @@ def _assert_pack_path_safe(root: Path, path: Path) -> None:
 
 def validate_dose_pack_json(path: Path, relative: str) -> None:
     name = Path(relative).name
-    if name in {"status.json", "events.jsonl"}:
+    if name == "events.jsonl":
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if metadata_contains_leak(payload):
+                raise ValueError(f"compact json leakage in {relative}")
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
     if metadata_contains_leak(payload):
         raise ValueError(f"compact json leakage in {relative}")
+    if name == "status.json":
+        return
     fields = (
         EVALUATION_SCHEMA_FIELDS
         if name == "dose_followup_evaluation.json"
@@ -215,7 +223,7 @@ def collect_qwen_dose_pack_entries(root: Path) -> list[Path]:
         if not is_allowed_dose_fetch_member(relative):
             continue
         _assert_pack_path_safe(root, path)
-        if relative.endswith(".json"):
+        if relative.endswith((".json", ".jsonl")):
             validate_dose_pack_json(path, relative)
         entries.append(path)
     return entries

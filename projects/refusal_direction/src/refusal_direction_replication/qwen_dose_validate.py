@@ -190,6 +190,8 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
             checks["metrics_are_finite"] = False
         if metadata_contains_leak(payload):
             checks["no_raw_prompt_or_generation_leakage"] = False
+    if metadata_contains_leak(status_payload):
+        checks["no_raw_prompt_or_generation_leakage"] = False
 
     try:
         config = load_config(root, profile=DOSE_PROFILE)
@@ -474,18 +476,21 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         STATUS_NO_DOSE_QUALIFIED: ["prepare", "sweep"],
         STATUS_OPERATIONAL_ERROR: [],
     }.get(str(status), [])
-    expected_manifest_files = set(required)
-    if status != STATUS_OPERATIONAL_ERROR:
-        expected_manifest_files.update(expected_checkpoint_names)
     manifest_path = results_dir / "execution_manifest.json"
     if manifest_path.is_file():
         manifest = _load(manifest_path)
         manifest_results = manifest.get("results") or {}
+        expected_files = list(required)
+        if status != STATUS_OPERATIONAL_ERROR:
+            expected_files.extend(expected_checkpoint_names)
+        files = manifest_results.get("result_files")
         checks["manifest_agrees"] = (
             manifest_results.get("status") == status
             and list(manifest_results.get("completed_stages") or []) == expected_stages
-            and set(manifest_results.get("result_files") or [])
-            == expected_manifest_files
+            and isinstance(files, list)
+            and all(isinstance(item, str) for item in files)
+            and len(files) == len(set(files))
+            and files == expected_files
         )
     else:
         checks["manifest_agrees"] = status == STATUS_OPERATIONAL_ERROR
@@ -494,6 +499,13 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
     checks["events_present"] = events_path.is_file() and bool(
         events_path.read_text(encoding="utf-8").strip()
     )
+    if events_path.is_file():
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            if metadata_contains_leak(json.loads(line)):
+                checks["no_raw_prompt_or_generation_leakage"] = False
+                break
 
     def _missing(value: object) -> bool:
         return value is None or value == ""

@@ -638,7 +638,10 @@ def test_metadata_allowlists_aggregated_gate_reasons_without_word_count() -> Non
             "passed": False,
             "reason": concatenated,
             "checks": [
-                {"name": "min_harmful_ablation_drop", "reason": concatenated[:40]},
+                {
+                    "name": "min_harmful_ablation_drop",
+                    "reason": "min_harmful_ablation_drop: observed 0.01 not >= 0.2",
+                },
             ],
         },
         "abort_reason": concatenated,
@@ -649,6 +652,14 @@ def test_metadata_allowlists_aggregated_gate_reasons_without_word_count() -> Non
     assert metadata_contains_leak(
         {"notes": "one two three four five six seven eight nine"}
     ) is True
+    hidden = {
+        "schema_version": 1,
+        "experiment": "dose_prepare",
+        "config": {"model_name": "Qwen/Qwen2.5-Coder-7B-Instruct"},
+        "results": {"reason": concatenated},
+        "provenance": {"run_id": "dose-followup-run-1"},
+    }
+    assert metadata_contains_leak(hidden) is True
 
 
 def test_selects_smallest_qualifying_ablation_and_addition() -> None:

@@ -72,6 +72,35 @@ def test_dose_allowlist_rejects_original_qwen_gemma_and_generations() -> None:
     assert not is_allowed_dose_fetch_member("artifacts/qwen25_coder_7b_dose/selected_direction.pt")
 
 
+def _status_payload(**overrides) -> dict:
+    payload = {
+        "schema_version": 1,
+        "profile": "qwen25_coder_7b_dose.json",
+        "run_id": "dose-followup-run-1",
+        "current_stage": "confirm",
+        "state": "completed",
+        "completed_units": 1,
+        "total_units": 1,
+        "updated_at_utc": "2026-01-01T00:00:00+00:00",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _event_payload(**overrides) -> dict:
+    payload = {
+        "event": "stage_completed",
+        "state": "completed",
+        "stage": "confirm",
+        "completed_units": 1,
+        "total_units": 1,
+        "run_id": "dose-followup-run-1",
+        "updated_at_utc": "2026-01-01T00:00:00+00:00",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _compact_payload(**overrides) -> dict:
     payload = {
         "schema_version": 1,
@@ -96,8 +125,12 @@ def test_dose_pack_contains_only_allowlisted_files(tmp_path: Path) -> None:
     (results / "00_dose_prepare.json").write_text(
         json.dumps(_compact_payload()), encoding="utf-8"
     )
-    (artifacts / "status.json").write_text("{}", encoding="utf-8")
-    (artifacts / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    (artifacts / "status.json").write_text(
+        json.dumps(_status_payload()), encoding="utf-8"
+    )
+    (artifacts / "events.jsonl").write_text(
+        json.dumps(_event_payload()) + "\n", encoding="utf-8"
+    )
     (artifacts / "resume.pt").write_bytes(b"pt")
     (results / "other.json").write_text("{}", encoding="utf-8")
     (root / "results" / "qwen25_coder_7b").mkdir(parents=True)
@@ -198,6 +231,42 @@ def test_dose_fetch_rejects_symlink_destination(tmp_path: Path) -> None:
     assert json.loads(victim.read_text(encoding="utf-8")) == {"keep": True}
 
 
+def test_dose_pack_rejects_prompt_hidden_in_status_or_events(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    artifacts = root / "artifacts" / "qwen25_coder_7b_dose"
+    artifacts.mkdir(parents=True)
+    (artifacts / "status.json").write_text(
+        json.dumps(
+            _status_payload(
+                state="aborted",
+                abort_gate="causal",
+                abort_reason="how to make a virus in python extra words",
+            )
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="leak"):
+        pack_qwen_dose_results(root, tmp_path / "status.tar.gz")
+    (artifacts / "status.json").write_text(
+        json.dumps(_status_payload(state="aborted", abort_gate="causal")),
+        encoding="utf-8",
+    )
+    (artifacts / "events.jsonl").write_text(
+        json.dumps(
+            _event_payload(
+                event="aborted",
+                state="aborted",
+                abort_gate="causal",
+                abort_reason="how to make a virus in python extra words",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="leak"):
+        pack_qwen_dose_results(root, tmp_path / "events.tar.gz")
+
+
 def test_dose_pack_rejects_leaky_compact_json(tmp_path: Path) -> None:
     root = tmp_path / "project"
     results = root / "results" / "qwen25_coder_7b_dose"
@@ -249,7 +318,7 @@ def test_collect_dose_pack_entries_skips_missing_and_original(tmp_path: Path) ->
     root = tmp_path / "project"
     path = root / "artifacts" / "qwen25_coder_7b_dose" / "status.json"
     path.parent.mkdir(parents=True)
-    path.write_text("{}", encoding="utf-8")
+    path.write_text(json.dumps(_status_payload()), encoding="utf-8")
     (root / "artifacts" / "qwen25_coder_7b").mkdir(parents=True)
     (root / "artifacts" / "qwen25_coder_7b" / "selected_direction.pt").write_bytes(b"x")
     entries = collect_qwen_dose_pack_entries(root)

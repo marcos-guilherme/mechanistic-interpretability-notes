@@ -1022,6 +1022,33 @@ def test_forget_compute_refs_nulls_holder_and_returns_nones() -> None:
     assert holder["tokenizer"] is None
 
 
+def _sentinel_is_live(sentinel: object) -> bool:
+    import sys
+
+    def _locals_hold(locals_map: dict) -> bool:
+        if locals_map.get("model") is sentinel:
+            return True
+        if locals_map.get("tokenizer") is sentinel:
+            return True
+        nested = locals_map.get("holder") or locals_map.get("resource_holder")
+        return isinstance(nested, dict) and nested.get("model") is sentinel
+
+    for frame_info in inspect.stack():
+        if _locals_hold(frame_info.frame.f_locals):
+            return True
+    current = sys.exc_info()[1]
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        traceback = current.__traceback__
+        while traceback is not None:
+            if _locals_hold(traceback.tb_frame.f_locals):
+                return True
+            traceback = traceback.tb_next
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def test_release_drops_holder_and_owner_refs_before_gc(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1039,32 +1066,19 @@ def test_release_drops_holder_and_owner_refs_before_gc(
     def callback() -> None:
         callbacks.append("released")
 
-    def fake_collect() -> None:
-        live = False
-        for frame_info in inspect.stack():
-            locals_map = frame_info.frame.f_locals
-            if locals_map.get("model") is sentinel:
-                live = True
-            if locals_map.get("tokenizer") is sentinel:
-                live = True
-            nested = locals_map.get("holder")
-            if isinstance(nested, dict) and nested.get("model") is sentinel:
-                live = True
+    def fake_release(model=None, tokenizer=None) -> None:
         observed.append(
             {
+                "args": (model, tokenizer),
                 "holder": holder.get("model"),
                 "owner": owner.get("model"),
-                "live": live,
+                "live": _sentinel_is_live(sentinel),
             }
         )
 
     monkeypatch.setattr(
-        "refusal_direction_replication.qwen_dose_runtime.gc.collect",
-        fake_collect,
-    )
-    monkeypatch.setattr(
-        "refusal_direction_replication.qwen_dose_runtime.torch.cuda.is_available",
-        lambda: False,
+        "refusal_direction_replication.qwen_dose_runtime.release_compute_resources",
+        fake_release,
     )
     owner["model"], owner["tokenizer"], owner["bound"] = _forget_compute_refs(
         holder,
@@ -1077,7 +1091,48 @@ def test_release_drops_holder_and_owner_refs_before_gc(
     assert holder["model"] is None
     assert holder["tokenizer"] is None
     assert owner["model"] is None
-    assert observed == [{"holder": None, "owner": None, "live": False}]
+    assert observed == [
+        {
+            "args": (None, None),
+            "holder": None,
+            "owner": None,
+            "live": False,
+        }
+    ]
+
+
+def test_exception_does_not_keep_model_alive_during_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication import qwen_dose_runtime as runtime
+
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    sentinel = object()
+    observed: list[bool] = []
+
+    def exploding_sweep(*_args, **kwargs):
+        holder = kwargs.get("resource_holder")
+        assert holder is not None
+        model = sentinel
+        tokenizer = object()
+        holder["model"] = model
+        holder["tokenizer"] = tokenizer
+        raise RuntimeError("simulated oom")
+
+    def fake_release(model=None, tokenizer=None) -> None:
+        assert model is None
+        assert tokenizer is None
+        observed.append(_sentinel_is_live(sentinel))
+
+    monkeypatch.setattr(runtime, "run_dose_sweep", exploding_sweep)
+    monkeypatch.setattr(runtime, "release_compute_resources", fake_release)
+    with pytest.raises(RuntimeError, match="simulated oom"):
+        run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    assert observed
+    assert all(item is False for item in observed)
 
 
 def test_manifest_lists_every_grid_checkpoint(
