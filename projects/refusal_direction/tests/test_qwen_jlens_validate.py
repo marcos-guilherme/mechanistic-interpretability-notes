@@ -1,0 +1,313 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+import torch
+
+from refusal_direction_replication.artifacts import ArtifactEnvelope, write_artifact
+from refusal_direction_replication.pipeline import load_config
+from refusal_direction_replication.qwen_jlens import (
+    JLENS_PROFILE,
+    JLENS_UPSTREAM_COMMIT,
+    QWEN_REVISION,
+    SOURCE_DOSE_RUN_ID,
+    summarize_holdout_metrics,
+)
+from refusal_direction_replication.qwen_jlens_validate import validate_qwen_jlens
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RUN_ID = "jlens-run-validate"
+COMMIT = "a" * 40
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _envelope(experiment: str, config: dict, results: dict) -> ArtifactEnvelope:
+    return ArtifactEnvelope(
+        experiment=experiment,
+        config=config,
+        results=results,
+        provenance={
+            "run_id": RUN_ID,
+            "implementation_commit": COMMIT,
+            "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "requested_model_revision": QWEN_REVISION,
+            "resolved_model_revision": QWEN_REVISION,
+            "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
+            "dataset_revision": config["dataset_revision"],
+            "source_dose_run_id": SOURCE_DOSE_RUN_ID,
+        },
+    )
+
+
+def _fit_holdout_meta() -> tuple[list[dict], list[dict]]:
+    fit = [
+        {
+            "example_id": f"fit-{index:03d}",
+            "content_hash": f"{index:064x}"[:64],
+            "token_count": 128 + index,
+            "source_index": index,
+        }
+        for index in range(100)
+    ]
+    holdout = [
+        {
+            "example_id": f"hold-{index:03d}",
+            "content_hash": f"{1000 + index:064x}"[:64],
+            "token_count": 130,
+            "source_index": 200 + index,
+        }
+        for index in range(20)
+    ]
+    return fit, holdout
+
+
+def write_jlens_tree(root: Path, *, tiny: bool = True) -> Path:
+    import shutil
+
+    shutil.copytree(ROOT / "configs", root / "configs")
+    config = load_config(root, profile=JLENS_PROFILE)
+    if tiny:
+        config = dict(config)
+        config["n_layers"] = 4
+        config["d_model"] = 8
+        config["source_layers"] = [0, 1, 2]
+        config["target_layer"] = 3
+        (root / "configs" / JLENS_PROFILE).write_text(
+            json.dumps(config, indent=2) + "\n", encoding="utf-8"
+        )
+    results = root / "results" / "qwen25_coder_7b_jlens"
+    artifacts = root / "artifacts" / "qwen25_coder_7b_jlens"
+    results.mkdir(parents=True)
+    artifacts.mkdir(parents=True)
+    fit, holdout = _fit_holdout_meta()
+    prepare_results = {
+        "dataset_repo_id": config["dataset_repo_id"],
+        "dataset_revision": config["dataset_revision"],
+        "fit_count": 100,
+        "holdout_count": 20,
+        "n_selected": 120,
+        "exclusions_available": False,
+        "n_excluded": 0,
+        "benchmark_deduplicated": False,
+        "fit": fit,
+        "holdout": holdout,
+        "fit_ids": [item["example_id"] for item in fit],
+        "holdout_ids": [item["example_id"] for item in holdout],
+        "fit_hashes": [item["content_hash"] for item in fit],
+        "holdout_hashes": [item["content_hash"] for item in holdout],
+        "corpus_hash": "c" * 64,
+    }
+    write_artifact(
+        results / "00_jlens_prepare.json",
+        _envelope("jlens_prepare", config, prepare_results),
+    )
+    write_artifact(
+        results / "01_jlens_probe.json",
+        _envelope(
+            "jlens_probe",
+            config,
+            {
+                "probe_order": [32, 16, 8],
+                "attempts": [{"dim_batch": 32, "outcome": "ok", "wall_seconds": 1.0}],
+                "selected_dim_batch": 32,
+                "wall_seconds": 1.0,
+                "projected_seconds": 100.0,
+                "projected_limit_seconds": 43200,
+                "exceeds_limit": False,
+            },
+        ),
+    )
+    write_artifact(
+        results / "02_jlens_fit.json",
+        _envelope(
+            "jlens_fit",
+            config,
+            {
+                "n_done": 100,
+                "selected_dim_batch": 32,
+                "source_layers": config["source_layers"],
+                "target_layer": config["target_layer"],
+                "skip_first": 16,
+                "corpus_hash": "c" * 64,
+                "config_hash": "d" * 64,
+            },
+        ),
+    )
+    records = []
+    for item in holdout:
+        for layer in config["source_layers"]:
+            records.append(
+                {
+                    "example_id": item["example_id"],
+                    "position": 16,
+                    "layer": layer,
+                    "jlens_rank": 2,
+                    "logit_lens_rank": 3,
+                }
+            )
+    metrics = summarize_holdout_metrics(records, source_layers=config["source_layers"])
+    write_artifact(
+        results / "03_jlens_holdout.json",
+        _envelope("jlens_holdout", config, metrics),
+    )
+    evaluation = {
+        "schema_version": 1,
+        "status": "pass",
+        "operational_success": True,
+        "run_id": RUN_ID,
+        "implementation_commit": COMMIT,
+        "model_revision": QWEN_REVISION,
+        "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
+        "dataset_revision": config["dataset_revision"],
+        "source_dose_run_id": SOURCE_DOSE_RUN_ID,
+        "source_dose_status": "pass",
+        "selected_dim_batch": 32,
+        "n_fit": 100,
+        "n_holdout": 20,
+    }
+    _write_json(results / "jlens_evaluation.json", evaluation)
+    write_artifact(
+        results / "execution_manifest.json",
+        _envelope(
+            "execution_manifest",
+            config,
+            {
+                "status": "pass",
+                "result_files": [
+                    "00_jlens_prepare.json",
+                    "01_jlens_probe.json",
+                    "02_jlens_fit.json",
+                    "03_jlens_holdout.json",
+                    "jlens_evaluation.json",
+                    "execution_manifest.json",
+                ],
+            },
+        ),
+    )
+    _write_json(
+        artifacts / "status.json",
+        {
+            "schema_version": 1,
+            "profile": JLENS_PROFILE,
+            "run_id": RUN_ID,
+            "current_stage": "holdout",
+            "state": "completed",
+            "completed_units": 100,
+            "total_units": 100,
+            "updated_at_utc": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    (artifacts / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "probe_choice",
+                "run_id": RUN_ID,
+                "dim_batch": 32,
+                "state": "running",
+                "stage": "probe",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "event": "checkpoint",
+                "run_id": RUN_ID,
+                "n_done": 100,
+                "state": "running",
+                "stage": "fit",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    layers = config["source_layers"]
+    d_model = int(config["d_model"])
+    torch.save(
+        {
+            "J": {layer: torch.eye(d_model) for layer in layers},
+            "n_prompts": 100,
+            "source_layers": layers,
+            "d_model": d_model,
+        },
+        artifacts / "qwen25_coder_7b_jacobian_lens.pt",
+    )
+    torch.save(
+        {
+            "jacobian_sum": {layer: torch.eye(d_model) for layer in layers},
+            "n_done": 100,
+            "next_idx": 100,
+            "source_layers": layers,
+            "target_layer": config["target_layer"],
+            "skip_first": 16,
+            "corpus_hash": "c" * 64,
+            "config_hash": "d" * 64,
+            "model_revision": QWEN_REVISION,
+            "implementation_commit": COMMIT,
+            "run_id": RUN_ID,
+            "dim_batch": 32,
+        },
+        artifacts / "jlens_fit_checkpoint.pt",
+    )
+    dose = root / "results" / "qwen25_coder_7b_dose"
+    dose.mkdir(parents=True)
+    _write_json(
+        dose / "dose_followup_evaluation.json",
+        {
+            "status": "pass",
+            "run_id": SOURCE_DOSE_RUN_ID,
+            "implementation_commit": "10587e1db6ecf53f4e422c1c4a351edfd3647204",
+            "model_revision": QWEN_REVISION,
+        },
+    )
+    return root
+
+
+def test_validator_accepts_complete_tiny_tree(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    checks = validate_qwen_jlens(root)
+    failed = [name for name, passed in checks.items() if not passed]
+    assert failed == []
+
+
+def test_validator_rejects_overlapping_hashes_and_leakage(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    prepare_path = root / "results" / "qwen25_coder_7b_jlens" / "00_jlens_prepare.json"
+    payload = json.loads(prepare_path.read_text(encoding="utf-8"))
+    payload["results"]["holdout_hashes"][0] = payload["results"]["fit_hashes"][0]
+    payload["results"]["fit_text"] = "def leaked(): pass"
+    prepare_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["fit_holdout_disjoint"] is False
+    assert checks["no_raw_text_leakage"] is False
+
+
+def test_validator_rejects_probe_order_and_holdout_arithmetic(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    probe_path = root / "results" / "qwen25_coder_7b_jlens" / "01_jlens_probe.json"
+    probe = json.loads(probe_path.read_text(encoding="utf-8"))
+    probe["results"]["probe_order"] = [8, 16, 32]
+    probe["results"]["exceeds_limit"] = True
+    probe_path.write_text(json.dumps(probe, indent=2) + "\n", encoding="utf-8")
+    holdout_path = root / "results" / "qwen25_coder_7b_jlens" / "03_jlens_holdout.json"
+    holdout = json.loads(holdout_path.read_text(encoding="utf-8"))
+    holdout["results"]["overall"]["jlens"]["pass@1"] = 1.0
+    holdout_path.write_text(json.dumps(holdout, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["probe_order_and_projection"] is False
+    assert checks["holdout_metric_arithmetic"] is False
+
+
+def test_production_config_keeps_qwen_dimensions() -> None:
+    config = load_config(ROOT, profile=JLENS_PROFILE)
+    assert config["n_layers"] == 28
+    assert config["d_model"] == 3584
+    assert config["source_layers"] == list(range(27))
+    assert config["target_layer"] == 27
+    assert config["jlens_upstream_commit"] == JLENS_UPSTREAM_COMMIT

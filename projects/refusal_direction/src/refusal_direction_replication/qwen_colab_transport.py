@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .qwen_dose import metadata_contains_leak
+from .qwen_jlens import jlens_metadata_contains_leak
 
 QWEN_RESULTS_DIR = "results/qwen25_coder_7b"
 QWEN_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b"
@@ -60,6 +61,7 @@ DOSE_CHECKPOINT_JSON_PATTERN = re.compile(
 
 MAX_MEMBER_BYTES = 2 * 1024**3
 MAX_TOTAL_UNCOMPRESSED_BYTES = 4 * 1024**3
+MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES = 5 * 1024**3
 COMPACT_SCHEMA_FIELDS = (
     "schema_version",
     "experiment",
@@ -73,6 +75,28 @@ EVALUATION_SCHEMA_FIELDS = (
     "implementation_commit",
     "source_artifact_hashes",
     "source_pilot_run_id",
+)
+JLENS_RESULTS_DIR = "results/qwen25_coder_7b_jlens"
+JLENS_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b_jlens"
+JLENS_REMOTE_ARCHIVE = Path("/content/qwen_jlens_results.tar.gz")
+JLENS_FETCH_ALLOWLIST = frozenset(
+    {
+        f"{JLENS_RESULTS_DIR}/00_jlens_prepare.json",
+        f"{JLENS_RESULTS_DIR}/01_jlens_probe.json",
+        f"{JLENS_RESULTS_DIR}/02_jlens_fit.json",
+        f"{JLENS_RESULTS_DIR}/03_jlens_holdout.json",
+        f"{JLENS_RESULTS_DIR}/jlens_evaluation.json",
+        f"{JLENS_RESULTS_DIR}/execution_manifest.json",
+        f"{JLENS_ARTIFACTS_DIR}/status.json",
+        f"{JLENS_ARTIFACTS_DIR}/events.jsonl",
+        f"{JLENS_ARTIFACTS_DIR}/jlens_fit_checkpoint.pt",
+        f"{JLENS_ARTIFACTS_DIR}/qwen25_coder_7b_jacobian_lens.pt",
+    }
+)
+JLENS_EVALUATION_SCHEMA_FIELDS = (
+    "status",
+    "run_id",
+    "implementation_commit",
 )
 
 
@@ -352,6 +376,7 @@ def _validate_tar_member(
     *,
     is_unsafe: Callable[[str], bool],
     is_allowed: Callable[[str], bool],
+    max_member: int | None = None,
 ) -> None:
     if member.issym() or member.islnk():
         raise ValueError(f"archive member is a link: {member.name}")
@@ -364,7 +389,8 @@ def _validate_tar_member(
         raise ValueError(f"unsafe archive path: {member.name}")
     if not is_allowed(normalized):
         raise ValueError(f"archive member outside allowlist: {member.name}")
-    if member.size > MAX_MEMBER_BYTES:
+    limit = MAX_MEMBER_BYTES if max_member is None else max_member
+    if member.size > limit:
         raise ValueError(f"archive member exceeds size limit: {member.name}")
 
 
@@ -373,19 +399,30 @@ def _validate_archive(
     *,
     is_unsafe: Callable[[str], bool],
     is_allowed: Callable[[str], bool],
+    max_total: int | None = None,
+    max_member: int | None = None,
 ) -> list[tarfile.TarInfo]:
     seen: set[str] = set()
     total_size = 0
     file_members: list[tarfile.TarInfo] = []
+    member_limit = MAX_MEMBER_BYTES if max_member is None else max_member
+    total_limit = (
+        MAX_TOTAL_UNCOMPRESSED_BYTES if max_total is None else max_total
+    )
     for member in members:
-        _validate_tar_member(member, is_unsafe=is_unsafe, is_allowed=is_allowed)
+        _validate_tar_member(
+            member,
+            is_unsafe=is_unsafe,
+            is_allowed=is_allowed,
+            max_member=member_limit,
+        )
         normalized = normalize_member_name(member.name)
         if normalized in seen:
             raise ValueError(f"duplicate archive member: {member.name}")
         seen.add(normalized)
         total_size += member.size
         file_members.append(member)
-    if total_size > MAX_TOTAL_UNCOMPRESSED_BYTES:
+    if total_size > total_limit:
         raise ValueError("archive exceeds total uncompressed size limit")
     return file_members
 
@@ -440,6 +477,111 @@ def extract_qwen_dose_archive(archive: Path, project: Path) -> None:
         project,
         validator=validate_qwen_dose_archive,
         prefix="qwen-dose-fetch-",
+    )
+
+
+def is_jlens_unsafe_member_name(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return True
+    if not normalized.startswith((f"{JLENS_RESULTS_DIR}/", f"{JLENS_ARTIFACTS_DIR}/")):
+        return True
+    return False
+
+
+def is_allowed_jlens_fetch_member(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return False
+    if is_jlens_unsafe_member_name(normalized):
+        return False
+    return normalized in JLENS_FETCH_ALLOWLIST
+
+
+def validate_jlens_pack_json(path: Path, relative: str) -> None:
+    name = Path(relative).name
+    if name == "events.jsonl":
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if jlens_metadata_contains_leak(payload):
+                raise ValueError(f"compact json leakage in {relative}")
+        return
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if jlens_metadata_contains_leak(payload):
+        raise ValueError(f"compact json leakage in {relative}")
+    if name == "status.json":
+        return
+    fields = (
+        JLENS_EVALUATION_SCHEMA_FIELDS
+        if name == "jlens_evaluation.json"
+        else COMPACT_SCHEMA_FIELDS
+    )
+    missing = [field for field in fields if field not in payload]
+    if missing:
+        raise ValueError(
+            f"compact json schema missing {', '.join(missing)} in {relative}"
+        )
+
+
+def collect_qwen_jlens_pack_entries(root: Path) -> list[Path]:
+    entries: list[Path] = []
+    candidates: list[Path] = []
+    results_dir = root / "results" / "qwen25_coder_7b_jlens"
+    if results_dir.is_dir():
+        candidates.extend(sorted(results_dir.glob("*.json")))
+    artifacts_dir = root / "artifacts" / "qwen25_coder_7b_jlens"
+    if artifacts_dir.is_dir():
+        candidates.extend(
+            artifacts_dir / name
+            for name in (
+                "status.json",
+                "events.jsonl",
+                "jlens_fit_checkpoint.pt",
+                "qwen25_coder_7b_jacobian_lens.pt",
+            )
+        )
+    for path in candidates:
+        if not path.is_file() or path.is_symlink() or path_is_link_or_junction(path):
+            continue
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        if not is_allowed_jlens_fetch_member(relative):
+            continue
+        _assert_pack_path_safe(root, path)
+        if relative.endswith((".json", ".jsonl")):
+            validate_jlens_pack_json(path, relative)
+        entries.append(path)
+    return entries
+
+
+def pack_qwen_jlens_results(root: Path, archive: Path) -> None:
+    _pack_entries(
+        collect_qwen_jlens_pack_entries(root),
+        root,
+        archive,
+        kind="Qwen jlens",
+    )
+
+
+def validate_qwen_jlens_archive(members: list[tarfile.TarInfo]) -> list[tarfile.TarInfo]:
+    return _validate_archive(
+        members,
+        is_unsafe=is_jlens_unsafe_member_name,
+        is_allowed=is_allowed_jlens_fetch_member,
+        max_total=MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES,
+        max_member=MAX_MEMBER_BYTES,
+    )
+
+
+def extract_qwen_jlens_archive(archive: Path, project: Path) -> None:
+    _extract_allowlisted_archive(
+        archive,
+        project,
+        validator=validate_qwen_jlens_archive,
+        prefix="qwen-jlens-fetch-",
     )
 
 
