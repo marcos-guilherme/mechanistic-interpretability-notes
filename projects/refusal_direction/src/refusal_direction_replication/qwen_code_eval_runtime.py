@@ -42,6 +42,7 @@ from .pipeline import (
     project_paths,
     random_direction_control,
     release_compute_resources,
+    temporary_hooks,
     transformer_module_lists,
 )
 from .qwen_code_eval import (
@@ -89,6 +90,55 @@ STAGE_FILES = {
 EVALUATION_FILENAME = "code_eval_evaluation.json"
 MANIFEST_FILENAME = "execution_manifest.json"
 StageRunner = Callable[..., dict[str, Any]]
+
+
+def apply_lens_with_hooks(
+    lens: Any,
+    bound_model: Any,
+    rendered_text: str,
+    *,
+    layers: Sequence[int],
+    positions: Sequence[int],
+    max_seq_len: int,
+    pre_hooks: Sequence[tuple[object, object]] = (),
+    forward_hooks: Sequence[tuple[object, object]] = (),
+    **apply_kwargs: Any,
+) -> tuple[Any, Any, Any]:
+    """Apply the lens inside the same intervention context as generation."""
+    with temporary_hooks(pre_hooks=pre_hooks, forward_hooks=forward_hooks):
+        return lens.apply(
+            bound_model,
+            rendered_text,
+            layers=list(layers),
+            positions=list(positions),
+            max_seq_len=max_seq_len,
+            **apply_kwargs,
+        )
+
+
+def _default_gpu_probe() -> dict[str, Any]:
+    available = torch.cuda.is_available()
+    return {
+        "cuda_available": available,
+        "device_name": torch.cuda.get_device_name(0) if available else "",
+        "total_memory_bytes": (
+            int(torch.cuda.get_device_properties(0).total_memory) if available else 0
+        ),
+    }
+
+
+def require_a100_preflight(
+    probe: Callable[[], Mapping[str, Any]] = _default_gpu_probe,
+) -> dict[str, Any]:
+    """Fail closed unless code evaluation is running on a 40 GB-class A100."""
+    details = dict(probe())
+    if not details.get("cuda_available"):
+        raise ValueError("code-eval requires CUDA on an A100")
+    if "A100" not in str(details.get("device_name", "")).upper():
+        raise ValueError("code-eval requires an NVIDIA A100")
+    if int(details.get("total_memory_bytes", 0)) < 39_000_000_000:
+        raise ValueError("code-eval requires at least approximately 39 GB GPU memory")
+    return details
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -827,6 +877,11 @@ def run_readout_stage(
 
         lens = JacobianLens.load(str(source["paths"]["lens"]))
         source_layers = [int(layer) for layer in lens.source_layers]
+        direction: CandidateDirection = source["direction"]
+        control = random_direction_control(
+            direction.vector,
+            seed=int(config["random_control_seed"]),
+        )
         lexicon_payload = _read_json(artifacts_dir / "refusal_lexicon.json")
         lexicon_ids = tuple(int(item) for item in lexicon_payload["token_ids"])
         for dataset in DATASETS:
@@ -842,6 +897,13 @@ def run_readout_stage(
                     continue
                 generated = _read_jsonl(
                     artifacts_dir / "generations" / f"{dataset}__{condition}.jsonl"
+                )
+                pre_hooks, forward_hooks = _condition_hooks(
+                    condition=condition,
+                    model=model,
+                    direction=direction,
+                    control=control,
+                    config=config,
                 )
                 records = []
                 for item in generated:
@@ -867,12 +929,15 @@ def run_readout_stage(
                         readout_text += decoded
                         positions.append(int(round_trip["position"]))
                         kinds.append("response_first")
-                    jlens_logits, _model_logits, _ids = lens.apply(
+                    jlens_logits, _model_logits, _ids = apply_lens_with_hooks(
+                        lens,
                         bound,
                         readout_text,
                         layers=source_layers,
                         positions=positions,
                         max_seq_len=int(config["jlens_max_seq_len"]),
+                        pre_hooks=pre_hooks,
+                        forward_hooks=forward_hooks,
                         use_jacobian=True,
                     )
                     for position_index, kind in enumerate(kinds):
@@ -1077,7 +1142,9 @@ def run_qwen_code_eval(
     implementation_commit: str | None = None,
     stage_runner: StageRunner | None = None,
     load_model: Callable[..., Any] | None = None,
+    gpu_probe: Callable[[], Mapping[str, Any]] = _default_gpu_probe,
 ) -> dict[str, Any]:
+    require_a100_preflight(gpu_probe)
     root = root.resolve()
     config = load_config(root, profile=profile)
     _require_config_contract(config)

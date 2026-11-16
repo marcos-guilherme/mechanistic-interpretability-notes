@@ -209,3 +209,33 @@ def test_code_eval_scripts_exist_and_pin_dependencies() -> None:
     ):
         assert dependency in install
     assert CODE_EVAL_REMOTE_ARCHIVE == Path("/content/qwen_code_eval_results.tar.gz")
+
+
+def test_code_eval_start_forces_a100_without_changing_other_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _orchestrator()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(module, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_refusal.py",
+            "start",
+            "--profile",
+            "qwen25-coder-code-eval",
+            "--gpu",
+            "L4",
+        ],
+    )
+    module.main()
+    assert commands[-1][-1] == "A100"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "start", "--profile", "qwen25-coder-dose", "--gpu", "L4"],
+    )
+    module.main()
+    assert commands[-1][-1] == "L4"

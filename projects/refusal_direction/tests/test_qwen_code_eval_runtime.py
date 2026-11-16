@@ -204,6 +204,11 @@ def test_orchestrator_resumes_completed_stages_and_finalizes_pending_review(
         run_id="code-eval-run",
         implementation_commit="a" * 40,
         stage_runner=runner,
+        gpu_probe=lambda: {
+            "cuda_available": True,
+            "device_name": "NVIDIA A100",
+            "total_memory_bytes": 40_000_000_000,
+        },
     )
     assert calls == list(CODE_EVAL_STAGES)
     assert first["status"] == "pass"
@@ -226,6 +231,11 @@ def test_orchestrator_resumes_completed_stages_and_finalizes_pending_review(
         run_id="code-eval-run",
         implementation_commit="a" * 40,
         stage_runner=runner,
+        gpu_probe=lambda: {
+            "cuda_available": True,
+            "device_name": "NVIDIA A100",
+            "total_memory_bytes": 40_000_000_000,
+        },
     )
     assert calls == []
     assert second == first
@@ -285,3 +295,72 @@ def test_readout_checkpoint_requires_every_position_and_layer(tmp_path: Path) ->
         encoding="utf-8",
     )
     assert _readout_checkpoint_complete(checkpoint)
+
+
+def test_lens_apply_observes_condition_hooks() -> None:
+    from refusal_direction_replication.qwen_code_eval_runtime import (
+        apply_lens_with_hooks,
+    )
+
+    module = torch.nn.Identity()
+
+    class FakeLens:
+        def apply(self, _bound, _text, **_kwargs):
+            value = module(torch.tensor([1.0]))
+            logits = torch.tensor([[0.0, float(value.item())]])
+            return {0: logits}, logits, torch.tensor([1])
+
+    baseline, _model, _ids = apply_lens_with_hooks(
+        FakeLens(),
+        object(),
+        "rendered",
+        layers=[0],
+        positions=[0],
+        max_seq_len=8,
+    )
+
+    def double(_module, inputs):
+        return (inputs[0] * 2,)
+
+    intervened, _model, _ids = apply_lens_with_hooks(
+        FakeLens(),
+        object(),
+        "rendered",
+        layers=[0],
+        positions=[0],
+        max_seq_len=8,
+        pre_hooks=[(module, double)],
+    )
+    assert baseline[0][0, 1].item() == 1.0
+    assert intervened[0][0, 1].item() == 2.0
+
+
+def test_a100_preflight_requires_cuda_name_and_memory() -> None:
+    from refusal_direction_replication.qwen_code_eval_runtime import (
+        require_a100_preflight,
+    )
+
+    good = require_a100_preflight(
+        lambda: {
+            "cuda_available": True,
+            "device_name": "NVIDIA A100-SXM4-40GB",
+            "total_memory_bytes": 40_000_000_000,
+        }
+    )
+    assert good["device_name"] == "NVIDIA A100-SXM4-40GB"
+    with pytest.raises(ValueError, match="A100"):
+        require_a100_preflight(
+            lambda: {
+                "cuda_available": True,
+                "device_name": "NVIDIA L4",
+                "total_memory_bytes": 40_000_000_000,
+            }
+        )
+    with pytest.raises(ValueError, match="memory"):
+        require_a100_preflight(
+            lambda: {
+                "cuda_available": True,
+                "device_name": "NVIDIA A100-SXM4-40GB",
+                "total_memory_bytes": 30_000_000_000,
+            }
+        )

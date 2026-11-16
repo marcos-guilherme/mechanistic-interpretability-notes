@@ -340,7 +340,8 @@ def main() -> int:
     if args.action == "probe":
         run([*AUTH, "sessions"])
     elif args.action == "start":
-        run(start_command(session, args.gpu))
+        gpu = "A100" if args.profile == "qwen25-coder-code-eval" else args.gpu
+        run(start_command(session, gpu))
     elif args.action == "sync":
         direction = None
         code_eval_sources = None
