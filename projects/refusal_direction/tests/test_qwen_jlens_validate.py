@@ -627,3 +627,13 @@ def test_validator_rejects_negative_and_nonmonotonic_hits(tmp_path: Path) -> Non
     holdout_path.write_text(json.dumps(holdout, indent=2) + "\n", encoding="utf-8")
     checks = validate_qwen_jlens(root)
     assert checks["holdout_metric_arithmetic"] is False
+
+
+def test_validator_rejects_pass_without_checkpoint(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    checkpoint = (
+        root / "artifacts" / "qwen25_coder_7b_jlens" / "jlens_fit_checkpoint.pt"
+    )
+    checkpoint.unlink()
+    checks = validate_qwen_jlens(root)
+    assert checks["checkpoint_and_lens_identity"] is False

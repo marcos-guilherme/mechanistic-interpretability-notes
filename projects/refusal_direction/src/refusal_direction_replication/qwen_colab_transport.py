@@ -452,18 +452,20 @@ def validate_jlens_resume_bundle(
     n_done = int(payload["n_done"])
     status_progress = status_payload.get("fit_completed_units")
     if status_progress is None:
-        status_progress = status_payload.get("completed_units")
-    if int(status_progress if status_progress is not None else -1) != n_done:
-        raise ValueError("jlens resume progress does not match checkpoint")
-    if status_payload.get("current_stage") == "fit":
-        if int(status_payload.get("completed_units") or -1) != n_done:
-            raise ValueError("jlens resume progress does not match checkpoint")
+        status_progress = status_payload.get("completed_units", 0)
+    if int(status_progress or 0) > n_done:
+        raise ValueError("jlens resume status is ahead of checkpoint")
+    event_done = 0
     for line in events.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         event = json.loads(line)
         if event.get("run_id") != run_id:
             raise ValueError("jlens resume events run IDs do not match")
+        if event.get("event") == "checkpoint" and event.get("n_done") is not None:
+            event_done = max(event_done, int(event["n_done"]))
+    if event_done > n_done:
+        raise ValueError("jlens resume events are ahead of checkpoint")
     return {
         "run_id": str(run_id),
         "n_done": n_done,

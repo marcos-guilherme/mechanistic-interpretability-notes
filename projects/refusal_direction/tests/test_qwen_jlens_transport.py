@@ -515,8 +515,8 @@ def test_resume_bundle_rejects_mismatched_run_and_progress(tmp_path: Path) -> No
         validate_jlens_resume_bundle(
             checkpoint=checkpoint, status=other_status, events=events
         )
-    progress_status = tmp_path / "progress.json"
-    progress_status.write_text(
+    lagged_status = tmp_path / "lagged.json"
+    lagged_status.write_text(
         json.dumps(
             {
                 "run_id": "jlens-run-1",
@@ -528,10 +528,42 @@ def test_resume_bundle_rejects_mismatched_run_and_progress(tmp_path: Path) -> No
         + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="progress"):
-        validate_jlens_resume_bundle(
-            checkpoint=checkpoint, status=progress_status, events=events
+    validate_jlens_resume_bundle(
+        checkpoint=checkpoint, status=lagged_status, events=events
+    )
+    ahead_status = tmp_path / "ahead.json"
+    ahead_status.write_text(
+        json.dumps(
+            {
+                "run_id": "jlens-run-1",
+                "current_stage": "fit",
+                "completed_units": 9,
+                "fit_completed_units": 9,
+            }
         )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="ahead"):
+        validate_jlens_resume_bundle(
+            checkpoint=checkpoint, status=ahead_status, events=events
+        )
+    lagged_events = tmp_path / "lagged_events.jsonl"
+    lagged_events.write_text(
+        json.dumps(
+            {
+                "event": "checkpoint",
+                "run_id": "jlens-run-1",
+                "n_done": 7,
+                "stage": "fit",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    validate_jlens_resume_bundle(
+        checkpoint=checkpoint, status=lagged_status, events=lagged_events
+    )
 
 
 def test_resume_install_rolls_back_writes_marker_and_consumes_staging(

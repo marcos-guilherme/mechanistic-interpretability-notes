@@ -644,6 +644,8 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                     checks["probe_order_and_projection"] = False
         except Exception:
             checks["checkpoint_and_lens_identity"] = False
+    elif status == "pass":
+        checks["checkpoint_and_lens_identity"] = False
 
     if status_path.is_file():
         status_payload = _load(status_path)

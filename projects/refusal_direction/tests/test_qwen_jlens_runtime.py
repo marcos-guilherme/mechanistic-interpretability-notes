@@ -314,6 +314,25 @@ def test_runtime_falls_back_dim_batch_then_aborts_on_projection(
     assert probe["results"]["selected_dim_batch"] == 16
     assert not (tmp_path / "results" / "qwen25_coder_7b_jlens" / "03_jlens_holdout.json").exists()
     assert released["n"] >= 1
+    evaluation = json.loads(
+        (tmp_path / "results" / "qwen25_coder_7b_jlens" / "jlens_evaluation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert evaluation["corpus_hash"]
+    assert evaluation["config_hash"]
+    prepare = json.loads(
+        (tmp_path / "results" / "qwen25_coder_7b_jlens" / "00_jlens_prepare.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert evaluation["corpus_hash"] == prepare["results"]["corpus_hash"]
+    assert evaluation["config_hash"] == prepare["results"]["config_hash"]
+    from refusal_direction_replication.qwen_jlens_validate import validate_qwen_jlens
+
+    checks = validate_qwen_jlens(tmp_path)
+    failed = [name for name, passed in checks.items() if not passed]
+    assert failed == ["original_pilot_validator", "original_dose_validator"]
 
 
 def test_runtime_resumes_matching_checkpoint_and_rejects_stale(
@@ -913,3 +932,143 @@ def test_fetch_sync_bootstrap_resume_without_run_id(
         session_b / "artifacts" / "qwen25_coder_7b_jlens" / "events.jsonl"
     ).read_text(encoding="utf-8")
     assert events_b.count('"event": "checkpoint"') >= 100
+
+
+def test_runtime_reconciles_lagged_status_and_events_from_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_dose(tmp_path)
+    from refusal_direction_replication import qwen_jlens_runtime as runtime
+    from refusal_direction_replication.qwen_jlens import (
+        build_codesearchnet_corpus,
+        config_hash,
+        corpus_hash,
+        write_fit_checkpoint,
+    )
+
+    monkeypatch.setattr(runtime, "implementation_commit_hash", lambda: IMPLEMENTATION_COMMIT)
+    rows = [_row(index) for index in range(130)]
+    config = load_config(tmp_path, profile=JLENS_PROFILE)
+    tokenizer = CountingTokenizer()
+    corpus = build_codesearchnet_corpus(
+        rows,
+        tokenizer=tokenizer,
+        fit_count=100,
+        holdout_count=20,
+        min_tokens=128,
+        dataset_revision=config["dataset_revision"],
+    )
+    artifacts = tmp_path / "artifacts" / "qwen25_coder_7b_jlens"
+    artifacts.mkdir(parents=True)
+    write_fit_checkpoint(
+        artifacts / "jlens_fit_checkpoint.pt",
+        jacobian_sum={layer: torch.eye(8) for layer in (0, 1, 2)},
+        n_done=40,
+        next_idx=40,
+        dim_batch=32,
+        source_layers=[0, 1, 2],
+        target_layer=3,
+        skip_first=16,
+        corpus_hash=corpus_hash(corpus),
+        config_hash=config_hash(config),
+        model_revision=QWEN_REVISION,
+        implementation_commit=IMPLEMENTATION_COMMIT,
+        run_id="lagged-resume-run",
+    )
+    (artifacts / "status.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": JLENS_PROFILE,
+                "run_id": "lagged-resume-run",
+                "current_stage": "fit",
+                "state": "running",
+                "completed_units": 39,
+                "total_units": 100,
+                "fit_completed_units": 39,
+                "fit_total_units": 100,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lagged_events = [
+        {"event": "initialized", "run_id": "lagged-resume-run", "stage": "prepare"},
+        {"event": "initialized", "run_id": "lagged-resume-run", "stage": "probe"},
+        {"event": "probe_choice", "run_id": "lagged-resume-run", "dim_batch": 32},
+        {"event": "initialized", "run_id": "lagged-resume-run", "stage": "fit"},
+    ]
+    lagged_events.extend(
+        {
+            "event": "checkpoint",
+            "run_id": "lagged-resume-run",
+            "n_done": index,
+            "stage": "fit",
+        }
+        for index in range(1, 40)
+    )
+    (artifacts / "events.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in lagged_events),
+        encoding="utf-8",
+    )
+    jacobian_calls: list[int] = []
+
+    def counting_jacobian(model, prompt, source_layers, **kwargs):
+        jacobian_calls.append(1)
+        return fake_jacobian(model, prompt, source_layers, **kwargs)
+
+    payload = run_qwen_jlens(
+        tmp_path,
+        run_id=None,
+        load_rows=lambda **_kwargs: rows,
+        load_model=lambda **_kwargs: (
+            SimpleNamespace(
+                n_layers=4,
+                d_model=8,
+                config=SimpleNamespace(_commit_hash=QWEN_REVISION),
+            ),
+            tokenizer,
+        ),
+        wrap_model=lambda hf_model, tok: hf_model,
+        jacobian_for_prompt_fn=counting_jacobian,
+        lens_cls=FakeLens,
+        release_resources=lambda: None,
+        clock=lambda: 0.0,
+        assert_contract=lambda: None,
+    )
+    assert payload["status"] == "pass"
+    assert payload["run_id"] == "lagged-resume-run"
+    assert len(jacobian_calls) == 60
+    events = [
+        json.loads(line)
+        for line in (artifacts / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    recoveries = [
+        item
+        for item in events
+        if item.get("event") == "resume_recovered" and item.get("n_done") == 40
+    ]
+    assert len(recoveries) == 1
+    assert any(
+        item.get("event") == "checkpoint" and item.get("n_done") == 40 for item in events
+    )
+    from refusal_direction_replication.run_progress import RunProgressStore
+
+    first = runtime.reconcile_jlens_resume(
+        RunProgressStore(artifacts, profile=JLENS_PROFILE, run_id="lagged-resume-run"),
+        n_done=40,
+        dim_batch=32,
+    )
+    assert first["recovered"] is False
+    recoveries_after = [
+        item
+        for item in (
+            json.loads(line)
+            for line in (artifacts / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+        if item.get("event") == "resume_recovered" and item.get("n_done") == 40
+    ]
+    assert len(recoveries_after) == 1

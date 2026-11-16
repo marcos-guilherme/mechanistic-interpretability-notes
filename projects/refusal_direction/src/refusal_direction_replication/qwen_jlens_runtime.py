@@ -64,7 +64,7 @@ from .qwen_jlens import (
     write_fit_checkpoint,
 )
 from .qwen_pilot import resolve_run_id
-from .run_progress import RunProgressStore
+from .run_progress import MUTABLE_STATES, RunProgressStore
 
 JLENS_STAGES = ("prepare", "probe", "fit", "holdout")
 STATUS_ABORTED = "aborted"
@@ -152,6 +152,98 @@ def resolve_jlens_run_id(
         if existing:
             return str(existing)
     return resolve_run_id(artifacts_dir, requested=None)
+
+
+def _read_store_events(store: RunProgressStore) -> list[dict[str, Any]]:
+    if not store.events_path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in store.events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def reconcile_jlens_resume(
+    store: RunProgressStore,
+    *,
+    n_done: int,
+    dim_batch: int,
+) -> dict[str, Any]:
+    events = [
+        item for item in _read_store_events(store) if item.get("run_id") == store.run_id
+    ]
+    has_recovery = any(
+        item.get("event") == "resume_recovered"
+        and int(item.get("n_done") or -1) == int(n_done)
+        for item in events
+    )
+    checkpoint_done = {
+        int(item.get("n_done"))
+        for item in events
+        if item.get("event") == "checkpoint" and item.get("n_done") is not None
+    }
+    missing_checkpoints = [
+        index for index in range(1, int(n_done) + 1) if index not in checkpoint_done
+    ]
+    if has_recovery:
+        return {"recovered": False, "n_done": int(n_done)}
+    status = store.read_status()
+    status_progress = 0
+    if status is not None:
+        raw_progress = status.get("fit_completed_units")
+        if raw_progress is None:
+            raw_progress = status.get("completed_units")
+        status_progress = int(raw_progress or 0)
+        if status_progress > int(n_done):
+            raise ValueError("status progress is ahead of checkpoint")
+    lagged_status = status is None or status_progress < int(n_done)
+    recovered = bool(lagged_status or missing_checkpoints)
+    if lagged_status:
+        extra = {
+            "fit_completed_units": int(n_done),
+            "fit_total_units": FIT_COUNT,
+        }
+        if status is None:
+            store.initialize(
+                stage="fit",
+                total_units=FIT_COUNT,
+                completed_units=int(n_done),
+                extra=extra,
+            )
+            store.begin_running()
+        elif status.get("state") in MUTABLE_STATES:
+            store.update_progress(
+                completed_units=int(n_done),
+                total_units=FIT_COUNT,
+                extra=extra,
+            )
+    for index in missing_checkpoints:
+        store.append_public_event(
+            {
+                "event": "checkpoint",
+                "stage": "fit",
+                "state": "running",
+                "n_done": index,
+                "next_idx": index,
+                "completed_units": index,
+                "total_units": FIT_COUNT,
+                "recovered": True,
+            }
+        )
+    if recovered:
+        store.append_public_event(
+            {
+                "event": "resume_recovered",
+                "stage": "fit",
+                "state": "running",
+                "n_done": int(n_done),
+                "dim_batch": int(dim_batch),
+                "missing_checkpoints": missing_checkpoints,
+                "lagged_status": lagged_status,
+            }
+        )
+    return {"recovered": recovered, "n_done": int(n_done)}
 
 
 def default_load_rows(config: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
@@ -535,6 +627,11 @@ def run_qwen_jlens(
             next_idx = int(loaded["next_idx"])
             selected_dim_batch = int(loaded["dim_batch"])
             resumed = True
+            reconcile_jlens_resume(
+                store,
+                n_done=n_done,
+                dim_batch=selected_dim_batch,
+            )
 
         if not resumed:
             enter_stage("probe", FIT_COUNT)
@@ -663,6 +760,8 @@ def run_qwen_jlens(
                         f"{projection.projected_seconds:.1f}s"
                     ),
                     stage="probe",
+                    corpus_hash=digest,
+                    config_hash=hashed_config,
                 )
                 _write_evaluation(results_dir, evaluation)
                 _write_manifest(
