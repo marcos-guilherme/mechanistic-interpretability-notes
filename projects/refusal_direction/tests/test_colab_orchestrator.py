@@ -2,6 +2,8 @@ from pathlib import Path
 import importlib.util
 import tarfile
 
+import pytest
+
 
 SCRIPT = Path(__file__).parents[3] / "tools" / "colab" / "run_refusal.py"
 SPEC = importlib.util.spec_from_file_location("run_refusal", SCRIPT)
@@ -109,3 +111,78 @@ def test_qwen_archive_stamps_exact_implementation_commit(tmp_path) -> None:
         member = handle.extractfile("refusal_direction/IMPLEMENTATION_COMMIT")
         assert member is not None
         assert member.read().decode("utf-8").strip() == commit
+
+
+def test_lab_profile_session_and_bootstrap_are_dedicated() -> None:
+    assert MODULE.PROFILE_SESSIONS["qwen25-coder-lab"] == "refusal-qwen-lab"
+    assert MODULE.resolve_session("qwen25-coder-lab", None) == "refusal-qwen-lab"
+    scripts = MODULE.bootstrap_scripts("qwen25-coder-lab")
+    install = Path(__file__).parents[1] / "scripts" / "colab_install_lab.py"
+    status = Path(__file__).parents[1] / "scripts" / "qwen_run_lab_status.py"
+    assert install in scripts
+    assert status == Path(
+        MODULE.status_command("refusal-qwen-lab", profile="qwen25-coder-lab")[
+            MODULE.status_command(
+                "refusal-qwen-lab", profile="qwen25-coder-lab"
+            ).index("-f")
+            + 1
+        ]
+    )
+
+
+def test_lab_start_forces_a100_without_changing_other_profiles(monkeypatch) -> None:
+    import sys
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(MODULE, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "start", "--profile", "qwen25-coder-lab", "--gpu", "T4"],
+    )
+    MODULE.main()
+    assert commands[-1][-1] == "A100"
+    assert commands[-1][commands[-1].index("-s") + 1] == "refusal-qwen-lab"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "start", "--profile", "gemma", "--gpu", "L4"],
+    )
+    MODULE.main()
+    assert commands[-1][-1] == "L4"
+    assert commands[-1][commands[-1].index("-s") + 1] == "refusal-gemma"
+
+
+def test_lab_fetch_is_refused_and_does_not_download(monkeypatch) -> None:
+    import sys
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(MODULE, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "fetch", "--profile", "qwen25-coder-lab"],
+    )
+    with pytest.raises(SystemExit):
+        MODULE.main()
+    assert commands == []
+
+
+def test_legacy_qwen_fetch_still_downloads(monkeypatch, tmp_path) -> None:
+    import sys
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(MODULE, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(MODULE, "ROOT", tmp_path)
+    monkeypatch.setattr(MODULE, "PROJECT", tmp_path / "refusal_direction")
+    monkeypatch.setattr(MODULE, "extract_qwen_results_archive", lambda *_args: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "fetch", "--profile", "qwen25-coder"],
+    )
+    MODULE.main()
+    joined = " ".join(" ".join(item) for item in commands)
+    assert "download" in joined
+    assert "qwen_results.tar.gz" in joined

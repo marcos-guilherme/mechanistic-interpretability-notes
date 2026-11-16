@@ -9,14 +9,14 @@ import shutil
 import stat
 import tarfile
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import torch
 
-from .qwen_dose import metadata_contains_leak
+from .qwen_dose import metadata_contains_leak, sha256_file
 from .qwen_code_eval import compact_contains_leak
 from .qwen_jlens import (
     jlens_metadata_contains_leak,
@@ -130,6 +130,29 @@ CODE_EVAL_LENS_RELATIVE = (
 )
 REMOTE_CODE_EVAL_DIRECTION_STAGING = "/content/code_eval_source_direction.pt"
 REMOTE_CODE_EVAL_LENS_STAGING = "/content/code_eval_source_lens.pt"
+LAB_PROFILE = "qwen25_coder_7b_lab.json"
+LAB_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b_lab"
+LAB_DIRECTION_RELATIVE = CODE_EVAL_DIRECTION_RELATIVE
+LAB_LENS_RELATIVE = CODE_EVAL_LENS_RELATIVE
+REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
+REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
+REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
+ARTIFACT_CHUNK_BYTES = 64 * 1024**2
+MAX_LAB_DIRECTION_BYTES = MAX_DOSE_SOURCE_DIRECTION_BYTES
+MAX_LAB_LENS_BYTES = 800 * 1024**2
+LAB_AUTH_FORBIDDEN_KEYS = frozenset(
+    {
+        "password",
+        "prompt",
+        "prompts",
+        "response",
+        "responses",
+        "hf_token",
+        "token",
+        "secret",
+        "credentials",
+    }
+)
 CODE_EVAL_COMPACT_NAMES = frozenset(
     {
         "00_prepare.json",
@@ -444,6 +467,304 @@ def atomic_install_code_eval_sources(
         raise
     finally:
         shutil.rmtree(backup_root, ignore_errors=True)
+
+
+def split_artifact_file(
+    source: Path,
+    staging: Path,
+    *,
+    chunk_bytes: int = ARTIFACT_CHUNK_BYTES,
+    part_prefix: str = "lens.part",
+) -> list[Path]:
+    if chunk_bytes <= 0:
+        raise ValueError("chunk_bytes must be positive")
+    staging.mkdir(parents=True, exist_ok=True)
+    for old in staging.glob(f"{part_prefix}*"):
+        old.unlink()
+    parts: list[Path] = []
+    with source.open("rb") as incoming:
+        index = 0
+        while payload := incoming.read(chunk_bytes):
+            part = staging / f"{part_prefix}{index:03d}"
+            part.write_bytes(payload)
+            parts.append(part)
+            index += 1
+    if not parts:
+        raise ValueError("artifact is empty")
+    return parts
+
+
+def assemble_chunked_file(destination: Path) -> Path:
+    parts = sorted(destination.parent.glob(destination.name + ".part*"))
+    if not parts:
+        if destination.is_file():
+            return destination
+        raise FileNotFoundError("lab lens staging parts are missing")
+    expected = [
+        destination.name + f".part{index:03d}" for index in range(len(parts))
+    ]
+    if [part.name for part in parts] != expected:
+        raise ValueError("lab lens staging parts are not contiguous")
+    temporary = destination.with_name(destination.name + ".assembling")
+    try:
+        with temporary.open("wb") as output:
+            for part in parts:
+                if not part.is_file() or part.stat().st_size <= 0:
+                    raise ValueError(f"invalid lab lens part: {part.name}")
+                with part.open("rb") as incoming:
+                    while chunk := incoming.read(8 * 1024**2):
+                        output.write(chunk)
+        temporary.replace(destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    for part in parts:
+        part.unlink()
+    return destination
+
+
+def load_lab_profile_config(project: Path) -> dict[str, Any]:
+    path = project / "configs" / LAB_PROFILE
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _lab_expected_hashes(
+    project: Path,
+    *,
+    expected_direction_sha256: str | None,
+    expected_lens_sha256: str | None,
+) -> tuple[str, str]:
+    if expected_direction_sha256 and expected_lens_sha256:
+        return expected_direction_sha256, expected_lens_sha256
+    config = load_lab_profile_config(project)
+    return (
+        expected_direction_sha256 or str(config["direction_sha256"]),
+        expected_lens_sha256 or str(config["lens_sha256"]),
+    )
+
+
+def _validate_lab_source(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    expected_sha256: str | None = None,
+) -> None:
+    if not os.path.lexists(path):
+        raise FileNotFoundError(f"lab {label} source missing: {path}")
+    if path_is_link_or_junction(path) or not path.is_file():
+        raise ValueError(f"lab {label} source must be a regular file: {path}")
+    size = path.stat().st_size
+    if size <= 0 or size > max_bytes:
+        raise ValueError(
+            f"lab {label} source size {size} exceeds {max_bytes} bytes"
+        )
+    if expected_sha256 is not None:
+        actual = sha256_file(path)
+        if actual != expected_sha256:
+            raise ValueError(
+                f"lab {label} sha256 {actual!r} != expected {expected_sha256!r}"
+            )
+
+
+def _assert_lab_source_destination(
+    project: Path,
+    destination: Path,
+    relative: Path,
+) -> Path:
+    expected = (project.resolve() / relative).resolve()
+    current = destination
+    while current != project and current.parent != current:
+        if path_is_link_or_junction(current):
+            raise ValueError("lab source destination is a link or junction")
+        current = current.parent
+    if destination.resolve() != expected:
+        raise ValueError("lab source destination escaped its fixed path")
+    return destination
+
+
+def require_local_lab_sources(
+    project: Path,
+    *,
+    expected_direction_sha256: str | None = None,
+    expected_lens_sha256: str | None = None,
+) -> tuple[Path, Path]:
+    direction_hash, lens_hash = _lab_expected_hashes(
+        project,
+        expected_direction_sha256=expected_direction_sha256,
+        expected_lens_sha256=expected_lens_sha256,
+    )
+    direction = project / LAB_DIRECTION_RELATIVE
+    lens = project / LAB_LENS_RELATIVE
+    _validate_lab_source(
+        direction,
+        label="direction",
+        max_bytes=MAX_LAB_DIRECTION_BYTES,
+        expected_sha256=direction_hash,
+    )
+    _validate_lab_source(
+        lens,
+        label="lens",
+        max_bytes=MAX_LAB_LENS_BYTES,
+        expected_sha256=lens_hash,
+    )
+    return (
+        _assert_lab_source_destination(project, direction, LAB_DIRECTION_RELATIVE),
+        _assert_lab_source_destination(project, lens, LAB_LENS_RELATIVE),
+    )
+
+
+def atomic_install_lab_sources(
+    *,
+    staged_direction: Path,
+    staged_lens: Path,
+    project: Path,
+    expected_direction_sha256: str | None = None,
+    expected_lens_sha256: str | None = None,
+) -> tuple[Path, Path]:
+    direction_hash, lens_hash = _lab_expected_hashes(
+        project,
+        expected_direction_sha256=expected_direction_sha256,
+        expected_lens_sha256=expected_lens_sha256,
+    )
+    _validate_lab_source(
+        staged_direction,
+        label="direction staging",
+        max_bytes=MAX_LAB_DIRECTION_BYTES,
+        expected_sha256=direction_hash,
+    )
+    _validate_lab_source(
+        staged_lens,
+        label="lens staging",
+        max_bytes=MAX_LAB_LENS_BYTES,
+        expected_sha256=lens_hash,
+    )
+    destinations = (
+        project / LAB_DIRECTION_RELATIVE,
+        project / LAB_LENS_RELATIVE,
+    )
+    relatives = (LAB_DIRECTION_RELATIVE, LAB_LENS_RELATIVE)
+    for destination, relative in zip(destinations, relatives):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _assert_lab_source_destination(project, destination, relative)
+    backup_root = Path(
+        tempfile.mkdtemp(
+            prefix=".lab_sources_backup.",
+            dir=project,
+        )
+    )
+    records: list[InstallRecord] = []
+    try:
+        for destination, relative in zip(destinations, relatives):
+            had_original = destination.exists()
+            backup = backup_root / relative if had_original else None
+            if backup is not None:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(destination, backup)
+            records.append(
+                InstallRecord(
+                    target=destination,
+                    backup=backup,
+                    had_original=had_original,
+                )
+            )
+        _stream_install_regular_file(
+            staged=staged_direction,
+            destination=destinations[0],
+            max_bytes=MAX_LAB_DIRECTION_BYTES,
+            prefix=".lab_direction.",
+        )
+        _stream_install_regular_file(
+            staged=staged_lens,
+            destination=destinations[1],
+            max_bytes=MAX_LAB_LENS_BYTES,
+            prefix=".lab_lens.",
+        )
+        return require_local_lab_sources(
+            project,
+            expected_direction_sha256=direction_hash,
+            expected_lens_sha256=lens_hash,
+        )
+    except Exception:
+        _rollback_install_records(records)
+        raise
+    finally:
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+
+def write_lab_auth_file(
+    path: Path,
+    *,
+    username: str,
+    password: str,
+) -> Path:
+    user = str(username).strip()
+    secret = str(password).strip()
+    if not user or not secret:
+        raise ValueError("auth requires both username and password")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"username": user, "password": secret}, indent=None)
+    encoded = payload.encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if path.exists() or os.path.lexists(path):
+        if path_is_link_or_junction(path):
+            raise ValueError("auth file must be a regular file")
+        path.unlink()
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, encoded)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
+def consume_lab_auth_file(path: Path) -> tuple[str, str]:
+    try:
+        if not os.path.lexists(path):
+            raise FileNotFoundError(f"auth file missing: {path}")
+        if path_is_link_or_junction(path) or not path.is_file():
+            raise ValueError("auth file must be a regular file")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("auth file must contain a JSON object")
+        user = str(payload.get("username") or payload.get("user") or "").strip()
+        password = str(payload.get("password") or "").strip()
+        if not user or not password:
+            raise ValueError("auth requires both username and password")
+        return user, password
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def lab_status_is_safe(payload: Mapping[str, Any]) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    for key, value in payload.items():
+        if str(key).casefold() in LAB_AUTH_FORBIDDEN_KEYS:
+            return False
+        if isinstance(value, Mapping) and not lab_status_is_safe(value):
+            return False
+    return not compact_contains_leak(payload)
+
+
+def extract_lab_public_url(text: str) -> str | None:
+    match = re.search(
+        r"https://[A-Za-z0-9._-]+\.gradio\.(?:live|space)(?:/[^\s]*)?",
+        text,
+    )
+    if match is None:
+        return None
+    return match.group(0).rstrip(").,")
 
 
 def jlens_checkpoint_path(project: Path) -> Path:

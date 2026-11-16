@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
+import secrets
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +20,7 @@ PROFILE_SESSIONS = {
     "qwen25-coder-dose": "refusal-qwen",
     "qwen25-coder-jlens": "refusal-qwen",
     "qwen25-coder-code-eval": "refusal-qwen",
+    "qwen25-coder-lab": "refusal-qwen-lab",
 }
 EXCLUDED_PARTS = {
     ".git",
@@ -27,12 +31,37 @@ EXCLUDED_PARTS = {
     "artifacts",
 }
 CODE_EVAL_LENS_CHUNK_BYTES = 64 * 1024**2
+ARTIFACT_CHUNK_BYTES = CODE_EVAL_LENS_CHUNK_BYTES
 REMOTE_CODE_EVAL_LENS_STAGING = "/content/code_eval_source_lens.pt"
+REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
+REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
+REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
+A100_PROFILES = frozenset({"qwen25-coder-code-eval", "qwen25-coder-lab"})
 
 
 def huggingface_token_path(home: Path | None = None) -> Path:
     base = home if home is not None else Path.home()
     return base / ".cache" / "huggingface" / "token"
+
+
+def split_artifact_file(
+    source: Path,
+    staging: Path,
+    *,
+    chunk_bytes: int = ARTIFACT_CHUNK_BYTES,
+    part_prefix: str = "lens.part",
+) -> list[Path]:
+    sys.path.insert(0, str(PROJECT / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        split_artifact_file as split_remote_artifact,
+    )
+
+    return split_remote_artifact(
+        source,
+        staging,
+        chunk_bytes=chunk_bytes,
+        part_prefix=part_prefix,
+    )
 
 
 def split_code_eval_lens(
@@ -41,22 +70,12 @@ def split_code_eval_lens(
     *,
     chunk_bytes: int = CODE_EVAL_LENS_CHUNK_BYTES,
 ) -> list[Path]:
-    if chunk_bytes <= 0:
-        raise ValueError("chunk_bytes must be positive")
-    staging.mkdir(parents=True, exist_ok=True)
-    for old in staging.glob("lens.part*"):
-        old.unlink()
-    parts: list[Path] = []
-    with source.open("rb") as incoming:
-        index = 0
-        while payload := incoming.read(chunk_bytes):
-            part = staging / f"lens.part{index:03d}"
-            part.write_bytes(payload)
-            parts.append(part)
-            index += 1
-    if not parts:
-        raise ValueError("code-eval lens is empty")
-    return parts
+    return split_artifact_file(
+        source,
+        staging,
+        chunk_bytes=chunk_bytes,
+        part_prefix="lens.part",
+    )
 
 
 def start_command(session: str, gpu: str) -> list[str]:
@@ -137,7 +156,9 @@ def stamps_implementation_commit(profile: str) -> bool:
 
 def status_command(session: str, *, profile: str = "qwen25-coder") -> list[str]:
     script = PROJECT / "scripts" / "qwen_run_status.py"
-    if profile == "qwen25-coder-code-eval":
+    if profile == "qwen25-coder-lab":
+        script = PROJECT / "scripts" / "qwen_run_lab_status.py"
+    elif profile == "qwen25-coder-code-eval":
         script = PROJECT / "scripts" / "qwen_run_code_eval_status.py"
     elif profile == "qwen25-coder-jlens":
         script = PROJECT / "scripts" / "qwen_run_jlens_status.py"
@@ -183,6 +204,14 @@ def code_eval_command(session: str, *, timeout: int) -> list[str]:
     return exec_command(
         session,
         PROJECT / "scripts" / "qwen_run_code_eval.py",
+        timeout=timeout,
+    )
+
+
+def lab_command(session: str, *, timeout: int) -> list[str]:
+    return exec_command(
+        session,
+        PROJECT / "scripts" / "colab_start_lab.py",
         timeout=timeout,
     )
 
@@ -259,7 +288,18 @@ def require_code_eval_sources(project: Path) -> tuple[Path, Path]:
     return require_local_code_eval_sources(project)
 
 
+def require_lab_sources(project: Path) -> tuple[Path, Path]:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        require_local_lab_sources,
+    )
+
+    return require_local_lab_sources(project)
+
+
 def bootstrap_scripts(profile: str) -> list[Path]:
+    if profile == "qwen25-coder-lab":
+        return [PROJECT / "scripts" / "colab_install_lab.py"]
     scripts = [PROJECT / "scripts" / "colab_bootstrap.py"]
     if profile == "qwen25-coder-dose":
         scripts.append(PROJECT / "scripts" / "colab_install_dose_source_direction.py")
@@ -271,8 +311,57 @@ def bootstrap_scripts(profile: str) -> list[Path]:
     return scripts
 
 
+def generate_lab_credentials() -> tuple[str, str]:
+    return "lab_" + secrets.token_urlsafe(9), secrets.token_urlsafe(24)
+
+
 def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
+
+
+def run_captured(command: list[str]) -> str:
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return f"{completed.stdout or ''}{completed.stderr or ''}"
+
+
+def cleanup_lab_local_staging(root: Path) -> None:
+    staging = root / ".colab-staging"
+    auth = staging / "qwen_lab_auth.json"
+    if auth.exists() or os.path.lexists(auth):
+        try:
+            auth.unlink()
+        except FileNotFoundError:
+            pass
+    parts_dir = staging / "lab-lens-parts"
+    if parts_dir.exists():
+        shutil.rmtree(parts_dir, ignore_errors=True)
+
+
+def extract_public_lab_url(text: str) -> str:
+    sys.path.insert(0, str(PROJECT / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        extract_lab_public_url,
+    )
+
+    url = extract_lab_public_url(text)
+    if not url:
+        raise ValueError("lab public URL missing from remote output")
+    return url
+
+
+def write_session_auth_file(path: Path, username: str, password: str) -> Path:
+    sys.path.insert(0, str(PROJECT / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        write_lab_auth_file,
+    )
+
+    return write_lab_auth_file(path, username=username, password=password)
 
 
 def _archive_filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -350,6 +439,7 @@ def main() -> int:
             "dose",
             "jlens",
             "code-eval",
+            "lab",
             "stop",
         ),
     )
@@ -372,15 +462,18 @@ def main() -> int:
     if args.action == "probe":
         run([*AUTH, "sessions"])
     elif args.action == "start":
-        gpu = "A100" if args.profile == "qwen25-coder-code-eval" else args.gpu
+        gpu = "A100" if args.profile in A100_PROFILES else args.gpu
         run(start_command(session, gpu))
     elif args.action == "sync":
         direction = None
         code_eval_sources = None
+        lab_sources = None
         if args.profile == "qwen25-coder-dose":
             direction = require_dose_source_direction(PROJECT)
         elif args.profile == "qwen25-coder-code-eval":
             code_eval_sources = require_code_eval_sources(PROJECT)
+        elif args.profile == "qwen25-coder-lab":
+            lab_sources = require_lab_sources(PROJECT)
         archive = build_archive(
             stamp_commit=stamps_implementation_commit(args.profile)
         )
@@ -418,6 +511,27 @@ def main() -> int:
                         session,
                         part,
                         f"{REMOTE_CODE_EVAL_LENS_STAGING}.part{index:03d}",
+                    )
+                )
+        if lab_sources is not None:
+            source_direction, source_lens = lab_sources
+            run(
+                upload_command(
+                    session,
+                    source_direction,
+                    REMOTE_LAB_DIRECTION_STAGING,
+                )
+            )
+            lens_parts = split_artifact_file(
+                source_lens,
+                ROOT / ".colab-staging" / "lab-lens-parts",
+            )
+            for index, part in enumerate(lens_parts):
+                run(
+                    upload_command(
+                        session,
+                        part,
+                        f"{REMOTE_LAB_LENS_STAGING}.part{index:03d}",
                     )
                 )
         if args.profile == "qwen25-coder-jlens":
@@ -466,6 +580,8 @@ def main() -> int:
             )
         )
     elif args.action == "fetch":
+        if args.profile == "qwen25-coder-lab":
+            parser.error("fetch is not available for --profile qwen25-coder-lab")
         if args.profile == "qwen25-coder-code-eval":
             remote_archive = "/content/qwen_code_eval_results.tar.gz"
             local_name = "qwen_code_eval_results.tar.gz"
@@ -514,6 +630,7 @@ def main() -> int:
             "qwen25-coder-dose",
             "qwen25-coder-jlens",
             "qwen25-coder-code-eval",
+            "qwen25-coder-lab",
         ):
             parser.error("status is only available for Qwen profiles")
         run(status_command(session, profile=args.profile))
@@ -535,7 +652,44 @@ def main() -> int:
                 "code-eval is only available for --profile qwen25-coder-code-eval"
             )
         run(code_eval_command(session, timeout=args.timeout))
+    elif args.action == "lab":
+        if args.profile != "qwen25-coder-lab":
+            parser.error("lab is only available for --profile qwen25-coder-lab")
+        auth_path = ROOT / ".colab-staging" / "qwen_lab_auth.json"
+        try:
+            username, password = generate_lab_credentials()
+            write_session_auth_file(auth_path, username, password)
+            run(
+                upload_command(
+                    session,
+                    auth_path,
+                    REMOTE_LAB_AUTH_FILE,
+                )
+            )
+            remote_output = run_captured(
+                lab_command(session, timeout=args.timeout)
+            )
+            public_url = extract_public_lab_url(remote_output)
+            print(f"Public URL: {public_url}")
+            print(f"Username: {username}")
+            print(f"Password: {password}")
+            print(
+                "WARNING: This Gradio share link uses an external relay. "
+                "Prompts and responses transit that service during the session."
+            )
+            print("Always stop the A100 when finished:")
+            print(
+                "  python tools/colab/run_refusal.py stop --profile qwen25-coder-lab"
+            )
+        finally:
+            if auth_path.exists() or os.path.lexists(auth_path):
+                try:
+                    auth_path.unlink()
+                except FileNotFoundError:
+                    pass
     elif args.action == "stop":
+        if args.profile == "qwen25-coder-lab":
+            cleanup_lab_local_staging(ROOT)
         run(stop_command(session))
     return 0
 

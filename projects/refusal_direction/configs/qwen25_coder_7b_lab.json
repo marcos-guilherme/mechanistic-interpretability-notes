@@ -1,0 +1,21 @@
+{
+  "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+  "dtype": "bfloat16",
+  "gpu": "A100",
+  "session": "refusal-qwen-lab",
+  "gradio_version": "5.49.1",
+  "jlens_upstream": "anthropics/jacobian-lens",
+  "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+  "format_style": "chat_template",
+  "seed": 42,
+  "ablation_coefficient": 0.2,
+  "addition_coefficient": 0.5,
+  "random_control_coefficient": 0.2,
+  "random_control_seed": 1042,
+  "artifacts_dir": "artifacts/qwen25_coder_7b_lab",
+  "source_direction": "artifacts/qwen25_coder_7b/selected_direction.pt",
+  "source_lens": "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt",
+  "direction_sha256": "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
+  "lens_sha256": "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e"
+}

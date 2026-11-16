@@ -46,12 +46,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--server-name", default="0.0.0.0")
     parser.add_argument("--server-port", type=int, default=7860)
     parser.add_argument("--share", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--auth-file",
+        type=Path,
+        default=None,
+        help="JSON file with username/password; deleted after a single read.",
+    )
     return parser.parse_args(argv)
+
+
+def _credentials_from_args(args: argparse.Namespace):
+    if args.auth_file is not None:
+        from refusal_direction_replication.qwen_colab_transport import consume_lab_auth_file
+
+        user, password = consume_lab_auth_file(Path(args.auth_file))
+        return resolve_auth_credentials(user=user, password=password)
+    return resolve_auth_credentials()
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    auth = resolve_auth_credentials()
+    auth = _credentials_from_args(args)
     launch_auth = require_launch_authentication(
         share=bool(args.share),
         server_name=args.server_name,
