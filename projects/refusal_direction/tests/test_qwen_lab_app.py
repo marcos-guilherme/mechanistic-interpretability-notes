@@ -1,0 +1,496 @@
+from __future__ import annotations
+
+import importlib
+import inspect
+import json
+import os
+import sys
+import threading
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Iterator
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from refusal_direction_replication.qwen_code_eval import COEFFICIENTS, CONDITIONS
+from refusal_direction_replication.qwen_lab import (
+    DEFAULT_TOP_K,
+    LAB_MAX_JLENS_LAYER,
+    LAB_MIN_JLENS_LAYER,
+    LAB_PRESETS,
+    GenerationEvent,
+    GenerationRequest,
+    TokenPrediction,
+    escape_token_display,
+    generation_event_to_dict,
+    generation_request_to_dict,
+)
+from refusal_direction_replication.qwen_lab_readout import LENS_CONTRACT_QWEN
+
+
+def _prediction(
+    token_id: int,
+    *,
+    rank: int = 1,
+    score: float = 1.0,
+    bar: float = 1.0,
+    delta: int | None = None,
+) -> TokenPrediction:
+    text = chr(97 + (token_id % 26))
+    return TokenPrediction(
+        token_id=token_id,
+        display_text=escape_token_display(token_id=token_id, text=text),
+        score=score,
+        relative_bar=bar,
+        rank=rank,
+        previous_rank_delta=delta,
+    )
+
+
+def _event(
+    step: int,
+    *,
+    token_id: int = 7,
+    text: str = "abc",
+    predictions: tuple[TokenPrediction, ...] | None = None,
+    status: str | None = None,
+) -> GenerationEvent:
+    preds = predictions or (
+        _prediction(7, rank=1),
+        _prediction(3, rank=2, score=0.4, bar=0.4, delta=1),
+    )
+    display = escape_token_display(token_id=token_id, text=text[step - 1 : step] if step else "x")
+    return GenerationEvent(
+        step=step,
+        generated_token_id=token_id,
+        generated_token_text=display,
+        accumulated_text=text[:step],
+        effective_condition="baseline",
+        effective_coefficient=0.0,
+        j_lens_layer=12,
+        predictions=preds,
+        step_time_seconds=0.01,
+        gpu_memory_bytes=1024,
+        status=status,
+    )
+
+
+class FakeEngine:
+    def __init__(self, events: list[GenerationEvent] | None = None) -> None:
+        self._events = list(events or [_event(1), _event(2, text="abcd")])
+        self.terminal_status: str | None = None
+        self.active = False
+
+    def generate(
+        self,
+        request: GenerationRequest,
+        cancelled: Any = None,
+    ) -> Iterator[GenerationEvent]:
+        del request
+        self.active = True
+        try:
+            for index, event in enumerate(self._events):
+                if cancelled is not None and getattr(cancelled, "is_set", lambda: False)():
+                    self.terminal_status = "cancelled"
+                    return
+                yield event
+                if cancelled is not None and getattr(cancelled, "is_set", lambda: False)():
+                    self.terminal_status = "cancelled"
+                    return
+            self.terminal_status = self._events[-1].status or "completed"
+        finally:
+            self.active = False
+
+
+def test_module_import_avoids_gradio_dependency() -> None:
+    blocked = ModuleNotFoundError("gradio blocked")
+    with patch.dict(sys.modules, {"gradio": blocked}):
+        module = importlib.import_module("refusal_direction_replication.qwen_lab_app")
+        assert module is not None
+    source = inspect.getsource(module.build_gradio_app)
+    assert "import gradio" in source
+
+
+def test_preset_resolution_matches_study_coefficients() -> None:
+    from refusal_direction_replication.qwen_lab_app import LabUIController
+
+    controller = LabUIController()
+    for preset, condition in zip(LAB_PRESETS, CONDITIONS, strict=True):
+        resolved = controller.resolve_preset(preset.condition)
+        assert resolved.condition == condition
+        assert resolved.coefficient == float(COEFFICIENTS[condition])
+    baseline = controller.resolve_preset("baseline")
+    assert baseline.manual_coefficient_enabled is False
+    assert baseline.coefficient == 0.0
+    addition = controller.resolve_preset("addition")
+    assert addition.manual_coefficient_enabled is True
+
+
+def test_build_request_applies_manual_coefficient_and_validates() -> None:
+    from refusal_direction_replication.qwen_lab_app import LabUIController
+
+    controller = LabUIController()
+    request = controller.build_generation_request(
+        prompt="olá",
+        condition="ablation",
+        manual_mode=True,
+        coefficient=0.35,
+        j_lens_layer=10,
+        top_k=DEFAULT_TOP_K,
+        temperature=0.7,
+        top_p=0.95,
+        seed=5,
+        max_new_tokens=16,
+    )
+    assert request.coefficient == pytest.approx(0.35)
+    assert request.condition == "ablation"
+    with pytest.raises(ValueError, match="baseline"):
+        controller.build_generation_request(
+            prompt="x",
+            condition="baseline",
+            manual_mode=True,
+            coefficient=0.2,
+            j_lens_layer=10,
+            top_k=DEFAULT_TOP_K,
+            temperature=0.0,
+            top_p=1.0,
+            seed=0,
+            max_new_tokens=8,
+        )
+
+
+def test_streaming_updates_text_and_predictions_in_sync() -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        GenerationSession,
+        LabUIController,
+        LabViewState,
+    )
+
+    engine = FakeEngine([_event(1, text="xy"), _event(2, text="xy")])
+    controller = LabUIController()
+    session = GenerationSession()
+    state = LabViewState()
+    request = controller.build_generation_request(
+        prompt="pergunta",
+        condition="baseline",
+        manual_mode=False,
+        coefficient=0.0,
+        j_lens_layer=12,
+        top_k=2,
+        temperature=0.0,
+        top_p=1.0,
+        seed=0,
+        max_new_tokens=4,
+    )
+    texts: list[str] = []
+    for tick in controller.stream_generation(
+        engine,
+        request,
+        state=state,
+        session=session,
+    ):
+        texts.append(tick.view_state.response_text)
+    assert texts == ["", "x", "xy"]
+    assert len(state.prediction_rows) == 2
+    produced = state.prediction_caption
+    assert "id 7" in produced.lower() or "ID 7" in produced
+    assert state.events[-1].step == 2
+
+
+def test_generation_lock_and_unlock_descriptors() -> None:
+    from refusal_direction_replication.qwen_lab_app import LabUIController
+
+    controller = LabUIController()
+    locked = {item.component: item for item in controller.generation_lock_updates()}
+    unlocked = {
+        item.component: item
+        for item in controller.generation_unlock_updates(
+            condition="addition",
+            manual_mode=True,
+        )
+    }
+    assert locked["condition_dropdown"].interactive is False
+    assert locked["layer_slider"].interactive is False
+    assert locked["generate_button"].interactive is False
+    assert unlocked["condition_dropdown"].interactive is True
+    assert unlocked["manual_coefficient"].interactive is True
+
+
+def test_baseline_manual_slider_forced_disabled() -> None:
+    from refusal_direction_replication.qwen_lab_app import LabUIController
+
+    manual = LabUIController().manual_coefficient_update(
+        condition="baseline",
+        manual_mode=True,
+        coefficient=0.5,
+    )
+    assert manual.value == 0.0
+    assert manual.interactive is False
+
+
+def test_cancel_preserves_partial_response_and_unlocks() -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        GenerationSession,
+        LabUIController,
+        LabViewState,
+    )
+
+    engine = FakeEngine(
+        [
+            _event(1, text="parcial"),
+            _event(2, text="parcial!"),
+            _event(3, text="parcial!x"),
+        ]
+    )
+    controller = LabUIController()
+    session = GenerationSession()
+    state = LabViewState()
+    request = controller.build_generation_request(
+        prompt="p",
+        condition="baseline",
+        manual_mode=False,
+        coefficient=0.0,
+        j_lens_layer=5,
+        top_k=DEFAULT_TOP_K,
+        temperature=0.0,
+        top_p=1.0,
+        seed=0,
+        max_new_tokens=8,
+    )
+    stream = controller.stream_generation(engine, request, state=state, session=session)
+    next(stream)
+    next(stream)
+    next(stream)
+    session.cancel_event.set()
+    rest = list(stream)
+    assert not rest
+    assert state.response_text == "pa"
+    assert engine.terminal_status == "cancelled"
+    unlock = controller.generation_unlock_updates(condition="baseline", manual_mode=False)
+    manual = next(item for item in unlock if item.component == "manual_coefficient")
+    assert manual.interactive is False
+
+
+def test_clear_resets_state_and_removes_export_file(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        LabUIController,
+        LabViewState,
+        remove_secure_temp_file,
+        write_secure_export_json,
+    )
+
+    export_path = write_secure_export_json(tmp_path / "holder", {"ok": True})
+    assert export_path.is_file()
+    state = LabViewState(response_text="texto", export_path=str(export_path))
+    state.events.append(_event(1))
+    controller = LabUIController()
+    cleared = controller.clear_session(state)
+    assert cleared.response_text == ""
+    assert cleared.events == []
+    assert not export_path.exists()
+    remove_secure_temp_file(str(export_path))
+
+
+def test_export_only_on_explicit_action_and_round_trip(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        EXPORT_SCHEMA_VERSION,
+        LabUIController,
+        LabViewState,
+        assert_export_document_safe,
+        load_export_document,
+    )
+
+    controller = LabUIController()
+    state = LabViewState()
+    request = controller.build_generation_request(
+        prompt="exportável",
+        condition="addition",
+        manual_mode=False,
+        coefficient=0.5,
+        j_lens_layer=8,
+        top_k=5,
+        temperature=1.0,
+        top_p=1.0,
+        seed=9,
+        max_new_tokens=3,
+    )
+    state.last_request = request
+    state.events = [_event(1, status="max_tokens")]
+    with pytest.raises(ValueError, match="explicit"):
+        controller.export_session(state, explicit=False, holder=tmp_path / "h")
+    path = controller.export_session(state, explicit=True, holder=tmp_path / "h")
+    document = load_export_document(path)
+    assert document["schema_version"] == EXPORT_SCHEMA_VERSION
+    assert document["request"] == generation_request_to_dict(request)
+    assert len(document["events"]) == 1
+    assert document["terminal_status"] == "max_tokens"
+    assert_export_document_safe(document)
+    roundtrip = generation_request_to_dict(
+        GenerationRequest(**document["request"])
+    )
+    assert roundtrip == document["request"]
+
+
+def test_export_redacts_secrets_and_paths(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        LabUIController,
+        LabViewState,
+        assert_export_document_safe,
+    )
+
+    controller = LabUIController()
+    state = LabViewState()
+    state.last_request = controller.build_generation_request(
+        prompt="p",
+        condition="baseline",
+        manual_mode=False,
+        coefficient=0.0,
+        j_lens_layer=1,
+        top_k=3,
+        temperature=0.0,
+        top_p=1.0,
+        seed=0,
+        max_new_tokens=2,
+    )
+    state.events = [_event(1)]
+    with pytest.raises(ValueError):
+        assert_export_document_safe(
+            {
+                "schema_version": 1,
+                "request": generation_request_to_dict(state.last_request),
+                "events": [generation_event_to_dict(state.events[0])],
+                "direction_path": "C:\\artifacts\\lens.pt",
+            }
+        )
+    path = controller.export_session(state, explicit=True, holder=tmp_path / "h")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    dumped = json.dumps(raw, ensure_ascii=False)
+    assert "selected_direction" not in dumped
+    assert "jacobian_lens" not in dumped
+    assert "HF_TOKEN" not in dumped
+    assert "password" not in dumped.lower()
+
+
+def test_operational_logging_rejects_prompt_like_fields() -> None:
+    from refusal_direction_replication.qwen_lab_app import lab_operational_log
+
+    payload = lab_operational_log(status="running", step=1, condition="baseline")
+    assert payload["status"] == "running"
+    with pytest.raises(ValueError):
+        lab_operational_log(prompt="não deve aparecer")
+    with pytest.raises(ValueError):
+        lab_operational_log(accumulated_text="vazamento")
+
+
+def test_preflight_fail_closed_without_a100() -> None:
+    from refusal_direction_replication.qwen_lab_app import bootstrap_intervention_lab
+
+    probe = lambda: {
+        "cuda_available": False,
+        "device_name": "",
+        "total_memory_bytes": 0,
+    }
+    with pytest.raises(ValueError, match="A100"):
+        bootstrap_intervention_lab(
+            Path("."),
+            gpu_probe=probe,
+            load_stack=lambda **_kwargs: SimpleNamespace(),
+        )
+
+
+def test_bootstrap_production_uses_qwen_lens_contract(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import bootstrap_intervention_lab
+
+    captured: dict[str, Any] = {}
+
+    def fake_load_stack(**kwargs: Any) -> SimpleNamespace:
+        captured.update(kwargs)
+        engine = MagicMock()
+        return SimpleNamespace(engine=engine, preflight_summary={"device_name": "A100"})
+
+    probe = lambda: {
+        "cuda_available": True,
+        "device_name": "NVIDIA A100-SXM4-40GB",
+        "total_memory_bytes": 40_000_000_000,
+    }
+    direction = tmp_path / "direction.pt"
+    lens = tmp_path / "lens.pt"
+    direction.write_bytes(b"dir")
+    lens.write_bytes(b"lens")
+    with patch(
+        "refusal_direction_replication.qwen_lab_app.verify_direction_artifact",
+        return_value="0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
+    ), patch("refusal_direction_replication.qwen_lab_app.verify_frozen_lens_hash"):
+        bundle = bootstrap_intervention_lab(
+            tmp_path,
+            direction_path=direction,
+            lens_path=lens,
+            gpu_probe=probe,
+            load_stack=fake_load_stack,
+        )
+        assert bundle.engine is not None
+        assert captured.get("lens_contract") == LENS_CONTRACT_QWEN
+
+
+def test_build_gradio_app_returns_blocks_with_portuguese_layout() -> None:
+    pytest.importorskip("gradio")
+    from refusal_direction_replication.qwen_lab_app import (
+        LAB_DISCLAIMER,
+        build_gradio_app,
+    )
+
+    engine = FakeEngine([])
+    demo = build_gradio_app(
+        engine,
+        preflight_summary={
+            "device_name": "NVIDIA A100",
+            "model_revision": "c03e6d3",
+            "direction_sha256": "0b1cff5e",
+            "lens_sha256": "b700a78c",
+        },
+    )
+    assert demo.__class__.__name__ == "Blocks"
+    assert "previsões da j-lens" in LAB_DISCLAIMER.casefold()
+    assert "pensamento" in LAB_DISCLAIMER.casefold()
+
+
+def test_gradio_html_excludes_secret_markers() -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        LAB_CSS,
+        LAB_DISCLAIMER,
+        assert_ui_strings_safe,
+    )
+
+    assert_ui_strings_safe(LAB_CSS)
+    assert_ui_strings_safe(LAB_DISCLAIMER)
+
+
+def test_qwen_run_lab_main_does_not_print_password(capsys: pytest.CaptureFixture[str]) -> None:
+    from importlib.machinery import SourceFileLoader
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "qwen_run_lab.py"
+    module = SourceFileLoader("qwen_run_lab", str(script)).load_module()
+    launch = MagicMock()
+    with patch.object(
+        module,
+        "bootstrap_intervention_lab",
+        return_value=SimpleNamespace(
+            engine=FakeEngine([]),
+            preflight_summary={"device_name": "A100"},
+        ),
+    ), patch.object(
+        module,
+        "build_gradio_app",
+        return_value=SimpleNamespace(launch=launch, auth=("local-user", "secret")),
+    ):
+        env = {
+            "QWEN_LAB_AUTH_USER": "local-user",
+            "QWEN_LAB_AUTH_PASSWORD": "SUPER-SECRET-PASS",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            module.main(["--no-share"])
+    captured = capsys.readouterr().out + capsys.readouterr().err
+    assert "SUPER-SECRET-PASS" not in captured
+    launch.assert_called_once()
