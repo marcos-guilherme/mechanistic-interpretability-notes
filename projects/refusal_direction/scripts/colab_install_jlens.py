@@ -1,7 +1,7 @@
 """Install the pinned Jacobian-lens upstream without touching Transformers.
 
 Pin: anthropics/jacobian-lens@581d398613e5602a5af361e1c34d3a92ea82ba8e
-Installed with pip --no-deps so the project's Transformers pin stays.
+`--no-deps` is deliberate so the project's Transformers pins stay.
 """
 
 from __future__ import annotations

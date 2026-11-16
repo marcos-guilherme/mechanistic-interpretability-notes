@@ -32,6 +32,9 @@ JLENS_UPSTREAM_COMMIT = "581d398613e5602a5af361e1c34d3a92ea82ba8e"
 JLENS_UPSTREAM_SPEC = (
     f"git+https://github.com/{JLENS_UPSTREAM}.git@{JLENS_UPSTREAM_COMMIT}"
 )
+RUNTIME_COMPATIBILITY_SMOKE = (
+    "2026-11-16-qwen7b-hooks-jlens-transport-unembed"
+)
 DATASET_REPO_ID = "code-search-net/code_search_net"
 DATASET_CONFIG = "python"
 DATASET_SPLIT = "train"
@@ -841,3 +844,41 @@ def assert_jlens_contract(
 
 def jlens_install_command(python: str = "python") -> list[str]:
     return [python, "-m", "pip", "install", "--no-deps", JLENS_UPSTREAM_SPEC]
+
+
+def parse_supported_transformers_versions(pyproject: Path) -> frozenset[str]:
+    import tomllib
+
+    payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    versions: set[str] = set()
+    for dependency in payload.get("project", {}).get("dependencies", []):
+        if not isinstance(dependency, str) or not dependency.startswith("transformers=="):
+            continue
+        version = dependency.split("==", 1)[1].split(";", 1)[0].strip()
+        if version:
+            versions.add(version)
+    if not versions:
+        raise ValueError("pyproject.toml does not pin Transformers")
+    return frozenset(versions)
+
+
+def assert_pinned_transformers_runtime(
+    pyproject: Path,
+    *,
+    installed: str | None = None,
+) -> str:
+    import importlib.metadata
+
+    supported = parse_supported_transformers_versions(pyproject)
+    version = (
+        installed
+        if installed is not None
+        else importlib.metadata.version("transformers")
+    )
+    if version not in supported:
+        raise ValueError(
+            "installed Transformers "
+            f"{version!r} is outside project pins {sorted(supported)}; "
+            f"runtime_compatibility_smoke={RUNTIME_COMPATIBILITY_SMOKE}"
+        )
+    return version

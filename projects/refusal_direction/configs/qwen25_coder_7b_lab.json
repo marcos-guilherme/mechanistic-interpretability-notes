@@ -7,6 +7,8 @@
   "gradio_version": "5.49.1",
   "jlens_upstream": "anthropics/jacobian-lens",
   "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+  "jlens_install_no_deps": true,
+  "runtime_compatibility_smoke": "2026-11-16-qwen7b-hooks-jlens-transport-unembed",
   "format_style": "chat_template",
   "seed": 42,
   "ablation_coefficient": 0.2,

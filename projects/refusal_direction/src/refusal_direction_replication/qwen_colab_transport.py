@@ -9,7 +9,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -136,23 +136,28 @@ LAB_DIRECTION_RELATIVE = CODE_EVAL_DIRECTION_RELATIVE
 LAB_LENS_RELATIVE = CODE_EVAL_LENS_RELATIVE
 REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
 REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
+REMOTE_LAB_LENS_MANIFEST = "/content/lab_source_lens.pt.manifest.json"
 REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
 ARTIFACT_CHUNK_BYTES = 64 * 1024**2
+LAB_LENS_CHUNK_BYTES = 16 * 1024**2
+CHUNK_MANIFEST_VERSION = 1
 MAX_LAB_DIRECTION_BYTES = MAX_DOSE_SOURCE_DIRECTION_BYTES
 MAX_LAB_LENS_BYTES = 800 * 1024**2
-LAB_AUTH_FORBIDDEN_KEYS = frozenset(
+LAB_STATUS_FIELDS = frozenset(
     {
-        "password",
-        "prompt",
-        "prompts",
-        "response",
-        "responses",
-        "hf_token",
-        "token",
-        "secret",
-        "credentials",
+        "profile",
+        "state",
+        "gpu",
+        "share_ready",
+        "public_url",
+        "pid",
+        "direction_sha256",
+        "lens_sha256",
     }
 )
+LAB_STATUS_REQUIRED_FIELDS = ("profile", "state", "gpu", "share_ready")
+LAB_STATUS_STATES = frozenset({"running", "stopped", "error"})
+LAB_STATUS_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 CODE_EVAL_COMPACT_NAMES = frozenset(
     {
         "00_prepare.json",
@@ -494,17 +499,104 @@ def split_artifact_file(
     return parts
 
 
-def assemble_chunked_file(destination: Path) -> Path:
-    parts = sorted(destination.parent.glob(destination.name + ".part*"))
-    if not parts:
+def write_artifact_chunk_manifest(
+    source: Path,
+    parts: Sequence[Path],
+    destination: Path,
+    *,
+    part_names: Sequence[str] | None = None,
+) -> Path:
+    names = list(part_names) if part_names is not None else [part.name for part in parts]
+    if len(names) != len(parts):
+        raise ValueError("part names do not match parts")
+    payload = {
+        "version": CHUNK_MANIFEST_VERSION,
+        "total_size": source.stat().st_size,
+        "sha256": sha256_file(source),
+        "part_count": len(parts),
+        "parts": [
+            {
+                "name": name,
+                "size": part.stat().st_size,
+                "sha256": sha256_file(part),
+            }
+            for part, name in zip(parts, names)
+        ],
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return destination
+
+
+def _discover_chunk_parts(destination: Path) -> list[Path]:
+    return sorted(destination.parent.glob(destination.name + ".part*"))
+
+
+def _validate_parts_against_manifest(
+    parts: Sequence[Path],
+    manifest: Mapping[str, Any],
+) -> None:
+    if manifest.get("version") != CHUNK_MANIFEST_VERSION:
+        raise ValueError("chunk manifest version is unsupported")
+    expected_entries = list(manifest.get("parts") or [])
+    expected_count = int(manifest.get("part_count") or 0)
+    if expected_count != len(expected_entries):
+        raise ValueError("chunk manifest part_count does not match parts")
+    actual_names = [part.name for part in parts]
+    expected_names = [str(entry.get("name") or "") for entry in expected_entries]
+    extra = sorted(set(actual_names) - set(expected_names))
+    missing = [name for name in expected_names if name not in set(actual_names)]
+    if extra:
+        raise ValueError(f"extra chunk parts: {', '.join(extra)}")
+    if missing:
+        raise ValueError(f"missing chunk parts: {', '.join(missing)}")
+    if actual_names != expected_names:
+        raise ValueError("chunk parts do not match manifest order")
+    for part, entry in zip(parts, expected_entries):
+        expected_size = int(entry.get("size") or 0)
+        if not part.is_file() or part.stat().st_size != expected_size:
+            raise ValueError(f"altered chunk part size: {part.name}")
+        actual_hash = sha256_file(part)
+        if actual_hash != entry.get("sha256"):
+            raise ValueError(f"altered chunk part sha256: {part.name}")
+
+
+def assemble_chunked_file(
+    destination: Path,
+    *,
+    manifest_path: Path | None = None,
+    require_manifest: bool = False,
+) -> Path:
+    parts = _discover_chunk_parts(destination)
+    resolved_manifest = manifest_path
+    if require_manifest and resolved_manifest is None:
+        resolved_manifest = destination.with_name(destination.name + ".manifest.json")
+    if require_manifest and (
+        resolved_manifest is None or not Path(resolved_manifest).is_file()
+    ):
+        raise FileNotFoundError("chunk manifest is required")
+    manifest: Mapping[str, Any] | None = None
+    if resolved_manifest is not None and Path(resolved_manifest).is_file():
+        manifest = json.loads(Path(resolved_manifest).read_text(encoding="utf-8"))
+        if not parts:
+            raise FileNotFoundError("lab lens staging parts are missing")
+        _validate_parts_against_manifest(parts, manifest)
+    elif not parts:
         if destination.is_file():
             return destination
         raise FileNotFoundError("lab lens staging parts are missing")
-    expected = [
-        destination.name + f".part{index:03d}" for index in range(len(parts))
-    ]
-    if [part.name for part in parts] != expected:
-        raise ValueError("lab lens staging parts are not contiguous")
+    else:
+        expected = [
+            destination.name + f".part{index:03d}" for index in range(len(parts))
+        ]
+        if [part.name for part in parts] != expected:
+            raise ValueError("lab lens staging parts are not contiguous")
+        for part in parts:
+            if not part.is_file() or part.stat().st_size <= 0:
+                raise ValueError(f"invalid lab lens part: {part.name}")
     temporary = destination.with_name(destination.name + ".assembling")
     try:
         with temporary.open("wb") as output:
@@ -514,12 +606,26 @@ def assemble_chunked_file(destination: Path) -> Path:
                 with part.open("rb") as incoming:
                     while chunk := incoming.read(8 * 1024**2):
                         output.write(chunk)
+        if manifest is not None:
+            if temporary.stat().st_size != int(manifest["total_size"]):
+                raise ValueError("assembled size does not match manifest")
+            if sha256_file(temporary) != manifest["sha256"]:
+                raise ValueError("assembled sha256 does not match manifest")
         temporary.replace(destination)
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        raise
     finally:
         if temporary.exists():
             temporary.unlink()
     for part in parts:
         part.unlink()
+    if resolved_manifest is not None:
+        try:
+            Path(resolved_manifest).unlink()
+        except FileNotFoundError:
+            pass
     return destination
 
 
@@ -747,15 +853,45 @@ def consume_lab_auth_file(path: Path) -> tuple[str, str]:
             pass
 
 
-def lab_status_is_safe(payload: Mapping[str, Any]) -> bool:
-    if not isinstance(payload, Mapping):
-        return False
+def validate_lab_operational_status(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("lab status must be a JSON object")
+    extra = [key for key in payload if key not in LAB_STATUS_FIELDS]
+    if extra:
+        raise ValueError(f"lab status has unknown field: {extra[0]}")
     for key, value in payload.items():
-        if str(key).casefold() in LAB_AUTH_FORBIDDEN_KEYS:
-            return False
-        if isinstance(value, Mapping) and not lab_status_is_safe(value):
-            return False
-    return not compact_contains_leak(payload)
+        if isinstance(value, (dict, list, tuple)):
+            raise ValueError("lab status must not contain nested or list values")
+    missing = [field for field in LAB_STATUS_REQUIRED_FIELDS if field not in payload]
+    if missing:
+        raise ValueError(f"lab status missing field: {missing[0]}")
+    profile = payload.get("profile")
+    if not isinstance(profile, str) or not profile.strip():
+        raise ValueError("lab status profile is invalid")
+    state = payload.get("state")
+    if state not in LAB_STATUS_STATES:
+        raise ValueError("lab status state is invalid")
+    gpu = payload.get("gpu")
+    if not isinstance(gpu, str) or not gpu.strip():
+        raise ValueError("lab status gpu is invalid")
+    share_ready = payload.get("share_ready")
+    if not isinstance(share_ready, bool):
+        raise ValueError("lab status share_ready is invalid")
+    if "public_url" in payload:
+        url = payload["public_url"]
+        if not isinstance(url, str) or extract_lab_public_url(url) != url:
+            raise ValueError("lab status public_url is not a Gradio URL")
+    if "pid" in payload:
+        pid = payload["pid"]
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise ValueError("lab status pid is invalid")
+    for hash_key in ("direction_sha256", "lens_sha256"):
+        if hash_key not in payload:
+            continue
+        digest = payload[hash_key]
+        if not isinstance(digest, str) or LAB_STATUS_SHA256_PATTERN.fullmatch(digest) is None:
+            raise ValueError(f"lab status {hash_key} is invalid")
+    return {key: payload[key] for key in payload}
 
 
 def extract_lab_public_url(text: str) -> str | None:

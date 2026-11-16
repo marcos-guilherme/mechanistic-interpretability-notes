@@ -18,7 +18,7 @@ if _SRC not in sys.path:
 from refusal_direction_replication.qwen_colab_transport import (
     REMOTE_LAB_AUTH_FILE,
     extract_lab_public_url,
-    lab_status_is_safe,
+    validate_lab_operational_status,
 )
 
 RUN_SCRIPT = REMOTE_ROOT / "scripts" / "qwen_run_lab.py"
@@ -29,8 +29,7 @@ URL_WAIT_SECONDS = 1800
 
 
 def write_operational_status(payload: dict) -> None:
-    if not lab_status_is_safe(payload):
-        raise ValueError("refusing to persist lab status with secrets")
+    validate_lab_operational_status(payload)
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=".status.",
@@ -68,45 +67,65 @@ def wait_for_public_url(
     raise TimeoutError("lab public URL was not published")
 
 
+def _restrict_remote_auth() -> None:
+    if not os.path.lexists(REMOTE_AUTH_FILE):
+        raise FileNotFoundError("lab auth file missing")
+    os.chmod(REMOTE_AUTH_FILE, 0o600)
+
+
+def _wipe_remote_auth() -> None:
+    try:
+        REMOTE_AUTH_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def start_lab_and_return_url() -> str:
     SERVER_LOG.parent.mkdir(parents=True, exist_ok=True)
     log_handle = SERVER_LOG.open("w", encoding="utf-8")
-    command = [
-        sys.executable,
-        "-u",
-        str(RUN_SCRIPT),
-        "--auth-file",
-        str(REMOTE_AUTH_FILE),
-    ]
+    proc = None
     try:
-        proc = subprocess.Popen(
-            command,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            cwd=str(REMOTE_ROOT),
-            start_new_session=True,
-        )
+        command = [
+            sys.executable,
+            "-u",
+            str(RUN_SCRIPT),
+            "--auth-file",
+            str(REMOTE_AUTH_FILE),
+        ]
+        try:
+            _restrict_remote_auth()
+            proc = subprocess.Popen(
+                command,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                cwd=str(REMOTE_ROOT),
+                start_new_session=True,
+            )
+        except Exception:
+            _wipe_remote_auth()
+            raise
     finally:
         log_handle.close()
     try:
         url = wait_for_public_url(SERVER_LOG, process=proc)
     except Exception:
-        if proc.poll() is None:
+        if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=10)
-        write_operational_status(
-            {
-                "profile": "qwen25_coder_7b_lab.json",
-                "state": "error",
-                "gpu": "A100",
-                "share_ready": False,
-                "pid": proc.pid,
-            }
-        )
+        _wipe_remote_auth()
+        error_status = {
+            "profile": "qwen25_coder_7b_lab.json",
+            "state": "error",
+            "gpu": "A100",
+            "share_ready": False,
+        }
+        if proc is not None:
+            error_status["pid"] = proc.pid
+        write_operational_status(error_status)
         raise
     payload = {
         "profile": "qwen25_coder_7b_lab.json",

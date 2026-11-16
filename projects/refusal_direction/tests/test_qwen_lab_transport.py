@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -28,8 +29,13 @@ INSTALL_SCRIPT = ROOT / "scripts" / "colab_install_lab.py"
 STATUS_SCRIPT = ROOT / "scripts" / "qwen_run_lab_status.py"
 START_SCRIPT = ROOT / "scripts" / "colab_start_lab.py"
 RUN_SCRIPT = ROOT / "scripts" / "qwen_run_lab.py"
+CLEAN_CHUNKS_SCRIPT = ROOT / "scripts" / "colab_clean_lab_chunks.py"
 LAB_CONFIG = ROOT / "configs" / "qwen25_coder_7b_lab.json"
 JLENS_COMMIT = "581d398613e5602a5af361e1c34d3a92ea82ba8e"
+VALID_SHA256 = "0" * 64
+RUNTIME_COMPATIBILITY_SMOKE = (
+    "2026-11-16-qwen7b-hooks-jlens-transport-unembed"
+)
 
 
 def _orchestrator():
@@ -216,7 +222,29 @@ def test_lab_sync_uploads_direction_and_lens_parts_without_tarring_lens(
     )
     module.main()
     uploaded = [item for command in commands for item in command]
+    from refusal_direction_replication.qwen_colab_transport import (
+        LAB_LENS_CHUNK_BYTES,
+        REMOTE_LAB_LENS_MANIFEST,
+    )
+
+    assert module.CODE_EVAL_LENS_CHUNK_BYTES == 64 * 1024**2
+    assert LAB_LENS_CHUNK_BYTES == 16 * 1024**2
+    assert module.LAB_LENS_CHUNK_BYTES == 16 * 1024**2
+    clean_indexes = [
+        index
+        for index, command in enumerate(commands)
+        if any("colab_clean_lab_chunks.py" in str(item) for item in command)
+    ]
+    part_indexes = [
+        index
+        for index, command in enumerate(commands)
+        if any(str(item).startswith(REMOTE_LAB_LENS_STAGING + ".part") for item in command)
+    ]
+    assert clean_indexes, "lab sync must remove stale remote parts before upload"
+    assert part_indexes
+    assert clean_indexes[0] < part_indexes[0]
     assert REMOTE_LAB_DIRECTION_STAGING in uploaded
+    assert REMOTE_LAB_LENS_MANIFEST in uploaded
     assert any(
         str(item).startswith(REMOTE_LAB_LENS_STAGING + ".part") for item in uploaded
     )
@@ -336,8 +364,21 @@ def test_lab_installer_reassembles_parts_atomically_and_pins_dependencies(
     module = _load_script(INSTALL_SCRIPT, "install_lab")
     destination = tmp_path / "lab_source_lens.pt"
     monkeypatch.setattr(module, "REMOTE_LAB_LENS_STAGING", str(destination))
-    (tmp_path / "lab_source_lens.pt.part000").write_bytes(b"alpha")
-    (tmp_path / "lab_source_lens.pt.part001").write_bytes(b"beta")
+    part0 = tmp_path / "lab_source_lens.pt.part000"
+    part1 = tmp_path / "lab_source_lens.pt.part001"
+    part0.write_bytes(b"alpha")
+    part1.write_bytes(b"beta")
+    from refusal_direction_replication.qwen_colab_transport import (
+        write_artifact_chunk_manifest,
+    )
+
+    source = tmp_path / "source.pt"
+    source.write_bytes(b"alphabeta")
+    write_artifact_chunk_manifest(
+        source,
+        [part0, part1],
+        tmp_path / "lab_source_lens.pt.manifest.json",
+    )
     assert module.assemble_staged_lens() == destination
     assert destination.read_bytes() == b"alphabeta"
     assert not list(tmp_path.glob("lab_source_lens.pt.part*"))
@@ -350,9 +391,29 @@ def test_lab_installer_rejects_noncontiguous_parts(
     module = _load_script(INSTALL_SCRIPT, "install_lab_gap")
     destination = tmp_path / "lab_source_lens.pt"
     monkeypatch.setattr(module, "REMOTE_LAB_LENS_STAGING", str(destination))
-    (tmp_path / "lab_source_lens.pt.part000").write_bytes(b"alpha")
-    (tmp_path / "lab_source_lens.pt.part002").write_bytes(b"gap")
-    with pytest.raises(ValueError, match="contiguous"):
+    part0 = tmp_path / "lab_source_lens.pt.part000"
+    part2 = tmp_path / "lab_source_lens.pt.part002"
+    part0.write_bytes(b"alpha")
+    part2.write_bytes(b"gap")
+    from refusal_direction_replication.qwen_colab_transport import (
+        write_artifact_chunk_manifest,
+    )
+
+    source = tmp_path / "source.pt"
+    source.write_bytes(b"alphagap")
+    expected = tmp_path / "lab_source_lens.pt.part001"
+    expected.write_bytes(b"gap")
+    write_artifact_chunk_manifest(
+        source,
+        [part0, expected],
+        tmp_path / "lab_source_lens.pt.manifest.json",
+        part_names=[
+            "lab_source_lens.pt.part000",
+            "lab_source_lens.pt.part001",
+        ],
+    )
+    expected.unlink()
+    with pytest.raises(ValueError, match="missing|extra|contiguous"):
         module.assemble_staged_lens()
     assert not destination.exists()
 
@@ -531,12 +592,14 @@ def test_partial_auth_file_is_deleted_and_rejected(tmp_path: Path) -> None:
 def test_lab_status_script_prints_operational_fields_without_secrets(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert STATUS_SCRIPT.is_file()
     text = STATUS_SCRIPT.read_text(encoding="utf-8")
     assert "download" not in text
     assert "fetch" not in text
     module = _load_script(STATUS_SCRIPT, "qwen_run_lab_status")
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
     root = tmp_path / "project"
     config_dir = root / "configs"
     artifacts = root / "artifacts/qwen25_coder_7b_lab"
@@ -559,8 +622,9 @@ def test_lab_status_script_prints_operational_fields_without_secrets(
                 "gpu": "A100",
                 "share_ready": True,
                 "public_url": "https://demo-lab.gradio.live",
-                "direction_sha256": "0b1cff5e",
-                "lens_sha256": "b700a78c",
+                "pid": 4242,
+                "direction_sha256": VALID_SHA256,
+                "lens_sha256": "b" * 64,
             }
         ),
         encoding="utf-8",
@@ -571,6 +635,7 @@ def test_lab_status_script_prints_operational_fields_without_secrets(
     assert "A100" in printed
     assert "https://demo-lab.gradio.live" in printed
     assert "password" not in printed.lower()
+    assert "message=" not in printed
 
     (artifacts / "status.json").write_text(
         json.dumps({"state": "running", "password": "nope", "prompt": "secret prompt"}),
@@ -627,6 +692,9 @@ def test_colab_start_lab_does_not_put_secret_in_command_or_status(
     assert popped[0][1] == "-u"
     assert popped[0][-2:] == ["--auth-file", str(auth)]
     assert "hidden-pass" not in " ".join(popped[0])
+    assert auth.is_file()
+    if os.name != "nt":
+        assert stat.S_IMODE(auth.stat().st_mode) == 0o600
     status = json.loads(status_path.read_text(encoding="utf-8"))
     assert "password" not in status
     assert "hidden-pass" not in json.dumps(status)
@@ -653,7 +721,12 @@ def test_colab_start_lab_terminates_child_after_startup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_script(START_SCRIPT, "colab_start_lab_timeout_cleanup")
-    monkeypatch.setattr(module, "REMOTE_AUTH_FILE", tmp_path / "auth.json")
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps({"username": "u", "password": "hidden-pass"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "REMOTE_AUTH_FILE", auth)
     monkeypatch.setattr(module, "SERVER_LOG", tmp_path / "server.log")
     monkeypatch.setattr(module, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(module, "RUN_SCRIPT", RUN_SCRIPT)
@@ -681,8 +754,10 @@ def test_colab_start_lab_terminates_child_after_startup_failure(
     with pytest.raises(TimeoutError, match="not ready"):
         module.start_lab_and_return_url()
     assert events == ["terminate", "wait:10"]
+    assert not auth.exists()
     status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "error"
+    assert "message" not in status
 
 
 def test_existing_orchestrator_actions_remain_intact() -> None:
@@ -710,3 +785,410 @@ def test_existing_orchestrator_actions_remain_intact() -> None:
         assert f'"{action}"' in parser_source or f"'{action}'" in parser_source
     assert INSTALL_SCRIPT in module.bootstrap_scripts("qwen25-coder-lab")
     assert module.stamps_implementation_commit("qwen25-coder-lab") is True
+
+
+def _add_tar_member(
+    handle: tarfile.TarFile,
+    name: str,
+    payload: bytes = b"",
+    *,
+    member_type: bytes = tarfile.REGTYPE,
+    linkname: str = "",
+) -> None:
+    info = tarfile.TarInfo(name=name)
+    info.type = member_type
+    info.linkname = linkname
+    if member_type in {tarfile.REGTYPE, tarfile.AREGTYPE}:
+        info.size = len(payload)
+        handle.addfile(info, io.BytesIO(payload))
+        return
+    info.size = 0
+    handle.addfile(info)
+
+
+def _write_lab_archive(path: Path, members: list[tuple[str, bytes]]) -> Path:
+    with tarfile.open(path, "w:gz") as handle:
+        for name, payload in members:
+            member_type = tarfile.DIRTYPE if name.endswith("/") else tarfile.REGTYPE
+            _add_tar_member(
+                handle,
+                name.rstrip("/") if member_type is tarfile.DIRTYPE else name,
+                payload,
+                member_type=member_type,
+            )
+    return path
+
+
+def test_lab_safe_extract_rejects_links_specials_and_extra_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script(INSTALL_SCRIPT, "install_lab_extract_reject")
+    destination = tmp_path / "content"
+    destination.mkdir()
+    archive = tmp_path / "refusal_direction.tar.gz"
+    remote_root = destination / "refusal_direction"
+    monkeypatch.setattr(module, "ARCHIVE", archive)
+    monkeypatch.setattr(module, "DESTINATION", destination)
+    monkeypatch.setattr(module, "REMOTE_ROOT", remote_root)
+
+    with tarfile.open(archive, "w:gz") as handle:
+        _add_tar_member(handle, "refusal_direction", member_type=tarfile.DIRTYPE)
+        _add_tar_member(handle, "refusal_direction/ok.py", b"print(1)\n")
+        _add_tar_member(
+            handle,
+            "refusal_direction/link.py",
+            member_type=tarfile.SYMTYPE,
+            linkname="/etc/passwd",
+        )
+    with pytest.raises(ValueError, match="link|symlink"):
+        module.safe_extract()
+    assert not remote_root.exists()
+    assert list(destination.glob(".lab-extract-*")) == []
+
+    with tarfile.open(archive, "w:gz") as handle:
+        _add_tar_member(handle, "refusal_direction", member_type=tarfile.DIRTYPE)
+        _add_tar_member(handle, "refusal_direction/ok.py", b"print(1)\n")
+        _add_tar_member(
+            handle,
+            "refusal_direction/hard.py",
+            member_type=tarfile.LNKTYPE,
+            linkname="refusal_direction/ok.py",
+        )
+    with pytest.raises(ValueError, match="link"):
+        module.safe_extract()
+
+    with tarfile.open(archive, "w:gz") as handle:
+        _add_tar_member(handle, "refusal_direction", member_type=tarfile.DIRTYPE)
+        _add_tar_member(
+            handle,
+            "refusal_direction/fifo",
+            member_type=tarfile.FIFOTYPE,
+        )
+    with pytest.raises(ValueError, match="regular|special"):
+        module.safe_extract()
+
+    with tarfile.open(archive, "w:gz") as handle:
+        _add_tar_member(handle, "refusal_direction", member_type=tarfile.DIRTYPE)
+        _add_tar_member(handle, "refusal_direction/ok.py", b"print(1)\n")
+        _add_tar_member(handle, "other_root/evil.py", b"nope")
+    with pytest.raises(ValueError, match="top-level|unsafe"):
+        module.safe_extract()
+    assert not (destination / "other_root").exists()
+
+
+def test_lab_safe_extract_swaps_atomically_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script(INSTALL_SCRIPT, "install_lab_extract_swap")
+    destination = tmp_path / "content"
+    destination.mkdir()
+    remote_root = destination / "refusal_direction"
+    remote_root.mkdir()
+    marker = remote_root / "old.py"
+    marker.write_text("keep-me\n", encoding="utf-8")
+    archive = tmp_path / "refusal_direction.tar.gz"
+    _write_lab_archive(
+        archive,
+        [
+            ("refusal_direction/", b""),
+            ("refusal_direction/new.py", b"fresh\n"),
+        ],
+    )
+    monkeypatch.setattr(module, "ARCHIVE", archive)
+    monkeypatch.setattr(module, "DESTINATION", destination)
+    monkeypatch.setattr(module, "REMOTE_ROOT", remote_root)
+
+    real_replace = os.replace
+
+    def fail_final_swap(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        source = Path(src)
+        if Path(dst) == remote_root and any(
+            part.startswith(".lab-extract-") for part in source.parts
+        ):
+            raise OSError("swap failed")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_final_swap)
+    with pytest.raises(OSError, match="swap failed"):
+        module.safe_extract()
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8") == "keep-me\n"
+    assert not (remote_root / "new.py").exists()
+    assert archive.is_file()
+    assert list(destination.glob(".lab-extract-*")) == []
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    module.safe_extract()
+    assert (remote_root / "new.py").read_bytes() == b"fresh\n"
+    assert not marker.exists()
+    assert not archive.exists()
+    assert list(destination.glob(".lab-extract-*")) == []
+
+
+def test_lab_status_schema_rejects_free_text_nested_and_bad_url(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_colab_transport import (
+        validate_lab_operational_status,
+    )
+
+    valid = {
+        "profile": "qwen25_coder_7b_lab.json",
+        "state": "running",
+        "gpu": "A100",
+        "share_ready": True,
+        "public_url": "https://demo-lab.gradio.live",
+        "pid": 7,
+        "direction_sha256": VALID_SHA256,
+        "lens_sha256": "a" * 64,
+    }
+    assert validate_lab_operational_status(valid)["pid"] == 7
+    with pytest.raises(ValueError, match="message|field"):
+        validate_lab_operational_status({**valid, "message": "free text"})
+    with pytest.raises(ValueError, match="nested|field"):
+        validate_lab_operational_status({**valid, "extra": {"nested": True}})
+    with pytest.raises(ValueError, match="list|field|type"):
+        validate_lab_operational_status({**valid, "gpu": ["A100"]})
+    with pytest.raises(ValueError, match="url|gradio"):
+        validate_lab_operational_status(
+            {**valid, "public_url": "https://evil.example.com"}
+        )
+    with pytest.raises(ValueError, match="sha256|hash"):
+        validate_lab_operational_status({**valid, "direction_sha256": "0b1cff5e"})
+    with pytest.raises(ValueError, match="pid|type"):
+        validate_lab_operational_status({**valid, "pid": True})
+
+
+def test_lab_status_reports_stopped_when_running_pid_is_dead(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script(STATUS_SCRIPT, "qwen_run_lab_status_dead_pid")
+
+    def missing_pid(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(os, "kill", missing_pid)
+    root = tmp_path / "project"
+    artifacts = root / "artifacts/qwen25_coder_7b_lab"
+    artifacts.mkdir(parents=True)
+    (root / "configs").mkdir()
+    (root / "configs" / "qwen25_coder_7b_lab.json").write_text(
+        json.dumps({"artifacts_dir": "artifacts/qwen25_coder_7b_lab"}),
+        encoding="utf-8",
+    )
+    status_path = artifacts / "status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "profile": "qwen25_coder_7b_lab.json",
+                "state": "running",
+                "gpu": "A100",
+                "share_ready": True,
+                "public_url": "https://demo-lab.gradio.live",
+                "pid": 999001,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert module.main_with_root(root) == 0
+    printed = capsys.readouterr().out
+    assert "state=stopped" in printed
+    assert "share_ready=False" in printed
+    assert "message=" not in printed
+    assert "password" not in printed.lower()
+    persisted = json.loads(status_path.read_text(encoding="utf-8"))
+    assert persisted["state"] == "running"
+    assert persisted["share_ready"] is True
+
+
+def test_colab_start_lab_chmods_auth_before_popen_and_wipes_on_popen_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script(START_SCRIPT, "colab_start_lab_popen_fail")
+    auth = tmp_path / "qwen_lab_auth.json"
+    auth.write_text(
+        json.dumps({"username": "u", "password": "hidden-pass"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "REMOTE_AUTH_FILE", auth)
+    monkeypatch.setattr(module, "SERVER_LOG", tmp_path / "server.log")
+    monkeypatch.setattr(module, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(module, "RUN_SCRIPT", RUN_SCRIPT)
+    events: list[str] = []
+    real_chmod = os.chmod
+
+    def tracked_chmod(path: str | os.PathLike[str], mode: int) -> None:
+        if Path(path) == auth:
+            events.append(f"chmod:{mode:o}")
+        real_chmod(path, mode)
+
+    def boom(*_args, **_kwargs):
+        events.append("popen")
+        if os.name != "nt":
+            assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+        raise OSError("popen failed")
+
+    monkeypatch.setattr(module.os, "chmod", tracked_chmod)
+    monkeypatch.setattr(module.subprocess, "Popen", boom)
+    with pytest.raises(OSError, match="popen failed"):
+        module.start_lab_and_return_url()
+    assert events[0].startswith("chmod:")
+    assert events[1] == "popen"
+    assert not auth.exists()
+
+
+def test_lab_chunk_manifest_roundtrip_and_rejects_corrupt_parts(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_colab_transport import (
+        assemble_chunked_file,
+        split_artifact_file,
+        write_artifact_chunk_manifest,
+    )
+
+    source = tmp_path / "lens.pt"
+    source.write_bytes(os.urandom(90))
+    parts = split_artifact_file(
+        source,
+        tmp_path,
+        chunk_bytes=40,
+        part_prefix="lens.pt.part",
+    )
+    manifest = write_artifact_chunk_manifest(
+        source,
+        parts,
+        tmp_path / "lens.pt.manifest.json",
+    )
+    assembled = assemble_chunked_file(
+        tmp_path / "lens.pt",
+        manifest_path=manifest,
+        require_manifest=True,
+    )
+    payload = source.read_bytes()
+    assert assembled.read_bytes() == payload
+    assert hashlib.sha256(assembled.read_bytes()).hexdigest() == hashlib.sha256(
+        payload
+    ).hexdigest()
+    assert not list(tmp_path.glob("lens.pt.part*"))
+
+    corrupt = tmp_path / "corrupt"
+    corrupt.mkdir()
+    corrupt_source = corrupt / "payload.pt"
+    corrupt_source.write_bytes(payload)
+    parts = split_artifact_file(
+        corrupt_source,
+        corrupt,
+        chunk_bytes=40,
+        part_prefix="out.pt.part",
+    )
+    corrupt_manifest = write_artifact_chunk_manifest(
+        corrupt_source,
+        parts,
+        corrupt / "out.pt.manifest.json",
+    )
+    parts[0].write_bytes(b"tampered-bytes-not-matching-sha")
+    destination = corrupt / "out.pt"
+    with pytest.raises(ValueError, match="sha256|altered"):
+        assemble_chunked_file(
+            destination,
+            manifest_path=corrupt_manifest,
+            require_manifest=True,
+        )
+    assert not destination.exists()
+
+    extra_dir = tmp_path / "extra"
+    extra_dir.mkdir()
+    extra_source = extra_dir / "payload.pt"
+    extra_source.write_bytes(payload)
+    parts = split_artifact_file(
+        extra_source,
+        extra_dir,
+        chunk_bytes=40,
+        part_prefix="out.pt.part",
+    )
+    extra_manifest = write_artifact_chunk_manifest(
+        extra_source,
+        parts,
+        extra_dir / "out.pt.manifest.json",
+    )
+    extra = extra_dir / "out.pt.part099"
+    extra.write_bytes(b"extra")
+    destination = extra_dir / "out.pt"
+    with pytest.raises(ValueError, match="extra"):
+        assemble_chunked_file(
+            destination,
+            manifest_path=extra_manifest,
+            require_manifest=True,
+        )
+    extra.unlink()
+    parts[1].unlink()
+    with pytest.raises(ValueError, match="missing"):
+        assemble_chunked_file(
+            destination,
+            manifest_path=extra_manifest,
+            require_manifest=True,
+        )
+
+
+def test_lab_chunk_cleanup_unlinks_without_printing_contents(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert CLEAN_CHUNKS_SCRIPT.is_file()
+    module = _load_script(CLEAN_CHUNKS_SCRIPT, "clean_lab_chunks")
+    destination = tmp_path / "lab_source_lens.pt"
+    secret = b"SECRET-LENS-BYTES"
+    (tmp_path / "lab_source_lens.pt.part000").write_bytes(secret)
+    (tmp_path / "lab_source_lens.pt.part001").write_bytes(secret)
+    (tmp_path / "lab_source_lens.pt.manifest.json").write_text("{}", encoding="utf-8")
+    assembling = tmp_path / "lab_source_lens.pt.assembling"
+    assembling.write_bytes(secret)
+    destination.write_bytes(secret)
+    module.clean_lab_chunk_files(destination)
+    assert list(tmp_path.glob("lab_source_lens.pt*")) == []
+    captured = capsys.readouterr()
+    assert "SECRET-LENS-BYTES" not in captured.out
+    assert "SECRET-LENS-BYTES" not in captured.err
+
+
+def test_jlens_no_deps_keeps_project_transformers_and_records_smoke_id() -> None:
+    from refusal_direction_replication.qwen_jlens import (
+        RUNTIME_COMPATIBILITY_SMOKE,
+        assert_pinned_transformers_runtime,
+        parse_supported_transformers_versions,
+    )
+
+    config = json.loads(LAB_CONFIG.read_text(encoding="utf-8"))
+    assert config["jlens_install_no_deps"] is True
+    assert config["runtime_compatibility_smoke"] == RUNTIME_COMPATIBILITY_SMOKE
+    assert RUNTIME_COMPATIBILITY_SMOKE == (
+        "2026-11-16-qwen7b-hooks-jlens-transport-unembed"
+    )
+    supported = parse_supported_transformers_versions(ROOT / "pyproject.toml")
+    assert supported == frozenset({"4.44.2", "4.48.3"})
+    assert assert_pinned_transformers_runtime(
+        ROOT / "pyproject.toml",
+        installed="4.44.2",
+    ) == "4.44.2"
+    with pytest.raises(ValueError, match="runtime_compatibility_smoke"):
+        assert_pinned_transformers_runtime(
+            ROOT / "pyproject.toml",
+            installed="5.0.0",
+        )
+    install = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert "--no-deps" in install
+    assert "deliberate" in install.lower() or "projeto" in install.lower()
+    assert "assert_pinned_transformers_runtime" in install
+    docs = (ROOT / "LABORATORIO_QWEN.md").read_text(encoding="utf-8")
+    assert RUNTIME_COMPATIBILITY_SMOKE in docs
+    assert "--no-deps" in docs
+    compatibility_section = docs.lower()
+    smoke_index = compatibility_section.index("runtime_compatibility_smoke")
+    window = compatibility_section[max(0, smoke_index - 400) : smoke_index + 400]
+    assert "não é uma declaração de compatibilidade geral" in window
+    assert "a100" not in window

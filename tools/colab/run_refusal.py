@@ -32,9 +32,11 @@ EXCLUDED_PARTS = {
 }
 CODE_EVAL_LENS_CHUNK_BYTES = 64 * 1024**2
 ARTIFACT_CHUNK_BYTES = CODE_EVAL_LENS_CHUNK_BYTES
+LAB_LENS_CHUNK_BYTES = 16 * 1024**2
 REMOTE_CODE_EVAL_LENS_STAGING = "/content/code_eval_source_lens.pt"
 REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
 REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
+REMOTE_LAB_LENS_MANIFEST = "/content/lab_source_lens.pt.manifest.json"
 REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
 A100_PROFILES = frozenset({"qwen25-coder-code-eval", "qwen25-coder-lab"})
 
@@ -516,15 +518,44 @@ def main() -> int:
         if lab_sources is not None:
             source_direction, source_lens = lab_sources
             run(
+                exec_command(
+                    session,
+                    PROJECT / "scripts" / "colab_clean_lab_chunks.py",
+                    timeout=60,
+                )
+            )
+            run(
                 upload_command(
                     session,
                     source_direction,
                     REMOTE_LAB_DIRECTION_STAGING,
                 )
             )
+            part_prefix = Path(REMOTE_LAB_LENS_STAGING).name + ".part"
             lens_parts = split_artifact_file(
                 source_lens,
                 ROOT / ".colab-staging" / "lab-lens-parts",
+                chunk_bytes=LAB_LENS_CHUNK_BYTES,
+                part_prefix=part_prefix,
+            )
+            sys.path.insert(0, str(PROJECT / "src"))
+            from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+                write_artifact_chunk_manifest,
+            )
+
+            manifest_path = (
+                ROOT
+                / ".colab-staging"
+                / "lab-lens-parts"
+                / (Path(REMOTE_LAB_LENS_STAGING).name + ".manifest.json")
+            )
+            write_artifact_chunk_manifest(source_lens, lens_parts, manifest_path)
+            run(
+                upload_command(
+                    session,
+                    manifest_path,
+                    REMOTE_LAB_LENS_MANIFEST,
+                )
             )
             for index, part in enumerate(lens_parts):
                 run(

@@ -99,8 +99,10 @@ gcloud auth application-default login --scopes=openid,https://www.googleapis.com
 ```
 
 Confirme que os dois `.pt` locais existem e que os SHA-256 coincidem com
-`configs/qwen25_coder_7b_lab.json`. O `sync` do perfil lab envia direção e lente
-em partes e falha se tamanho ou hash não conferirem.
+`configs/qwen25_coder_7b_lab.json`. O `sync` do perfil lab limpa partes remotas
+antigas, envia direção e lente em partes de 16MiB com manifesto SHA-256 e falha
+se tamanho, contagem ou hash não conferirem. O perfil code-eval continua a usar
+partes de 64MiB.
 
 ## Comandos do perfil lab
 
@@ -126,8 +128,9 @@ obrigatório ao terminar, mesmo se `lab` falhar depois que a VM subiu.
 
 - **start**: abre VM A100 com nome de sessão fixo do perfil.
 - **sync**: envia código do projeto e artefatos congelados (sem datasets).
-- **bootstrap**: roda o instalador remoto, fixa Gradio 5.49.1 e J-lens, remonta
-  a lente e valida hashes declarados na config.
+- **bootstrap**: roda o instalador remoto, fixa Gradio 5.49.1 e instala J-lens
+  com `--no-deps` de propósito para manter o Transformers do `pyproject.toml`;
+  remonta a lente com manifesto e valida hashes declarados na config.
 - **auth-hf**: transfere o token HF já salvo localmente, sem imprimi-lo.
 - **lab**: gera usuário e senha locais, envia arquivo de auth de uso único,
   inicia o servidor Gradio em background e imprime URL pública, credenciais e
@@ -135,6 +138,19 @@ obrigatório ao terminar, mesmo se `lab` falhar depois que a VM subiu.
 - **status**: lê apenas estado operacional remoto via `qwen_run_lab_status.py`;
   não baixa resultados nem aceita payloads com senha ou prompt.
 - **stop**: encerra a sessão Colab e limpa staging local do perfil lab.
+
+## J-lens e Transformers
+
+O instalador remoto usa `pip install --no-deps` no Jacobian-lens de propósito:
+as versões de Transformers continuam as do `pyproject.toml` (`4.44.2` ou
+`4.48.3`, conforme o Python). Depois da instalação, o runtime confere a versão
+efetiva contra esses pins.
+
+O identificador `runtime_compatibility_smoke` =
+`2026-11-16-qwen7b-hooks-jlens-transport-unembed` registra o smoke de 16 de
+novembro de 2026: Qwen 7B com hooks e transporte/unembed da J-lens no ambiente
+pinado. Não é uma declaração de compatibilidade geral nem um convite a atualizar
+Transformers.
 
 ## Relay externo
 

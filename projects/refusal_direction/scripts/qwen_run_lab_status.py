@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +13,9 @@ _SRC = "/content/refusal_direction/src"
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from refusal_direction_replication.qwen_colab_transport import lab_status_is_safe
+from refusal_direction_replication.qwen_colab_transport import (
+    validate_lab_operational_status,
+)
 
 DEFAULT_PROFILE = "qwen25_coder_7b_lab.json"
 last_stdout_summary: str | None = None
@@ -23,25 +27,50 @@ def artifacts_dir_for_profile(root: Path, profile: str = DEFAULT_PROFILE) -> Pat
     return root / config["artifacts_dir"]
 
 
+def pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as error:
+        if getattr(error, "errno", None) == errno.ESRCH:
+            return False
+        if getattr(error, "errno", None) == errno.EPERM:
+            return True
+        return False
+    return True
+
+
+def apply_pid_liveness(payload: dict) -> dict:
+    result = dict(payload)
+    if result.get("state") != "running":
+        return result
+    pid = result.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or not pid_is_alive(pid):
+        result["state"] = "stopped"
+        result["share_ready"] = False
+    return result
+
+
 def summarize_status_for_display(payload: dict) -> str:
-    if not lab_status_is_safe(payload):
-        raise ValueError("lab status payload contains forbidden secrets or text")
+    validated = validate_lab_operational_status(payload)
+    display = apply_pid_liveness(validated)
     parts = [
-        f"profile={payload.get('profile', DEFAULT_PROFILE)}",
-        f"state={payload.get('state', 'unknown')}",
+        f"profile={display['profile']}",
+        f"state={display['state']}",
+        f"gpu={display['gpu']}",
+        f"share_ready={display['share_ready']}",
     ]
-    if payload.get("gpu"):
-        parts.append(f"gpu={payload['gpu']}")
-    if "share_ready" in payload:
-        parts.append(f"share_ready={payload['share_ready']}")
-    if payload.get("public_url"):
-        parts.append(f"public_url={payload['public_url']}")
-    if payload.get("direction_sha256"):
-        parts.append(f"direction_sha256={payload['direction_sha256']}")
-    if payload.get("lens_sha256"):
-        parts.append(f"lens_sha256={payload['lens_sha256']}")
-    if payload.get("message"):
-        parts.append(f"message={payload['message']}")
+    if display.get("public_url"):
+        parts.append(f"public_url={display['public_url']}")
+    if "pid" in display:
+        parts.append(f"pid={display['pid']}")
+    if display.get("direction_sha256"):
+        parts.append(f"direction_sha256={display['direction_sha256']}")
+    if display.get("lens_sha256"):
+        parts.append(f"lens_sha256={display['lens_sha256']}")
     return " | ".join(parts)
 
 
