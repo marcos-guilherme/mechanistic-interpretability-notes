@@ -75,6 +75,7 @@ GENERATION_CONTROL_COMPONENTS: tuple[str, ...] = (
 )
 SESSION_EXPORT_ROOT = Path(tempfile.gettempdir()) / "qwen_lab_sessions"
 SESSION_TTL_SECONDS = 24 * 60 * 60
+STATE_TTL_SECONDS = SESSION_TTL_SECONDS
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _LOCAL_PATH_RE = re.compile(
     r"(?:^[A-Za-z]:[\\/]|^/content/|^artifacts[\\/]|selected_direction\.pt|jacobian_lens\.pt)"
@@ -257,6 +258,23 @@ class LabSessionRegistry:
 
 def lab_operational_log(**fields: Any) -> dict[str, Any]:
     return operational_status_log(**fields)
+
+
+def new_lab_session_hash() -> str:
+    """Per-browser session id; use as Gradio State factory (not a precomputed string)."""
+    return secrets.token_hex(16)
+
+
+def make_lab_session_delete_callback(
+    registry: LabSessionRegistry,
+) -> Callable[[Any], None]:
+    """Release registry state and export dir when Gradio expires the State."""
+
+    def _on_delete(session_hash: Any) -> None:
+        if session_hash:
+            registry.release(str(session_hash))
+
+    return _on_delete
 
 
 def _short_hash(value: str) -> str:
@@ -976,8 +994,13 @@ def build_gradio_app(
         f"lente {preflight_summary.get('lens_sha256', 'n/d')}"
     )
 
+    session_delete = make_lab_session_delete_callback(registry)
     with gr.Blocks(css=LAB_CSS, title="Laboratório de intervenção Qwen") as demo:
-        session_hash = gr.State(secrets.token_hex(16))
+        session_hash = gr.State(
+            new_lab_session_hash,
+            time_to_live=STATE_TTL_SECONDS,
+            delete_callback=session_delete,
+        )
         gr.Markdown(
             '<div class="lab-header"><h1>Laboratório de intervenção</h1></div>',
         )
@@ -1146,4 +1169,6 @@ def build_gradio_app(
     demo.auth = auth  # type: ignore[attr-defined]
     demo.session_registry = registry  # type: ignore[attr-defined]
     demo.gradio_pin_version = GRADIO_PIN_VERSION  # type: ignore[attr-defined]
+    demo.lab_session_state = session_hash  # type: ignore[attr-defined]
+    demo.lab_session_delete_callback = session_delete  # type: ignore[attr-defined]
     return demo

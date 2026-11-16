@@ -667,6 +667,82 @@ def test_run_generation_unlocks_after_engine_error(tmp_path: Path) -> None:
     assert "campo inválido" in client.view_state.status_message.lower()
 
 
+def test_new_lab_session_hash_factory_is_not_constant() -> None:
+    from refusal_direction_replication.qwen_lab_app import new_lab_session_hash
+
+    first = new_lab_session_hash()
+    second = new_lab_session_hash()
+    assert first != second
+    assert len(first) == 32
+
+
+def test_session_delete_callback_releases_registry_and_export(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        LabSessionRegistry,
+        make_lab_session_delete_callback,
+        write_secure_export_json,
+    )
+
+    registry = LabSessionRegistry(export_root=tmp_path / "reg")
+    callback = make_lab_session_delete_callback(registry)
+    client = registry.get_or_create("hash-1")
+    client.view_state.response_text = "resposta"
+    export = write_secure_export_json(client.export_dir, {"schema_version": 1})
+    client.view_state.export_path = str(export)
+    callback("hash-1")
+    refreshed = registry.get_or_create("hash-1")
+    assert refreshed.view_state.response_text == ""
+    assert refreshed.view_state.export_path is None
+    assert not export.exists()
+
+
+def test_gradio_state_uses_callable_ttl_and_independent_sessions(tmp_path: Path) -> None:
+    pytest.importorskip("gradio")
+    import gradio as gr
+    from gradio.state_holder import StateHolder
+
+    from refusal_direction_replication.qwen_lab_app import (
+        STATE_TTL_SECONDS,
+        LabSessionRegistry,
+        build_gradio_app,
+        new_lab_session_hash,
+    )
+
+    registry = LabSessionRegistry(export_root=tmp_path / "gradio_sessions")
+    demo = build_gradio_app(
+        FakeEngine([]),
+        preflight_summary={"device_name": "A100"},
+        session_registry=registry,
+    )
+    state = demo.lab_session_state
+    assert callable(state.value)
+    assert state.value is new_lab_session_hash
+    assert state.time_to_live == STATE_TTL_SECONDS
+    assert state.delete_callback is demo.lab_session_delete_callback
+
+    holder = StateHolder()
+    holder.set_blocks(demo)
+    state_id = state._id
+
+    def bootstrap(browser_id: str) -> str:
+        session = holder[browser_id]
+        if state_id not in session.state_data:
+            session.state_data[state_id] = state.value()
+        return str(session.state_data[state_id])
+
+    hash_a = bootstrap("browser-a")
+    hash_b = bootstrap("browser-b")
+    assert hash_a != hash_b
+
+    registry.get_or_create(hash_a).view_state.response_text = "only-a"
+    assert registry.get_or_create(hash_b).view_state.response_text == ""
+
+    state.delete_callback(hash_a)
+    assert registry.get_or_create(hash_a).view_state.response_text == ""
+
+    holder.delete_state("browser-a")
+
+
 def test_qwen_run_lab_main_rejects_share_without_auth() -> None:
     from importlib.machinery import SourceFileLoader
 
