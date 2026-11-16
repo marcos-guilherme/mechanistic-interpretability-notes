@@ -78,6 +78,7 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
         "jlens_ranks_recomputed": False,
         "pinned_revisions": False,
         "source_dose_and_jlens_pass": False,
+        "source_layer_and_offset": False,
         "source_hashes_match": False,
         "frozen_coefficients": False,
         "no_compact_text_leakage": False,
@@ -144,10 +145,13 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
         and config.get("jlens_upstream_commit") == JLENS_REVISION
     )
     try:
-        source = source_context(root, config, load_direction_payload=False)
+        source = source_context(root, config, load_direction_payload=True)
         checks["source_dose_and_jlens_pass"] = (
             source["source_dose_status"] == STATUS_PASS
             and source["source_jlens_status"] == STATUS_PASS
+        )
+        checks["source_layer_and_offset"] = (
+            source["selected_layer"] == 18 and source["selected_offset"] == -1
         )
         current_hashes = source["source_artifact_hashes"]
         checks["source_hashes_match"] = (

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 
 from refusal_direction_replication.artifacts import atomic_write_json
 from refusal_direction_replication.qwen_code_eval import (
@@ -63,7 +64,10 @@ def test_source_context_requires_passing_dose_lens_and_frozen_coefficients(
     )
     direction.parent.mkdir(parents=True)
     lens.parent.mkdir(parents=True)
-    direction.write_bytes(b"direction")
+    torch.save(
+        {"layer": 18, "position_offset": -1, "vector": torch.ones(4)},
+        direction,
+    )
     lens.write_bytes(b"lens")
     dose = tmp_path / "results/qwen25_coder_7b_dose/dose_followup_evaluation.json"
     jlens = tmp_path / "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
@@ -88,10 +92,12 @@ def test_source_context_requires_passing_dose_lens_and_frozen_coefficients(
     config = json.loads(
         (tmp_path / "configs/qwen25_coder_7b_code_eval.json").read_text()
     )
-    context = source_context(tmp_path, config, load_direction_payload=False)
+    context = source_context(tmp_path, config)
     assert context["source_dose_status"] == "pass"
     assert context["source_jlens_status"] == "pass"
     assert context["selected_pair"] == {"ablation": 0.2, "addition": 0.5}
+    assert context["selected_layer"] == 18
+    assert context["selected_offset"] == -1
     assert set(context["source_artifact_hashes"]) == {
         "direction",
         "lens",
@@ -99,6 +105,16 @@ def test_source_context_requires_passing_dose_lens_and_frozen_coefficients(
         "jlens_evaluation",
     }
 
+    torch.save(
+        {"layer": 17, "position_offset": -1, "vector": torch.ones(4)},
+        direction,
+    )
+    with pytest.raises(ValueError, match="layer"):
+        source_context(tmp_path, config)
+    torch.save(
+        {"layer": 18, "position_offset": -1, "vector": torch.ones(4)},
+        direction,
+    )
     dose_payload = json.loads(dose.read_text())
     dose_payload["selected_pair"]["addition"] = 0.35
     atomic_write_json(dose, dose_payload)

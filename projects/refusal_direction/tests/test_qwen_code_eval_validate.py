@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import torch
+
 from refusal_direction_replication.artifacts import ArtifactEnvelope, atomic_write_json, write_artifact
 from refusal_direction_replication.qwen_code_eval import (
     CONDITIONS,
@@ -43,7 +45,10 @@ def _fixture(root: Path) -> None:
     jlens = root / "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
     for path in (direction, lens, dose, jlens):
         path.parent.mkdir(parents=True, exist_ok=True)
-    direction.write_bytes(b"direction")
+    torch.save(
+        {"layer": 18, "position_offset": -1, "vector": torch.ones(4)},
+        direction,
+    )
     lens.write_bytes(b"lens")
     atomic_write_json(
         dose,

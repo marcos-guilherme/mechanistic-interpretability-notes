@@ -67,7 +67,7 @@ from .qwen_code_eval import (
     summarize_refusal_ranks,
     write_blind_review_sample,
 )
-from .qwen_dose import sha256_file
+from .qwen_dose import EXPECTED_SOURCE_LAYER, EXPECTED_SOURCE_OFFSET, sha256_file
 from .qwen_jlens import assert_jlens_contract, wrap_hf_model_for_jlens
 from .qwen_pilot import resolve_run_id
 from .run_progress import RunProgressStore
@@ -213,8 +213,14 @@ def source_context(
     }
     if load_direction_payload:
         direction = load_direction(paths["direction"])
-        if direction.position_offset != -1:
-            raise ValueError("source direction offset must remain -1")
+        if direction.layer != EXPECTED_SOURCE_LAYER:
+            raise ValueError(
+                f"source direction layer must remain {EXPECTED_SOURCE_LAYER}"
+            )
+        if direction.position_offset != EXPECTED_SOURCE_OFFSET:
+            raise ValueError(
+                f"source direction offset must remain {EXPECTED_SOURCE_OFFSET}"
+            )
         context["direction"] = direction
         context["selected_layer"] = direction.layer
         context["selected_offset"] = direction.position_offset
