@@ -1,0 +1,22 @@
+{
+  "config_hash": "67d3fee597f8bfd075953bc270d9bd1918b19e9968acd332ea9b55041a412ee6",
+  "corpus_hash": "6f25558e8fd7dc9496b5b000d3bce34f250a87c42c569d6bcf5b6c3db404efb1",
+  "dataset_config": "python",
+  "dataset_repo_id": "code-search-net/code_search_net",
+  "dataset_revision": "bd0cf261e357a3eb5c8fba490d23ec1a1cd59555",
+  "dataset_split": "train",
+  "implementation_commit": "59cadba4e315e31db44e389097f6b384da25b40f",
+  "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+  "lens_bytes": 693642187,
+  "lens_sha256": "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e",
+  "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+  "n_fit": 100,
+  "n_holdout": 20,
+  "operational_success": true,
+  "run_id": "e23b9570-130e-4b9a-8000-fb91255b29d8",
+  "schema_version": 1,
+  "selected_dim_batch": 32,
+  "source_dose_run_id": "d76d0e7f-1e86-4953-8eac-de1c352708d2",
+  "source_dose_status": "pass",
+  "status": "pass"
+}

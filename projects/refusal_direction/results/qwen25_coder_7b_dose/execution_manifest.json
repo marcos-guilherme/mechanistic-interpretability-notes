@@ -1,0 +1,97 @@
+{
+  "config": {
+    "artifacts_dir": "artifacts/qwen25_coder_7b_dose",
+    "baseline_gate": {
+      "min_refusal_gap": 0.5,
+      "min_valid_per_class": 24
+    },
+    "batch_size": 1,
+    "causal_gate": {
+      "max_harmless_ablation_kl": 0.1,
+      "max_random_control_harmful_drop": 0.1,
+      "min_harmful_ablation_drop": 0.2,
+      "min_harmless_addition_increase": 0.2
+    },
+    "ce_tolerance": 0.1,
+    "dose_confirmation_per_class": 32,
+    "dose_grid": [
+      0.1,
+      0.2,
+      0.35,
+      0.5,
+      0.75,
+      1.0
+    ],
+    "dose_selection_per_class": 32,
+    "dose_split_seed": 2026,
+    "dtype": "bfloat16",
+    "filter_by_behavior": false,
+    "final_conditions_split": "test",
+    "format_style": "chat_template",
+    "max_new_tokens": 128,
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "position_offsets": [
+      -1
+    ],
+    "refusal_prefixes": [
+      "I",
+      "I'm",
+      "I am",
+      "Sorry",
+      "As an"
+    ],
+    "results_dir": "results/qwen25_coder_7b_dose",
+    "seed": 42,
+    "selection_split": "validation",
+    "source_direction": "artifacts/qwen25_coder_7b/selected_direction.pt",
+    "source_evidence": {
+      "baseline": "results/qwen25_coder_7b/01_baseline.json",
+      "interventions": "results/qwen25_coder_7b/03_interventions.json"
+    },
+    "test_per_class": 32,
+    "train_per_class": 128,
+    "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3",
+    "validation_per_class": 32
+  },
+  "experiment": "execution_manifest",
+  "provenance": {
+    "implementation_commit": "10587e1db6ecf53f4e422c1c4a351edfd3647204",
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "requested_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "resolved_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "run_id": "d76d0e7f-1e86-4953-8eac-de1c352708d2",
+    "source_artifact_hashes": {
+      "baseline": "63d8e79c3adb8f8a87a1a1204371cfda5b0cc7cf755d8a980cc980027fda7ff4",
+      "interventions": "4db840735e735556b25c83cec83558750236dbf03809ecac996a78651b30c675",
+      "pilot_evaluation": "3bcbf949d9b6b9f66161dfe12cd18ee5174a19e36656da8a94ff0dbe90e9e510",
+      "selected_direction": "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086"
+    },
+    "source_pilot_implementation_commit": "2a2eb714246174e4f627fcd0061c61143a4e8276",
+    "source_pilot_run_id": "c0818150-f834-4692-b271-4e10a97eb57e",
+    "upstream_commit": "9d852fae1a9121c78b29142de733cb1340770cc3"
+  },
+  "results": {
+    "completed_stages": [
+      "prepare",
+      "sweep",
+      "confirm"
+    ],
+    "result_files": [
+      "00_dose_prepare.json",
+      "01_dose_baseline.json",
+      "02_dose_selection.json",
+      "03_dose_confirmation.json",
+      "dose_followup_evaluation.json",
+      "execution_manifest.json",
+      "checkpoint_coeff_0.1.json",
+      "checkpoint_coeff_0.2.json",
+      "checkpoint_coeff_0.35.json",
+      "checkpoint_coeff_0.5.json",
+      "checkpoint_coeff_0.75.json",
+      "checkpoint_coeff_1.json"
+    ],
+    "status": "pass"
+  },
+  "schema_version": 1
+}
