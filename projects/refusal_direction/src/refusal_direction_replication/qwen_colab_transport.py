@@ -47,6 +47,9 @@ DOSE_FETCH_ALLOWLIST = frozenset(
     }
 )
 DOSE_TENSOR_ALLOWLIST = frozenset()
+DOSE_SOURCE_DIRECTION_RELATIVE = Path("artifacts") / "qwen25_coder_7b" / "selected_direction.pt"
+REMOTE_DOSE_SOURCE_DIRECTION_STAGING = "/content/dose_source_direction.pt"
+MAX_DOSE_SOURCE_DIRECTION_BYTES = 16 * 1024 * 1024
 
 RESULT_JSON_PATTERN = re.compile(
     r"^results/qwen25_coder_7b/[^/]+\.json$"
@@ -131,6 +134,94 @@ def path_is_link_or_junction(path: Path) -> bool:
         return True
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+
+def dose_source_direction_path(project: Path) -> Path:
+    return project / DOSE_SOURCE_DIRECTION_RELATIVE
+
+
+def _validate_regular_direction_file(path: Path, *, origin: str) -> None:
+    if not os.path.lexists(path):
+        raise FileNotFoundError(
+            f"dose profile requires artifacts/qwen25_coder_7b/selected_direction.pt "
+            f"({origin} missing: {path})"
+        )
+    if path_is_link_or_junction(path) or not path.is_file():
+        raise ValueError(
+            f"dose source direction must be a regular file ({origin}: {path})"
+        )
+    size = path.stat().st_size
+    if size <= 0 or size > MAX_DOSE_SOURCE_DIRECTION_BYTES:
+        raise ValueError(
+            f"dose source direction size {size} exceeds "
+            f"{MAX_DOSE_SOURCE_DIRECTION_BYTES} bytes ({origin}: {path})"
+        )
+
+
+def _assert_confined_direction_destination(project: Path, destination: Path) -> Path:
+    project_root = project.resolve()
+    expected = (project_root / DOSE_SOURCE_DIRECTION_RELATIVE).resolve()
+    current = destination
+    for _ in range(len(destination.parts) + 1):
+        if path_is_link_or_junction(current):
+            raise ValueError(
+                "dose source direction destination escaped "
+                "artifacts/qwen25_coder_7b/selected_direction.pt"
+            )
+        if current == project or current.parent == current:
+            break
+        current = current.parent
+    resolved = destination.resolve()
+    if resolved != expected or resolved.name != "selected_direction.pt":
+        raise ValueError(
+            "dose source direction destination must remain "
+            "artifacts/qwen25_coder_7b/selected_direction.pt"
+        )
+    try:
+        resolved.relative_to(project_root / "artifacts" / "qwen25_coder_7b")
+    except ValueError as error:
+        raise ValueError(
+            "dose source direction destination escaped "
+            "artifacts/qwen25_coder_7b/selected_direction.pt"
+        ) from error
+    return destination
+
+
+def require_local_dose_source_direction(project: Path) -> Path:
+    path = dose_source_direction_path(project)
+    _validate_regular_direction_file(path, origin="local")
+    return _assert_confined_direction_destination(project, path)
+
+
+def atomic_install_dose_source_direction(
+    *,
+    staged: Path,
+    project: Path,
+) -> Path:
+    _validate_regular_direction_file(staged, origin="staging")
+    destination = project / DOSE_SOURCE_DIRECTION_RELATIVE
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _assert_confined_direction_destination(project, destination)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".selected_direction.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(staged.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        if tmp_path.stat().st_size > MAX_DOSE_SOURCE_DIRECTION_BYTES:
+            raise ValueError("dose source direction size exceeds limit after copy")
+        os.replace(tmp_path, destination)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    _validate_regular_direction_file(destination, origin="destination")
+    return _assert_confined_direction_destination(project, destination)
 
 
 def is_allowed_dose_fetch_member(name: str) -> bool:

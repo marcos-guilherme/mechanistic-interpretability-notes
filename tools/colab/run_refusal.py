@@ -147,6 +147,22 @@ def extract_qwen_dose_results_archive(archive: Path, project: Path) -> None:
     extract_qwen_dose_archive(archive, project)
 
 
+def require_dose_source_direction(project: Path) -> Path:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        require_local_dose_source_direction,
+    )
+
+    return require_local_dose_source_direction(project)
+
+
+def bootstrap_scripts(profile: str) -> list[Path]:
+    scripts = [PROJECT / "scripts" / "colab_bootstrap.py"]
+    if profile == "qwen25-coder-dose":
+        scripts.append(PROJECT / "scripts" / "colab_install_dose_source_direction.py")
+    return scripts
+
+
 def run(command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
@@ -248,6 +264,9 @@ def main() -> int:
     elif args.action == "start":
         run(start_command(session, args.gpu))
     elif args.action == "sync":
+        direction = None
+        if args.profile == "qwen25-coder-dose":
+            direction = require_dose_source_direction(PROJECT)
         archive = build_archive(
             stamp_commit=stamps_implementation_commit(args.profile)
         )
@@ -258,14 +277,23 @@ def main() -> int:
                 "/content/refusal_direction.tar.gz",
             )
         )
-    elif args.action == "bootstrap":
-        run(
-            exec_command(
-                session,
-                PROJECT / "scripts" / "colab_bootstrap.py",
-                timeout=600,
+        if direction is not None:
+            run(
+                upload_command(
+                    session,
+                    direction,
+                    "/content/dose_source_direction.pt",
+                )
             )
-        )
+    elif args.action == "bootstrap":
+        for script in bootstrap_scripts(args.profile):
+            run(
+                exec_command(
+                    session,
+                    script,
+                    timeout=600,
+                )
+            )
     elif args.action == "auth-hf":
         token = huggingface_token_path()
         if not token.is_file():

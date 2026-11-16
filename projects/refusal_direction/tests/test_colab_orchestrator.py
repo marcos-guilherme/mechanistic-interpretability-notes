@@ -76,6 +76,26 @@ def test_gemma_archive_does_not_stamp_implementation_commit(tmp_path) -> None:
     assert "refusal_direction/hello.py" in names
 
 
+def test_archive_excludes_artifacts_even_when_source_direction_exists(
+    tmp_path,
+) -> None:
+    project = _tiny_project(tmp_path)
+    direction = project / "artifacts" / "qwen25_coder_7b" / "selected_direction.pt"
+    direction.parent.mkdir(parents=True)
+    direction.write_bytes(b"tensor")
+    (project / "artifacts" / "other.pt").write_bytes(b"nope")
+    archive = MODULE.build_archive(
+        stamp_commit=False,
+        project=project,
+        staging=tmp_path / "staging",
+    )
+    with tarfile.open(archive, "r:gz") as handle:
+        names = handle.getnames()
+    assert "refusal_direction/hello.py" in names
+    assert not any("artifacts" in name.replace("\\", "/") for name in names)
+    assert not any(name.endswith("selected_direction.pt") for name in names)
+
+
 def test_qwen_archive_stamps_exact_implementation_commit(tmp_path) -> None:
     project = _tiny_project(tmp_path)
     commit = "e" * 40

@@ -11,10 +11,13 @@ from pathlib import Path
 import pytest
 
 from refusal_direction_replication.qwen_colab_transport import (
+    MAX_DOSE_SOURCE_DIRECTION_BYTES,
+    atomic_install_dose_source_direction,
     collect_qwen_dose_pack_entries,
     extract_qwen_dose_archive,
     is_allowed_dose_fetch_member,
     pack_qwen_dose_results,
+    require_local_dose_source_direction,
 )
 
 
@@ -393,10 +396,208 @@ def test_dose_status_cli_reads_dose_artifacts(tmp_path: Path) -> None:
 
 
 def test_dose_remote_scripts_prepare_src_before_package_import() -> None:
-    for path in (DOSE_RUN, DOSE_STATUS, DOSE_PACK):
+    install = ROOT / "scripts" / "colab_install_dose_source_direction.py"
+    for path in (DOSE_RUN, DOSE_STATUS, DOSE_PACK, install):
         source = path.read_text(encoding="utf-8")
         assert "/content/refusal_direction/src" in source, path.name
         assert "sys.path.insert" in source, path.name
         assert source.index("sys.path.insert") < source.index(
             "refusal_direction_replication"
         ), path.name
+
+
+def _write_direction(project: Path, payload: bytes = b"direction-bytes") -> Path:
+    path = project / "artifacts" / "qwen25_coder_7b" / "selected_direction.pt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return path
+
+
+def test_require_local_dose_source_direction_fails_when_missing(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="selected_direction.pt"):
+        require_local_dose_source_direction(tmp_path)
+
+
+def test_require_local_dose_source_direction_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "outside.pt"
+    target.write_bytes(b"stolen")
+    path = tmp_path / "artifacts" / "qwen25_coder_7b" / "selected_direction.pt"
+    path.parent.mkdir(parents=True)
+    try:
+        path.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are not permitted in this environment")
+    with pytest.raises(ValueError, match="regular file"):
+        require_local_dose_source_direction(tmp_path)
+
+
+def test_require_local_dose_source_direction_rejects_oversized_file(
+    tmp_path: Path,
+) -> None:
+    path = _write_direction(tmp_path, b"x" * (MAX_DOSE_SOURCE_DIRECTION_BYTES + 1))
+    with pytest.raises(ValueError, match="size"):
+        require_local_dose_source_direction(tmp_path)
+    assert path.is_file()
+
+
+def test_dose_sync_uploads_source_direction_to_remote_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "refusal_direction"
+    _write_direction(project)
+    (project / "hello.py").write_text("print('ok')\n", encoding="utf-8")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(RUN_REFUSAL, "PROJECT", project)
+    monkeypatch.setattr(RUN_REFUSAL, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        RUN_REFUSAL,
+        "current_implementation_commit",
+        lambda cwd=None: "a" * 40,
+    )
+    monkeypatch.setattr(RUN_REFUSAL, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "sync", "--profile", "qwen25-coder-dose"],
+    )
+    RUN_REFUSAL.main()
+    uploaded = [item for command in commands for item in command]
+    assert "/content/refusal_direction.tar.gz" in uploaded
+    assert "/content/dose_source_direction.pt" in uploaded
+    local_direction = str(project / "artifacts" / "qwen25_coder_7b" / "selected_direction.pt")
+    assert local_direction in uploaded
+    archive = tmp_path / ".colab-staging" / "refusal_direction.tar.gz"
+    with tarfile.open(archive, "r:gz") as handle:
+        names = [name.replace("\\", "/") for name in handle.getnames()]
+    assert not any("selected_direction.pt" in name for name in names)
+    assert not any("/artifacts/" in f"/{name}/" or name.endswith("/artifacts") for name in names)
+
+
+def test_gemma_and_qwen_pilot_sync_do_not_require_or_upload_direction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "refusal_direction"
+    project.mkdir()
+    (project / "hello.py").write_text("print('ok')\n", encoding="utf-8")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(RUN_REFUSAL, "PROJECT", project)
+    monkeypatch.setattr(RUN_REFUSAL, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        RUN_REFUSAL,
+        "current_implementation_commit",
+        lambda cwd=None: "a" * 40,
+    )
+    monkeypatch.setattr(RUN_REFUSAL, "run", lambda command: commands.append(list(command)))
+    for profile in ("gemma", "qwen25-coder"):
+        commands.clear()
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_refusal.py", "sync", "--profile", profile],
+        )
+        RUN_REFUSAL.main()
+        uploaded = [item for command in commands for item in command]
+        assert "/content/dose_source_direction.pt" not in uploaded
+        assert not any("selected_direction.pt" in item for item in uploaded)
+
+
+def test_dose_sync_fails_locally_when_source_direction_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "refusal_direction"
+    project.mkdir()
+    monkeypatch.setattr(RUN_REFUSAL, "PROJECT", project)
+    monkeypatch.setattr(RUN_REFUSAL, "ROOT", tmp_path)
+    monkeypatch.setattr(RUN_REFUSAL, "run", lambda command: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "sync", "--profile", "qwen25-coder-dose"],
+    )
+    with pytest.raises(FileNotFoundError, match="selected_direction.pt"):
+        RUN_REFUSAL.main()
+
+
+def test_dose_bootstrap_installs_direction_after_code_extract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(RUN_REFUSAL, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "bootstrap", "--profile", "qwen25-coder-dose"],
+    )
+    RUN_REFUSAL.main()
+    scripts = []
+    for command in commands:
+        if "-f" in command:
+            scripts.append(command[command.index("-f") + 1])
+    bootstrap = str(ROOT / "scripts" / "colab_bootstrap.py")
+    install = str(ROOT / "scripts" / "colab_install_dose_source_direction.py")
+    assert scripts == [bootstrap, install]
+
+
+def test_gemma_and_qwen_bootstrap_do_not_install_source_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install = str(ROOT / "scripts" / "colab_install_dose_source_direction.py")
+    for profile in ("gemma", "qwen25-coder"):
+        commands: list[list[str]] = []
+        monkeypatch.setattr(RUN_REFUSAL, "run", lambda command: commands.append(list(command)))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_refusal.py", "bootstrap", "--profile", profile],
+        )
+        RUN_REFUSAL.main()
+        scripts = [
+            command[command.index("-f") + 1]
+            for command in commands
+            if "-f" in command
+        ]
+        assert scripts == [str(ROOT / "scripts" / "colab_bootstrap.py")]
+        assert install not in scripts
+
+
+def test_atomic_install_writes_confined_regular_file(tmp_path: Path) -> None:
+    staged = tmp_path / "dose_source_direction.pt"
+    staged.write_bytes(b"tensor-payload")
+    project = tmp_path / "refusal_direction"
+    dest = atomic_install_dose_source_direction(staged=staged, project=project)
+    expected = project / "artifacts" / "qwen25_coder_7b" / "selected_direction.pt"
+    assert dest == expected
+    assert dest.read_bytes() == b"tensor-payload"
+    assert dest.is_file()
+    assert not dest.is_symlink()
+
+
+def test_atomic_install_rejects_symlink_destination_escape(tmp_path: Path) -> None:
+    staged = tmp_path / "dose_source_direction.pt"
+    staged.write_bytes(b"tensor-payload")
+    project = tmp_path / "refusal_direction"
+    dest_dir = project / "artifacts" / "qwen25_coder_7b"
+    dest_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        dest_dir.rmdir()
+        dest_dir.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are not permitted in this environment")
+    with pytest.raises(ValueError, match="escaped|regular file|destination"):
+        atomic_install_dose_source_direction(staged=staged, project=project)
+    assert not (outside / "selected_direction.pt").exists()
+
+
+def test_atomic_install_rejects_oversized_staging_file(tmp_path: Path) -> None:
+    staged = tmp_path / "dose_source_direction.pt"
+    staged.write_bytes(b"x" * (MAX_DOSE_SOURCE_DIRECTION_BYTES + 1))
+    with pytest.raises(ValueError, match="size"):
+        atomic_install_dose_source_direction(
+            staged=staged,
+            project=tmp_path / "refusal_direction",
+        )
