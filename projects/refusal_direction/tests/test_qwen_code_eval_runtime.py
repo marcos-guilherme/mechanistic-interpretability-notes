@@ -430,8 +430,18 @@ def test_readout_checkpoint_requires_every_position_and_layer(tmp_path: Path) ->
     )
 
     checkpoint = tmp_path / "readout.jsonl"
+    identity = {
+        "run_id": "run",
+        "implementation_commit": "a" * 40,
+        "config_sha256": "b" * 64,
+        "source_artifact_hashes": {"direction": "c" * 64},
+        "dataset": "mitre",
+        "condition": "addition",
+    }
+    expected_ids = [f"item-{index}" for index in range(32)]
     incomplete = [
         {
+            **identity,
             "example_id": f"item-{index}",
             "position_kind": "instruction_last",
             "layer": 0,
@@ -443,10 +453,13 @@ def test_readout_checkpoint_requires_every_position_and_layer(tmp_path: Path) ->
         "".join(json.dumps(record) + "\n" for record in incomplete),
         encoding="utf-8",
     )
-    assert not _readout_checkpoint_complete(checkpoint)
+    assert not _readout_checkpoint_complete(
+        checkpoint, expected_example_ids=expected_ids, **identity
+    )
 
     complete = [
         {
+            **identity,
             "example_id": f"item-{index}",
             "position_kind": position,
             "layer": layer,
@@ -460,7 +473,17 @@ def test_readout_checkpoint_requires_every_position_and_layer(tmp_path: Path) ->
         "".join(json.dumps(record) + "\n" for record in complete),
         encoding="utf-8",
     )
-    assert _readout_checkpoint_complete(checkpoint)
+    assert _readout_checkpoint_complete(
+        checkpoint, expected_example_ids=expected_ids, **identity
+    )
+    complete[0]["condition"] = "baseline"
+    checkpoint.write_text(
+        "".join(json.dumps(record) + "\n" for record in complete),
+        encoding="utf-8",
+    )
+    assert not _readout_checkpoint_complete(
+        checkpoint, expected_example_ids=expected_ids, **identity
+    )
 
 
 def test_lens_apply_observes_condition_hooks() -> None:

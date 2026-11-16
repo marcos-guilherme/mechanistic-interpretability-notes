@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import torch
+
 from .qwen_dose import metadata_contains_leak
 from .qwen_code_eval import compact_contains_leak
 from .qwen_jlens import (
@@ -1215,21 +1217,12 @@ def _revalidate_code_eval_members(
 
 def _code_eval_tree_identity(root: Path) -> dict[str, Any] | None:
     results_dir = root / CODE_EVAL_RESULTS_DIR
-    if not results_dir.is_dir():
-        return None
     identities: list[dict[str, Any]] = []
-    for path in sorted(results_dir.glob("*.json")):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        source = payload.get("provenance") or payload
-        if not all(
-            field in source
-            for field in (
-                "run_id",
-                "implementation_commit",
-                "source_artifact_hashes",
-            )
-        ):
-            continue
+
+    def add_identity(source: dict[str, Any]) -> None:
+        fields = ("run_id", "implementation_commit", "source_artifact_hashes")
+        if not all(field in source for field in fields):
+            return
         identities.append(
             {
                 "run_id": source["run_id"],
@@ -1237,6 +1230,27 @@ def _code_eval_tree_identity(root: Path) -> dict[str, Any] | None:
                 "source_artifact_hashes": source["source_artifact_hashes"],
             }
         )
+
+    if results_dir.is_dir():
+        for path in sorted(results_dir.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            add_identity(payload.get("provenance") or payload)
+    artifacts_dir = root / CODE_EVAL_ARTIFACTS_DIR
+    if artifacts_dir.is_dir():
+        for path in sorted(artifacts_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix == ".json":
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                add_identity(payload.get("identity") or payload)
+            elif path.suffix == ".jsonl":
+                with path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.strip():
+                            add_identity(json.loads(line))
+            elif path.suffix == ".pt" and path.parent.name == "logits":
+                payload = torch.load(path, map_location="cpu", weights_only=True)
+                add_identity(payload)
     if not identities:
         return None
     first = identities[0]

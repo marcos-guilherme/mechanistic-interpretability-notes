@@ -233,6 +233,44 @@ def test_code_eval_fetch_rejects_internally_conflicting_new_tree(
     assert not (destination / "results/qwen25_coder_7b_code_eval").exists()
 
 
+def test_code_eval_fetch_rejects_raw_artifact_from_different_run(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "destination"
+    existing = destination / "results/qwen25_coder_7b_code_eval/00_prepare.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(json.dumps(_compact_identity("same-run")), encoding="utf-8")
+
+    incoming = tmp_path / "incoming"
+    compact = incoming / "results/qwen25_coder_7b_code_eval/01_generate.json"
+    compact.parent.mkdir(parents=True)
+    compact.write_text(json.dumps(_compact_identity("same-run")), encoding="utf-8")
+    raw = (
+        incoming
+        / "artifacts/qwen25_coder_7b_code_eval/generations/mitre__baseline.jsonl"
+    )
+    raw.parent.mkdir(parents=True)
+    raw.write_text(
+        json.dumps(
+            {
+                "run_id": "other-run",
+                "implementation_commit": "a" * 40,
+                "source_artifact_hashes": {"direction": "b" * 64},
+                "example_id": "mitre:0",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    archive = tmp_path / "mixed-raw.tar.gz"
+    pack_qwen_code_eval_results(incoming, archive)
+    with pytest.raises(ValueError, match="conflicting identities"):
+        extract_qwen_code_eval_archive(archive, destination)
+    assert not (
+        destination / "results/qwen25_coder_7b_code_eval/01_generate.json"
+    ).exists()
+
+
 def test_code_eval_fetch_rolls_back_partial_same_identity_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

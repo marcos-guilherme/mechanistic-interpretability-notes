@@ -437,3 +437,61 @@ def test_validator_detects_tampered_per_example_kl(tmp_path: Path) -> None:
     checks = validate_qwen_code_eval(tmp_path)
     assert checks["kl_recomputed"] is False
     assert checks["metrics_recomputed"] is False
+
+
+def test_validator_treats_misaligned_logit_ids_as_failed_check(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_code_eval_validate import (
+        validate_qwen_code_eval,
+    )
+
+    _fixture(tmp_path)
+    path = (
+        tmp_path
+        / "artifacts/qwen25_coder_7b_code_eval/logits/mitre__addition.pt"
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload["example_ids"][0] = "mitre:not-selected"
+    torch.save(payload, path)
+    checks = validate_qwen_code_eval(tmp_path)
+    assert checks["kl_recomputed"] is False
+    assert checks["metrics_recomputed"] is False
+
+
+def test_validator_accepts_accurate_partial_operational_manifest(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_code_eval_validate import (
+        validate_qwen_code_eval,
+    )
+
+    _fixture(tmp_path)
+    results = tmp_path / "results/qwen25_coder_7b_code_eval"
+    evaluation_path = results / EVALUATION_FILENAME
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    evaluation.update({"status": "operational_error", "stage": "evaluate"})
+    atomic_write_json(evaluation_path, evaluation)
+    for stage in ("evaluate", "readout", "finalize"):
+        (results / STAGE_FILES[stage]).unlink()
+    manifest_path = results / MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["results"].update(
+        {
+            "status": "operational_error",
+            "completed_stages": ["prepare", "generate"],
+            "result_files": [
+                STAGE_FILES["prepare"],
+                STAGE_FILES["generate"],
+                EVALUATION_FILENAME,
+                MANIFEST_FILENAME,
+            ],
+        }
+    )
+    atomic_write_json(manifest_path, manifest)
+    status_path = tmp_path / "artifacts/qwen25_coder_7b_code_eval/status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status.update({"state": "failed", "current_stage": "evaluate"})
+    atomic_write_json(status_path, status)
+    checks = validate_qwen_code_eval(tmp_path)
+    assert checks["manifest_agrees"] is True

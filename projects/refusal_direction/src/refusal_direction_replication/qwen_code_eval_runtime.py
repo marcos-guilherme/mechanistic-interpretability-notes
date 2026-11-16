@@ -936,10 +936,33 @@ def run_evaluate_stage(
     }
 
 
-def _readout_checkpoint_complete(path: Path) -> bool:
+def _readout_checkpoint_complete(
+    path: Path,
+    *,
+    run_id: str,
+    implementation_commit: str,
+    config_sha256: str,
+    source_artifact_hashes: Mapping[str, str],
+    dataset: str,
+    condition: str,
+    expected_example_ids: Sequence[str],
+) -> bool:
     if not path.is_file():
         return False
     records = _read_jsonl(path)
+    identity = {
+        "run_id": run_id,
+        "implementation_commit": implementation_commit,
+        "config_sha256": config_sha256,
+        "source_artifact_hashes": dict(source_artifact_hashes),
+        "dataset": dataset,
+        "condition": condition,
+    }
+    if any(
+        any(record.get(field) != value for field, value in identity.items())
+        for record in records
+    ):
+        return False
     observed = {
         (
             str(record.get("example_id")),
@@ -951,7 +974,7 @@ def _readout_checkpoint_complete(path: Path) -> bool:
     if len(records) != len(observed):
         return False
     example_ids = sorted({item[0] for item in observed})
-    if len(example_ids) != DATASET_SIZE:
+    if example_ids != sorted(expected_example_ids):
         return False
     normalized_expected = {
         (example_id, position, layer)
@@ -968,6 +991,8 @@ def run_readout_stage(
     artifacts_dir: Path,
     store: RunProgressStore,
     source: Mapping[str, Any],
+    run_id: str,
+    implementation_commit: str,
     load_model: Callable[..., Any] | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
@@ -992,18 +1017,30 @@ def run_readout_stage(
         lexicon_ids = tuple(int(item) for item in lexicon_payload["token_ids"])
         for dataset in DATASETS:
             for condition in CONDITIONS:
+                generated = _read_jsonl(
+                    artifacts_dir / "generations" / f"{dataset}__{condition}.jsonl"
+                )
+                expected_example_ids = [
+                    str(record["example_id"]) for record in generated
+                ]
                 checkpoint = (
                     artifacts_dir / "readout" / f"{dataset}__{condition}.jsonl"
                 )
-                if _readout_checkpoint_complete(checkpoint):
+                if _readout_checkpoint_complete(
+                    checkpoint,
+                    run_id=run_id,
+                    implementation_commit=implementation_commit,
+                    config_sha256=_config_hash(config),
+                    source_artifact_hashes=source["source_artifact_hashes"],
+                    dataset=dataset,
+                    condition=condition,
+                    expected_example_ids=expected_example_ids,
+                ):
                     records = _read_jsonl(checkpoint)
                     all_records.extend(records)
                     completed += DATASET_SIZE
                     store.update_progress(completed_units=completed)
                     continue
-                generated = _read_jsonl(
-                    artifacts_dir / "generations" / f"{dataset}__{condition}.jsonl"
-                )
                 pre_hooks, forward_hooks = _condition_hooks(
                     condition=condition,
                     model=model,
@@ -1050,6 +1087,12 @@ def run_readout_stage(
                         for layer in source_layers:
                             records.append(
                                 {
+                                    "run_id": run_id,
+                                    "implementation_commit": implementation_commit,
+                                    "config_sha256": _config_hash(config),
+                                    "source_artifact_hashes": dict(
+                                        source["source_artifact_hashes"]
+                                    ),
                                     "dataset": dataset,
                                     "condition": condition,
                                     "example_id": item["example_id"],
@@ -1066,6 +1109,12 @@ def run_readout_stage(
                         for layer in source_layers:
                             records.append(
                                 {
+                                    "run_id": run_id,
+                                    "implementation_commit": implementation_commit,
+                                    "config_sha256": _config_hash(config),
+                                    "source_artifact_hashes": dict(
+                                        source["source_artifact_hashes"]
+                                    ),
                                     "dataset": dataset,
                                     "condition": condition,
                                     "example_id": item["example_id"],

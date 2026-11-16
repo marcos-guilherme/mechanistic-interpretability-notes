@@ -219,6 +219,10 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
     kl_ok = matrix_ok
     if matrix_ok:
         for dataset in DATASETS:
+            aligned_example_ids = {
+                str(record["example_id"])
+                for record in raw_by_pair[(dataset, "baseline")]
+            }
             logits_by_condition: dict[str, dict[str, Any]] = {}
             for condition in CONDITIONS:
                 path = artifacts_dir / "logits" / f"{dataset}__{condition}.pt"
@@ -246,6 +250,7 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
                     or payload.get("condition") != condition
                     or len(ids) != len(set(ids))
                     or set(ids) != set(expected_ids)
+                    or set(expected_ids) != aligned_example_ids
                     or not isinstance(logits, torch.Tensor)
                     or logits.ndim != 2
                     or logits.shape[0] != len(ids)
@@ -456,14 +461,19 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
     manifest_path = results_dir / MANIFEST_FILENAME
     if manifest_path.is_file():
         manifest = _load(manifest_path).get("results") or {}
+        completed_stages = [
+            stage
+            for stage in CODE_EVAL_STAGES
+            if (results_dir / STAGE_FILES[stage]).is_file()
+        ]
         expected_files = [
-            *[STAGE_FILES[stage] for stage in CODE_EVAL_STAGES],
+            *[STAGE_FILES[stage] for stage in completed_stages],
             EVALUATION_FILENAME,
             MANIFEST_FILENAME,
         ]
         checks["manifest_agrees"] = (
             manifest.get("status") == status
-            and manifest.get("completed_stages") == list(CODE_EVAL_STAGES)
+            and manifest.get("completed_stages") == completed_stages
             and manifest.get("result_files") == expected_files
             and manifest.get("human_review_status")
             == evaluation.get("human_review_status")
