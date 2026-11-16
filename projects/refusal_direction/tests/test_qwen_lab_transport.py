@@ -648,6 +648,43 @@ def test_wait_for_public_url_fails_when_server_exits(
         module.wait_for_public_url(log_path, process=ExitedProc(), timeout=1.0)
 
 
+def test_colab_start_lab_terminates_child_after_startup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script(START_SCRIPT, "colab_start_lab_timeout_cleanup")
+    monkeypatch.setattr(module, "REMOTE_AUTH_FILE", tmp_path / "auth.json")
+    monkeypatch.setattr(module, "SERVER_LOG", tmp_path / "server.log")
+    monkeypatch.setattr(module, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(module, "RUN_SCRIPT", RUN_SCRIPT)
+    events: list[str] = []
+
+    class RunningProc:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            events.append("terminate")
+
+        def wait(self, *, timeout):
+            events.append(f"wait:{timeout}")
+            return 0
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: RunningProc())
+    monkeypatch.setattr(
+        module,
+        "wait_for_public_url",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("not ready")),
+    )
+    with pytest.raises(TimeoutError, match="not ready"):
+        module.start_lab_and_return_url()
+    assert events == ["terminate", "wait:10"]
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "error"
+
+
 def test_existing_orchestrator_actions_remain_intact() -> None:
     module = _orchestrator()
     assert module.PROFILE_SESSIONS["gemma"] == "refusal-gemma"

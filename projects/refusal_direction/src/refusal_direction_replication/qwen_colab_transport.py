@@ -731,6 +731,7 @@ def consume_lab_auth_file(path: Path) -> tuple[str, str]:
             raise FileNotFoundError(f"auth file missing: {path}")
         if path_is_link_or_junction(path) or not path.is_file():
             raise ValueError("auth file must be a regular file")
+        os.chmod(path, 0o600)
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("auth file must contain a JSON object")

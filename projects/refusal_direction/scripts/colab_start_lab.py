@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,7 +32,21 @@ def write_operational_status(payload: dict) -> None:
     if not lab_status_is_safe(payload):
         raise ValueError("refusing to persist lab status with secrets")
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATUS_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".status.",
+        suffix=".tmp",
+        dir=STATUS_PATH.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, STATUS_PATH)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def wait_for_public_url(
@@ -75,6 +91,13 @@ def start_lab_and_return_url() -> str:
     try:
         url = wait_for_public_url(SERVER_LOG, process=proc)
     except Exception:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
         write_operational_status(
             {
                 "profile": "qwen25_coder_7b_lab.json",
