@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
+import gc
 import math
+import threading
 import time
 from typing import Any
 
@@ -24,7 +26,13 @@ from .qwen_lab import (
     GenerationRequest,
     escape_token_display,
 )
-from .qwen_lab_readout import FROZEN_LENS_SHA256, LiveJLensReadout, validate_qwen_lab_lens
+from .qwen_lab_readout import (
+    FROZEN_LENS_SHA256,
+    LENS_CONTRACT_FIXTURE,
+    LENS_CONTRACT_QWEN,
+    LiveJLensReadout,
+    validate_qwen_lab_lens,
+)
 from .runtime import seed_everything
 
 
@@ -233,6 +241,17 @@ def _clear_cuda_cache() -> None:
         empty_cache()
 
 
+def _drop_exception_frames(exc: BaseException) -> None:
+    exc.__traceback__ = None
+    exc.__cause__ = None
+    exc.__context__ = None
+
+
+def _release_after_oom() -> None:
+    gc.collect()
+    _clear_cuda_cache()
+
+
 class InterventionEngine:
     """Apply frozen intervention semantics and stream synchronized J-lens events."""
 
@@ -258,40 +277,76 @@ class InterventionEngine:
         self._direction = _tensor_direction(direction)
         self._random_control = random_control
         self._readout = readout
+        self._lock = threading.Lock()
+        self._session_held = False
         self._active = False
         self.terminal_status: str | None = None
-        validate_qwen_lab_lens(
-            readout._lens,
+        self._bind_lens_contract(
+            readout,
             lens_path=lens_path,
-            expected_lens_sha256=expected_lens_sha256 if lens_path is not None else None,
+            expected_lens_sha256=expected_lens_sha256,
         )
 
     @property
     def active(self) -> bool:
         return self._active
 
+    def _bind_lens_contract(
+        self,
+        readout: LiveJLensReadout,
+        *,
+        lens_path: str | None,
+        expected_lens_sha256: str | None,
+    ) -> None:
+        contract = getattr(readout, "lens_contract", LENS_CONTRACT_QWEN)
+        if contract == LENS_CONTRACT_FIXTURE:
+            return
+        if contract != LENS_CONTRACT_QWEN:
+            raise ValueError(f"unknown lens_contract: {contract!r}")
+        if getattr(readout, "lens_validated", False):
+            return
+        path = lens_path if lens_path is not None else getattr(readout, "lens_path", None)
+        if path is None:
+            raise ValueError("lens_path is required for Qwen lab lens validation")
+        if expected_lens_sha256 is None:
+            raise ValueError("expected_lens_sha256 is required for Qwen lab lens validation")
+        validate_qwen_lab_lens(
+            readout._lens,
+            lens_path=str(path),
+            expected_lens_sha256=expected_lens_sha256,
+        )
+        readout.lens_path = str(path)
+        readout.lens_validated = True
+
+    def _end_session(self) -> None:
+        if not self._session_held:
+            return
+        self._session_held = False
+        self._active = False
+        self._lock.release()
+
     def generate(
         self,
         request: GenerationRequest,
         cancelled: Cancelled = None,
     ) -> Iterator[GenerationEvent]:
-        if self._active:
+        if not self._lock.acquire(blocking=False):
             raise ConcurrentGenerationError()
+        self._session_held = True
         self._active = True
         self.terminal_status = None
-
-        def iterator() -> Iterator[GenerationEvent]:
-            try:
-                yield from self._stream(request, cancelled)
-            except Exception as exc:
-                if is_cuda_oom(exc):
-                    _clear_cuda_cache()
-                    raise LabOOMError() from exc
-                raise
-            finally:
-                self._active = False
-
-        return iterator()
+        try:
+            yield from self._stream(request, cancelled)
+        except Exception as exc:
+            if is_cuda_oom(exc):
+                self.terminal_status = "error_memory"
+                _drop_exception_frames(exc)
+                _release_after_oom()
+                raise LabOOMError() from None
+            self.terminal_status = "error"
+            raise
+        finally:
+            self._end_session()
 
     def _stream(
         self,
@@ -325,7 +380,7 @@ class InterventionEngine:
         past = None
         next_ids = input_ids
         cache_position = torch.arange(input_ids.shape[1], device=device)
-        accumulated = ""
+        generated_ids: list[int] = []
         max_new_tokens = int(request.max_new_tokens)
 
         with temporary_hooks(pre_hooks=pre_hooks, forward_hooks=forward_hooks):
@@ -340,29 +395,45 @@ class InterventionEngine:
                         )
                         return
                     started = time.perf_counter()
-                    outputs = self._model(
-                        input_ids=next_ids,
-                        attention_mask=attention_mask,
-                        past_key_values=past,
-                        use_cache=True,
-                        cache_position=cache_position,
-                    )
-                    past = getattr(outputs, "past_key_values", None)
-                    logits = outputs.logits[:, -1, :].float()
-                    token_id = _sample_token(
-                        logits,
-                        temperature=float(request.temperature),
-                        top_p=float(request.top_p),
-                        generator=generator,
-                    )
+                    try:
+                        outputs = self._model(
+                            input_ids=next_ids,
+                            attention_mask=attention_mask,
+                            past_key_values=past,
+                            use_cache=True,
+                            cache_position=cache_position,
+                        )
+                        past = getattr(outputs, "past_key_values", None)
+                        logits = outputs.logits[:, -1, :].float()
+                        token_id = _sample_token(
+                            logits,
+                            temperature=float(request.temperature),
+                            top_p=float(request.top_p),
+                            generator=generator,
+                        )
+                        residual = captured.pop("residual")
+                        predictions = self._readout.predict(
+                            residual.reshape(-1),
+                            layer=int(request.j_lens_layer),
+                            top_k=int(request.top_k),
+                        )
+                    except Exception:
+                        captured.clear()
+                        past = None
+                        outputs = None
+                        logits = None
+                        residual = None
+                        raise
+                    del outputs
+                    del logits
+                    del residual
+                    generated_ids.append(int(token_id))
                     raw_text = _decode_token(self._tokenizer, token_id)
                     display = escape_token_display(token_id=token_id, text=raw_text)
-                    accumulated += display
-                    residual = captured["residual"]
-                    predictions = self._readout.predict(
-                        residual.reshape(-1),
-                        layer=int(request.j_lens_layer),
-                        top_k=int(request.top_k),
+                    accumulated = self._tokenizer.decode(
+                        generated_ids,
+                        skip_special_tokens=False,
+                        clean_up_tokenization_spaces=False,
                     )
                     status = None
                     if eos_id is not None and token_id == int(eos_id):

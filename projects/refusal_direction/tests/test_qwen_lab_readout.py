@@ -53,7 +53,7 @@ def test_live_readout_never_calls_lens_apply() -> None:
         spy,
         decoder,
         decode_token=lambda token_id: decoder.tokenizer.decode([token_id]),
-        _skip_qwen_contract=True,
+        lens_contract="fixture",
     )
     residual = decoder.forward(decoder.encode("ab")).last_hidden_state[0, -1]
     readout.predict(residual, layer=1, top_k=3)
@@ -83,7 +83,7 @@ def test_readout_tracks_rank_deltas_across_steps() -> None:
         lens,
         decoder,
         decode_token=lambda token_id: decoder.tokenizer.decode([int(token_id)]),
-        _skip_qwen_contract=True,
+        lens_contract="fixture",
     )
     residual_a = torch.randn(8)
     residual_b = residual_a + 0.05
@@ -95,6 +95,19 @@ def test_readout_tracks_rank_deltas_across_steps() -> None:
         first_pred = next(p for p in first if p.token_id == token_id)
         second_pred = next(p for p in second if p.token_id == token_id)
         assert second_pred.previous_rank_delta == first_pred.rank - second_pred.rank
+
+
+def test_qwen_contract_requires_lens_path() -> None:
+    decoder = TinyDecoder(n_layers=4, d_model=8, vocab_size=32, seed=4)
+    jacobians = {layer: torch.eye(8) for layer in range(3)}
+    lens = JacobianLens(jacobians, n_prompts=1, d_model=8)
+    with pytest.raises(ValueError, match="lens_path"):
+        LiveJLensReadout(
+            lens,
+            decoder,
+            decode_token=lambda token_id: decoder.tokenizer.decode([int(token_id)]),
+            lens_contract="qwen",
+        )
 
 
 def test_parity_honors_intervention_hooks() -> None:

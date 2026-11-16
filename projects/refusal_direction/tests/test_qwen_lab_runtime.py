@@ -195,15 +195,7 @@ def _tiny_readout(model: FakeCausalLM, tokenizer: LabTokenizer) -> LiveJLensRead
             d_model=d_model,
         ),
         decode_token=lambda token_id: tokenizer.decode([int(token_id)]),
-        _skip_qwen_contract=True,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _skip_qwen_lens_validation(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "refusal_direction_replication.qwen_lab_runtime.validate_qwen_lab_lens",
-        lambda *args, **kwargs: None,
+        lens_contract="fixture",
     )
 
 
@@ -256,20 +248,70 @@ def test_negative_temperature_is_rejected_by_request_contract() -> None:
         _valid_request(temperature=-0.25)
 
 
-def test_engine_validates_lens_once_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    from refusal_direction_replication import qwen_lab_runtime as module
+def test_engine_does_not_revalidate_fixture_or_already_checked_lens(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from refusal_direction_replication import qwen_lab_readout as readout_module
+    from refusal_direction_replication.qwen_lab_runtime import InterventionEngine
 
     calls: list[object] = []
 
-    def spy(lens, **kwargs) -> None:
-        del kwargs
-        calls.append(lens)
+    def spy(*args, **kwargs) -> None:
+        del args, kwargs
+        calls.append(True)
 
-    monkeypatch.setattr(module, "validate_qwen_lab_lens", spy)
-    engine, _model, _tokenizer, _direction, _control = _make_engine()
-    _collect(engine, _valid_request(max_new_tokens=2))
-    _collect(engine, _valid_request(max_new_tokens=2, seed=1))
+    monkeypatch.setattr(readout_module, "validate_qwen_lab_lens", spy)
+    monkeypatch.setattr(
+        "refusal_direction_replication.qwen_lab_runtime.validate_qwen_lab_lens",
+        spy,
+    )
+    engine, model, tokenizer, direction, control = _make_engine()
+    _collect(engine, _valid_request(max_new_tokens=1))
+    assert calls == []
+
+    path = tmp_path / "lens.pt"
+    path.write_bytes(b"lens")
+    readout = _tiny_readout(model, tokenizer)
+    readout.lens_contract = "qwen"
+    readout.lens_validated = False
+    readout.lens_path = None
+    blocks, attentions, mlps = transformer_module_lists(model)
+    qwen_engine = InterventionEngine(
+        model,
+        tokenizer,
+        blocks=blocks,
+        attentions=attentions,
+        mlps=mlps,
+        direction=direction,
+        random_control=control,
+        readout=readout,
+        lens_path=str(path),
+    )
+    _collect(qwen_engine, _valid_request(max_new_tokens=1, seed=1))
+    _collect(qwen_engine, _valid_request(max_new_tokens=1, seed=2))
     assert len(calls) == 1
+
+
+def test_qwen_engine_requires_lens_path() -> None:
+    from refusal_direction_replication.qwen_lab_runtime import InterventionEngine
+
+    engine, model, tokenizer, direction, control = _make_engine()
+    readout = _tiny_readout(model, tokenizer)
+    readout.lens_contract = "qwen"
+    readout.lens_validated = False
+    readout.lens_path = None
+    blocks, attentions, mlps = transformer_module_lists(model)
+    with pytest.raises(ValueError, match="lens_path"):
+        InterventionEngine(
+            model,
+            tokenizer,
+            blocks=blocks,
+            attentions=attentions,
+            mlps=mlps,
+            direction=direction,
+            random_control=control,
+            readout=readout,
+        )
 
 
 def test_baseline_installs_no_intervention_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -428,22 +470,52 @@ def test_one_event_per_token_uses_matching_residual_readout() -> None:
     assert len(residuals) >= len(events)
     captured = residuals[-len(events) :]
     fresh = _tiny_readout(model, tokenizer)
-    expected = fresh.predict(
-        captured[0].reshape(-1),
-        layer=request.j_lens_layer,
-        top_k=request.top_k,
-    )
-    assert [item.token_id for item in events[0].predictions] == [
-        item.token_id for item in expected
-    ]
-    for event in events:
+    generated_ids: list[int] = []
+    for event, residual in zip(events, captured, strict=True):
+        expected = fresh.predict(
+            residual.reshape(-1),
+            layer=request.j_lens_layer,
+            top_k=request.top_k,
+        )
+        assert [item.token_id for item in event.predictions] == [
+            item.token_id for item in expected
+        ]
+        generated_ids.append(event.generated_token_id)
+        raw_token = tokenizer.decode([event.generated_token_id])
         assert event.generated_token_text == escape_token_display(
             token_id=event.generated_token_id,
-            text=tokenizer.decode([event.generated_token_id]),
+            text=raw_token,
         )
+        assert event.accumulated_text == tokenizer.decode(generated_ids)
         assert event.effective_condition == request.condition
         assert event.effective_coefficient == request.coefficient
         assert event.j_lens_layer == request.j_lens_layer
+
+
+def test_accumulated_text_decodes_full_id_sequence_not_escaped_concat() -> None:
+    engine, _model, tokenizer, _direction, _control = _make_engine()
+
+    def marked_decode(ids, **_kwargs) -> str:
+        return "<" + ",".join(str(int(token)) for token in ids) + ">"
+
+    tokenizer.decode = marked_decode  # type: ignore[method-assign]
+    events = _collect(engine, _valid_request(max_new_tokens=2, temperature=0.0))
+    ids = [event.generated_token_id for event in events]
+    assert events[-1].accumulated_text == "<" + ",".join(str(token) for token in ids) + ">"
+    assert events[0].accumulated_text == f"<{ids[0]}>"
+    assert events[-1].generated_token_text == escape_token_display(
+        token_id=ids[-1],
+        text=f"<{ids[-1]}>",
+    )
+    assert events[-1].accumulated_text != (
+        events[0].generated_token_text + events[1].generated_token_text
+    )
+
+
+def test_generate_is_a_generator_function() -> None:
+    from refusal_direction_replication.qwen_lab_runtime import InterventionEngine
+
+    assert inspect.isgeneratorfunction(InterventionEngine.generate)
 
 
 def test_chat_template_uses_generation_prompt() -> None:
@@ -512,15 +584,63 @@ def test_concurrent_generation_is_rejected() -> None:
     from refusal_direction_replication.qwen_lab_runtime import ConcurrentGenerationError
 
     engine, _model, _tokenizer, _direction, _control = _make_engine()
+    unused = engine.generate(_valid_request(max_new_tokens=3, seed=9))
+    assert engine.active is False
+    unused.close()
+    assert engine.active is False
+
     iterator = engine.generate(_valid_request(max_new_tokens=5))
     first = next(iterator)
     assert first.step == 1
+    assert engine.active is True
     with pytest.raises(ConcurrentGenerationError, match="already active"):
         next(engine.generate(_valid_request(max_new_tokens=2)))
     remaining = list(iterator)
     assert remaining
+    assert engine.active is False
     second = _collect(engine, _valid_request(max_new_tokens=1, seed=2))
     assert second[0].step == 1
+
+
+def test_close_releases_session_after_first_token() -> None:
+    engine, _model, _tokenizer, _direction, _control = _make_engine()
+    iterator = engine.generate(_valid_request(max_new_tokens=5))
+    next(iterator)
+    iterator.close()
+    assert engine.active is False
+    events = _collect(engine, _valid_request(max_new_tokens=1, seed=3))
+    assert events[0].step == 1
+
+
+def test_concurrent_generation_from_two_threads() -> None:
+    from refusal_direction_replication.qwen_lab_runtime import ConcurrentGenerationError
+
+    engine, _model, _tokenizer, _direction, _control = _make_engine()
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def worker(seed: int) -> None:
+        iterator = engine.generate(_valid_request(max_new_tokens=3, seed=seed))
+        barrier.wait()
+        try:
+            list(iterator)
+            outcomes.append("ok")
+        except ConcurrentGenerationError:
+            outcomes.append("err")
+
+    threads = [
+        threading.Thread(target=worker, args=(index,))
+        for index in (1, 2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert outcomes.count("ok") == 1
+    assert outcomes.count("err") == 1
+    assert engine.active is False
+    recovered = _collect(engine, _valid_request(max_new_tokens=1, seed=8))
+    assert recovered[0].step == 1
 
 
 def test_tuple_block_outputs_are_captured_without_replacing_output() -> None:
@@ -559,6 +679,7 @@ def test_hooks_and_active_state_cleared_on_all_exits() -> None:
     model._fail_next = ValueError("boom")
     with pytest.raises(ValueError, match="boom"):
         _collect(engine, _valid_request(max_new_tokens=2))
+    assert engine.terminal_status == "error"
     _assert_clean(engine, model)
 
     engine, model, _tokenizer, _direction, _control = _make_engine(seed=9)
@@ -566,6 +687,7 @@ def test_hooks_and_active_state_cleared_on_all_exits() -> None:
     model._fail_next = oom_type("CUDA out of memory")
     with pytest.raises(Exception, match="memory"):
         _collect(engine, _valid_request(max_new_tokens=2))
+    assert engine.terminal_status == "error_memory"
     _assert_clean(engine, model)
     recovered = _collect(engine, _valid_request(max_new_tokens=1, seed=3))
     assert recovered[0].step == 1
@@ -577,6 +699,7 @@ def test_second_generation_succeeds_after_generic_error() -> None:
     model._fail_next = RuntimeError("transient")
     with pytest.raises(RuntimeError, match="transient"):
         _collect(engine, _valid_request(max_new_tokens=2))
+    assert engine.terminal_status == "error"
     events = _collect(engine, _valid_request(max_new_tokens=2, seed=4))
     assert len(events) == 2
     assert engine.active is False
@@ -690,7 +813,7 @@ def test_incremental_cache_matches_full_forward() -> None:
         lens,
         SimpleNamespace(unembed=lambda residual: model.lm_head(residual.float())),
         decode_token=lambda token_id: tokenizer.decode([int(token_id)]),
-        _skip_qwen_contract=True,
+        lens_contract="fixture",
     )
     direction = torch.nn.functional.normalize(torch.ones(d_model), dim=0)
     engine = InterventionEngine(
@@ -715,6 +838,15 @@ def test_incremental_cache_matches_full_forward() -> None:
         hidden = output[0] if isinstance(output, tuple) else output
         residuals.append(hidden[:, -1, :].detach().clone())
 
+    incremental_logits: list[torch.Tensor] = []
+    original_forward = model.forward
+
+    def tracking_forward(*args, **kwargs):
+        outputs = original_forward(*args, **kwargs)
+        incremental_logits.append(outputs.logits[:, -1, :].detach().clone())
+        return outputs
+
+    model.forward = tracking_forward  # type: ignore[method-assign]
     handle = blocks[1].register_forward_hook(capture)
     try:
         events = _collect(engine, request)
@@ -730,16 +862,23 @@ def test_incremental_cache_matches_full_forward() -> None:
         )
         full_ids = torch.cat([prompt_ids, first_token], dim=1)
         with torch.no_grad():
-            full = model(input_ids=full_ids, use_cache=False)
+            full = original_forward(input_ids=full_ids, use_cache=False)
         full_residual = residuals[-1]
         full_logits = full.logits[:, -1, :].float()
     finally:
         handle.remove()
+        model.forward = original_forward  # type: ignore[method-assign]
 
     assert events[1].generated_token_id == int(full_logits.argmax(dim=-1).item())
     assert torch.allclose(
         decode_residual.float(),
         full_residual.float(),
+        atol=CACHE_PARITY_ATOL,
+        rtol=0.0,
+    )
+    assert torch.allclose(
+        incremental_logits[1].float(),
+        full_logits,
         atol=CACHE_PARITY_ATOL,
         rtol=0.0,
     )
@@ -764,20 +903,36 @@ def test_seed_everything_is_called_with_request_seed(monkeypatch: pytest.MonkeyP
 def test_oom_raises_stable_lab_error_and_clears_cuda_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from refusal_direction_replication import qwen_lab_runtime as module
     from refusal_direction_replication.qwen_lab_runtime import LabOOMError
 
     engine, model, _tokenizer, _direction, _control = _make_engine()
-    cleared: list[bool] = []
+    cleared: list[str] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cleared.append(True))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cleared.append("cache"))
+    monkeypatch.setattr(module.gc, "collect", lambda: cleared.append("gc") or 0)
     oom_type = getattr(torch.cuda, "OutOfMemoryError", RuntimeError)
     model._fail_next = oom_type("CUDA out of memory")
     with pytest.raises(LabOOMError) as info:
         _collect(engine, _valid_request(max_new_tokens=1))
-    assert cleared == [True]
+    assert "cache" in cleared
+    assert "gc" in cleared
+    assert engine.terminal_status == "error_memory"
     assert info.value.error_code == "memory"
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__ is True
     assert str(info.value) == OPERATIONAL_ERROR_MESSAGES["memory"]
     assert "hello" not in str(info.value)
+    recovered = _collect(engine, _valid_request(max_new_tokens=1, seed=6))
+    assert recovered[0].step == 1
+
+
+def test_stream_discards_step_tensors_before_yield() -> None:
+    from refusal_direction_replication import qwen_lab_runtime as module
+
+    source = inspect.getsource(module.InterventionEngine._stream)
+    assert "del outputs" in source
+    assert "del logits" in source
 
 
 def _force_token(model: FakeCausalLM, token_id: int) -> None:

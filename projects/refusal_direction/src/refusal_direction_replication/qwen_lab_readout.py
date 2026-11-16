@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -23,6 +23,9 @@ PARITY_RANK_ATOL = 0.0
 
 
 DecodeToken = Callable[[int], str]
+LensContract = Literal["qwen", "fixture"]
+LENS_CONTRACT_QWEN = "qwen"
+LENS_CONTRACT_FIXTURE = "fixture"
 
 
 def verify_frozen_lens_hash(path: str | Path, expected_lens_sha256: str) -> None:
@@ -106,14 +109,22 @@ class LiveJLensReadout:
         decode_token: DecodeToken,
         lens_path: str | None = None,
         expected_lens_sha256: str | None = FROZEN_LENS_SHA256,
-        _skip_qwen_contract: bool = False,
+        lens_contract: LensContract = LENS_CONTRACT_QWEN,
     ) -> None:
-        if not _skip_qwen_contract:
+        if lens_contract not in {LENS_CONTRACT_QWEN, LENS_CONTRACT_FIXTURE}:
+            raise ValueError(f"unknown lens_contract: {lens_contract!r}")
+        self.lens_contract = lens_contract
+        self.lens_path = None if lens_path is None else str(lens_path)
+        self.lens_validated = False
+        if lens_contract == LENS_CONTRACT_QWEN:
+            if self.lens_path is None:
+                raise ValueError("lens_path is required for Qwen lab lens validation")
             validate_qwen_lab_lens(
                 lens,
-                lens_path=lens_path,
+                lens_path=self.lens_path,
                 expected_lens_sha256=expected_lens_sha256,
             )
+            self.lens_validated = True
         self._lens = lens
         self._bound_model = bound_model
         self._decode_token = decode_token
