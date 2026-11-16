@@ -305,6 +305,7 @@ def gemma_module_lists(model) -> tuple[list, list, list]:
 
 GEMMA_PROFILE = "gemma_2b.json"
 JLENS_PROFILE = "qwen25_coder_7b_jlens.json"
+CODE_EVAL_PROFILE = "qwen25_coder_7b_code_eval.json"
 REQUIRED_NON_GEMMA_FIELDS = (
     "results_dir",
     "artifacts_dir",
@@ -322,7 +323,7 @@ REQUIRED_NON_GEMMA_FIELDS = (
 
 
 def validate_profile_config(config: dict, *, profile: str) -> None:
-    if profile in {GEMMA_PROFILE, JLENS_PROFILE}:
+    if profile in {GEMMA_PROFILE, JLENS_PROFILE, CODE_EVAL_PROFILE}:
         return
     missing = [
         field
