@@ -95,6 +95,7 @@ def test_escape_token_display_reveals_whitespace_and_controls() -> None:
         ("top_k", MAX_TOP_K + 1, "top_k"),
         ("temperature", float("nan"), "temperature"),
         ("temperature", float("inf"), "temperature"),
+        ("temperature", -0.1, "temperature"),
         ("top_p", 0.0, "top_p"),
         ("top_p", 1.01, "top_p"),
         ("max_new_tokens", 0, "max_new_tokens"),

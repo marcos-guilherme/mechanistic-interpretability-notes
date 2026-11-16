@@ -109,8 +109,8 @@ def validate_generation_request(request: GenerationRequest) -> None:
     if not MIN_TOP_K <= int(request.top_k) <= MAX_TOP_K:
         raise ValueError(f"top_k must be between {MIN_TOP_K} and {MAX_TOP_K}")
     temperature = float(request.temperature)
-    if not math.isfinite(temperature):
-        raise ValueError("temperature must be finite")
+    if not math.isfinite(temperature) or temperature < 0.0:
+        raise ValueError("temperature must be finite and non-negative")
     top_p = float(request.top_p)
     if not 0.0 < top_p <= 1.0:
         raise ValueError("top_p must be greater than 0 and at most 1")
