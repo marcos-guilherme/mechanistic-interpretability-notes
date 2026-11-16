@@ -1072,15 +1072,27 @@ def _write_terminal_files(
         **dict(evaluation),
     }
     atomic_write_json(results_dir / EVALUATION_FILENAME, payload)
+    completed_stages = [
+        stage
+        for stage in CODE_EVAL_STAGES
+        if _load_stage(
+            results_dir / STAGE_FILES[stage],
+            run_id=str(provenance["run_id"]),
+            implementation_commit=str(provenance["implementation_commit"]),
+            config=config,
+            source_hashes=provenance["source_artifact_hashes"],
+        )
+        is not None
+    ]
     _write_stage(
         results_dir / MANIFEST_FILENAME,
         stage="manifest",
         config=config,
         results={
             "status": payload["status"],
-            "completed_stages": list(CODE_EVAL_STAGES),
+            "completed_stages": completed_stages,
             "result_files": [
-                *[STAGE_FILES[stage] for stage in CODE_EVAL_STAGES],
+                *[STAGE_FILES[stage] for stage in completed_stages],
                 EVALUATION_FILENAME,
                 MANIFEST_FILENAME,
             ],
@@ -1170,6 +1182,26 @@ def run_qwen_code_eval(
             raise ValueError("stale code-eval terminal implementation_commit")
         if terminal.get("source_artifact_hashes") != source["source_artifact_hashes"]:
             raise ValueError("stale code-eval terminal source hashes")
+        if terminal.get("status") == STATUS_PASS:
+            _reconcile_terminal_status(store, terminal)
+            return terminal
+        terminal_path.unlink()
+        (results_dir / MANIFEST_FILENAME).unlink(missing_ok=True)
+    finalize_checkpoint = _load_stage(
+        results_dir / STAGE_FILES["finalize"],
+        run_id=resolved_run,
+        implementation_commit=commit,
+        config=config,
+        source_hashes=source["source_artifact_hashes"],
+    )
+    if finalize_checkpoint is not None:
+        _write_terminal_files(
+            results_dir=results_dir,
+            config=config,
+            provenance=provenance,
+            evaluation=finalize_checkpoint["results"],
+        )
+        terminal = _read_json(terminal_path)
         _reconcile_terminal_status(store, terminal)
         return terminal
     runner = stage_runner or _default_stage_runner

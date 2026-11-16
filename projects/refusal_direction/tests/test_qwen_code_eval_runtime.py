@@ -51,6 +51,44 @@ def _config(root: Path) -> None:
     )
 
 
+def _a100_probe() -> dict[str, object]:
+    return {
+        "cuda_available": True,
+        "device_name": "NVIDIA A100",
+        "total_memory_bytes": 40_000_000_000,
+    }
+
+
+def _seed_runtime_sources(root: Path) -> None:
+    _config(root)
+    direction = root / "artifacts/qwen25_coder_7b/selected_direction.pt"
+    lens = root / "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
+    direction.parent.mkdir(parents=True)
+    lens.parent.mkdir(parents=True)
+    direction.write_bytes(b"direction")
+    lens.write_bytes(b"lens")
+    dose = root / "results/qwen25_coder_7b_dose/dose_followup_evaluation.json"
+    jlens = root / "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
+    dose.parent.mkdir(parents=True)
+    jlens.parent.mkdir(parents=True)
+    atomic_write_json(
+        dose,
+        {
+            "status": "pass",
+            "run_id": "dose-run",
+            "selected_pair": {"ablation": 0.2, "addition": 0.5},
+        },
+    )
+    atomic_write_json(
+        jlens,
+        {
+            "status": "pass",
+            "run_id": "jlens-run",
+            "jlens_upstream_commit": JLENS_REVISION,
+        },
+    )
+
+
 def test_source_context_requires_passing_dose_lens_and_frozen_coefficients(
     tmp_path: Path,
 ) -> None:
@@ -256,6 +294,103 @@ def test_stage_dimensions_cover_every_dataset_condition() -> None:
     assert stage_total_units("evaluate") == len(CONDITIONS) * 32
     assert stage_total_units("readout") == len(DATASETS) * len(CONDITIONS) * 32
     assert stage_total_units("finalize") == 1
+
+
+def test_operational_error_resumes_and_manifest_lists_only_valid_files(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_code_eval_runtime import (
+        run_qwen_code_eval,
+    )
+
+    _seed_runtime_sources(tmp_path)
+    calls: list[str] = []
+
+    def failing_runner(stage: str, **_kwargs):
+        calls.append(stage)
+        if stage == "evaluate":
+            raise RuntimeError("transient evaluation failure")
+        return {"stage": stage}
+
+    with pytest.raises(RuntimeError, match="transient"):
+        run_qwen_code_eval(
+            tmp_path,
+            run_id="resume-run",
+            implementation_commit="a" * 40,
+            stage_runner=failing_runner,
+            gpu_probe=_a100_probe,
+        )
+    assert calls == ["prepare", "generate", "evaluate"]
+    manifest = json.loads(
+        (
+            tmp_path
+            / "results/qwen25_coder_7b_code_eval/execution_manifest.json"
+        ).read_text()
+    )["results"]
+    assert manifest["completed_stages"] == ["prepare", "generate"]
+    assert manifest["result_files"] == [
+        "00_prepare.json",
+        "01_generate.json",
+        "code_eval_evaluation.json",
+        "execution_manifest.json",
+    ]
+
+    calls.clear()
+
+    def passing_runner(stage: str, **_kwargs):
+        calls.append(stage)
+        if stage == "finalize":
+            return {"status": "pass", "human_review_status": "pending"}
+        return {"stage": stage}
+
+    terminal = run_qwen_code_eval(
+        tmp_path,
+        run_id="resume-run",
+        implementation_commit="a" * 40,
+        stage_runner=passing_runner,
+        gpu_probe=_a100_probe,
+    )
+    assert calls == ["evaluate", "readout", "finalize"]
+    assert terminal["status"] == "pass"
+
+
+def test_finalize_checkpoint_reconstructs_missing_terminal_without_rerun(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_code_eval_runtime import (
+        run_qwen_code_eval,
+    )
+
+    _seed_runtime_sources(tmp_path)
+
+    def runner(stage: str, **_kwargs):
+        if stage == "finalize":
+            return {"status": "pass", "human_review_status": "pending"}
+        return {"stage": stage}
+
+    run_qwen_code_eval(
+        tmp_path,
+        run_id="crash-window-run",
+        implementation_commit="a" * 40,
+        stage_runner=runner,
+        gpu_probe=_a100_probe,
+    )
+    results = tmp_path / "results/qwen25_coder_7b_code_eval"
+    (results / "code_eval_evaluation.json").unlink()
+    (results / "execution_manifest.json").unlink()
+
+    def must_not_run(stage: str, **_kwargs):
+        raise AssertionError(f"unexpected rerun of {stage}")
+
+    terminal = run_qwen_code_eval(
+        tmp_path,
+        run_id="crash-window-run",
+        implementation_commit="a" * 40,
+        stage_runner=must_not_run,
+        gpu_probe=_a100_probe,
+    )
+    assert terminal["status"] == "pass"
+    assert (results / "execution_manifest.json").is_file()
 
 
 def test_readout_checkpoint_requires_every_position_and_layer(tmp_path: Path) -> None:
