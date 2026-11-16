@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +31,9 @@ from .qwen_pilot_validate import (
     _model_ok,
     _run_id_ok,
     _walk_contains_leak,
+    validate_qwen_pilot,
 )
-from .run_progress import STATUS_FILENAME
+from .run_progress import EVENTS_FILENAME, STATUS_FILENAME
 
 DOSE_PROFILE = "qwen25_coder_7b_dose.json"
 PASS_FILES = (
@@ -48,6 +50,26 @@ NO_DOSE_FILES = (
     "02_dose_selection.json",
     "dose_followup_evaluation.json",
     "execution_manifest.json",
+)
+CHECKPOINT_NAME_RE = re.compile(r"^checkpoint_coeff_[0-9]+(?:\.[0-9]+)?\.json$")
+REQUIRED_PROVENANCE_FIELDS = (
+    "run_id",
+    "implementation_commit",
+    "model_name",
+    "requested_model_revision",
+    "resolved_model_revision",
+    "source_pilot_run_id",
+    "source_pilot_implementation_commit",
+    "source_artifact_hashes",
+)
+REQUIRED_EVALUATION_FIELDS = (
+    "run_id",
+    "implementation_commit",
+    "model_revision",
+    "source_pilot_run_id",
+    "source_pilot_implementation_commit",
+    "source_artifact_hashes",
+    "status",
 )
 
 
@@ -126,9 +148,15 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         "gate_calculations_consistent": True,
         "no_raw_prompt_or_generation_leakage": True,
         "status_matches_result": True,
+        "status_matches_gate": True,
         "manifest_agrees": True,
         "single_run_id": True,
         "code_provenance": True,
+        "required_provenance": True,
+        "events_present": True,
+        "selected_pair_consistent": True,
+        "random_control_uses_ablation_coefficient": True,
+        "original_pilot_validator": True,
     }
     if not evaluation_path.is_file() or not status_path.is_file():
         return checks
@@ -237,24 +265,59 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         checks["disjoint_from_original"] = False
 
     grid = [float(item) for item in config.get("dose_grid") or []]
-    checkpoint_paths = [
-        results_dir / coefficient_checkpoint_name(coefficient) for coefficient in grid
+    expected_checkpoint_names = [
+        coefficient_checkpoint_name(coefficient) for coefficient in grid
     ]
-    checks["complete_configured_grid"] = bool(grid) and all(
-        path.is_file() for path in checkpoint_paths
+    found_checkpoint_names = sorted(
+        path.name
+        for path in results_dir.glob("checkpoint_coeff_*.json")
+        if path.is_file() and CHECKPOINT_NAME_RE.fullmatch(path.name)
+    )
+    checks["complete_configured_grid"] = bool(grid) and found_checkpoint_names == sorted(
+        expected_checkpoint_names
     )
 
+    ablation_curve: list[dict[str, float]] = []
+    addition_curve: list[dict[str, float]] = []
+    if checks["complete_configured_grid"]:
+        try:
+            for coefficient in grid:
+                checkpoint = _load(results_dir / coefficient_checkpoint_name(coefficient))
+                results = checkpoint.get("results") or {}
+                if float(results["coefficient"]) != float(coefficient):
+                    checks["complete_configured_grid"] = False
+                    break
+                ablation_curve.append(
+                    {
+                        "coefficient": float(results["coefficient"]),
+                        "harmful_refusal_drop": float(results["harmful_refusal_drop"]),
+                        "harmless_kl": float(results["harmless_kl"]),
+                    }
+                )
+                addition_curve.append(
+                    {
+                        "coefficient": float(results["coefficient"]),
+                        "harmless_refusal_increase": float(
+                            results["harmless_refusal_increase"]
+                        ),
+                    }
+                )
+        except (KeyError, TypeError, ValueError):
+            checks["complete_configured_grid"] = False
+
     selection_path = results_dir / "02_dose_selection.json"
+    selection_pair = None
     if selection_path.is_file():
         selection = _load(selection_path)
         results = selection.get("results") or {}
+        selection_pair = results.get("selected_pair")
         dumped = str(results)
         if "confirmation" in dumped:
             checks["confirmation_does_not_influence_selection"] = False
         try:
             recomputed = select_dose_coefficients(
-                ablation_curve=results.get("ablation_curve") or [],
-                addition_curve=results.get("addition_curve") or [],
+                ablation_curve=ablation_curve,
+                addition_curve=addition_curve,
                 min_harmful_ablation_drop=float(
                     config["causal_gate"]["min_harmful_ablation_drop"]
                 ),
@@ -275,9 +338,11 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
             checks["selector_reproducible_from_curve"] = False
 
     confirmation_path = results_dir / "03_dose_confirmation.json"
+    confirmation_pair = None
     if confirmation_path.is_file() and evaluation.get("causal_gate") is not None:
         confirmation = _load(confirmation_path)
         conf_results = confirmation.get("results") or {}
+        confirmation_pair = conf_results.get("selected_pair")
         try:
             recomputed_gate = evaluate_causal_gate(
                 baseline_harmful_refusal_rate=float(
@@ -300,15 +365,52 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
             )
             if not _checks_match(evaluation["causal_gate"], recomputed_gate):
                 checks["gate_calculations_consistent"] = False
+            stored_passed = bool(evaluation["causal_gate"].get("passed"))
             expected_status = (
                 STATUS_PASS if recomputed_gate.passed else STATUS_CAUSAL_GATE_FAILED
             )
-            if status == STATUS_PASS and expected_status != STATUS_PASS:
-                checks["gate_calculations_consistent"] = False
+            if status == STATUS_PASS:
+                checks["status_matches_gate"] = (
+                    stored_passed
+                    and recomputed_gate.passed
+                    and expected_status == STATUS_PASS
+                )
+            elif status == STATUS_CAUSAL_GATE_FAILED:
+                checks["status_matches_gate"] = (
+                    (not stored_passed)
+                    and (not recomputed_gate.passed)
+                    and expected_status == STATUS_CAUSAL_GATE_FAILED
+                )
+            else:
+                checks["status_matches_gate"] = False
+            ablation_coefficient = float((confirmation_pair or {}).get("ablation", -1))
+            random_coefficient = (conf_results.get("random_control") or {}).get(
+                "coefficient"
+            )
+            checks["random_control_uses_ablation_coefficient"] = (
+                random_coefficient is not None
+                and float(random_coefficient) == ablation_coefficient
+            )
         except (KeyError, TypeError, ValueError):
             checks["gate_calculations_consistent"] = False
+            checks["status_matches_gate"] = False
+            checks["random_control_uses_ablation_coefficient"] = False
     elif status in {STATUS_PASS, STATUS_CAUSAL_GATE_FAILED}:
         checks["gate_calculations_consistent"] = False
+        checks["status_matches_gate"] = False
+
+    evaluation_pair = evaluation.get("selected_pair")
+    pairs = [item for item in (selection_pair, confirmation_pair, evaluation_pair) if item]
+    if status == STATUS_NO_DOSE_QUALIFIED:
+        checks["selected_pair_consistent"] = (
+            selection_pair is None and evaluation_pair is None
+        )
+    elif pairs:
+        checks["selected_pair_consistent"] = all(item == pairs[0] for item in pairs)
+        if confirmation_path.is_file() and (
+            confirmation_pair is None or evaluation_pair is None or selection_pair is None
+        ):
+            checks["selected_pair_consistent"] = False
 
     run_ids: set[str] = set()
     missing_run_id = not _run_id_ok(evaluation.get("run_id"))
@@ -351,5 +453,30 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         checks["manifest_agrees"] = manifest_status == status
     else:
         checks["manifest_agrees"] = status == STATUS_OPERATIONAL_ERROR
+
+    events_path = artifacts_dir / EVENTS_FILENAME
+    checks["events_present"] = events_path.is_file() and bool(
+        events_path.read_text(encoding="utf-8").strip()
+    )
+
+    def _missing(value: object) -> bool:
+        return value is None or value == ""
+
+    for payload in payloads:
+        provenance = payload.get("provenance") or {}
+        if provenance and any(
+            _missing(provenance.get(field)) for field in REQUIRED_PROVENANCE_FIELDS
+        ):
+            checks["required_provenance"] = False
+        if "source_artifact_hashes" in payload and "status" in payload:
+            if any(_missing(payload.get(field)) for field in REQUIRED_EVALUATION_FIELDS):
+                checks["required_provenance"] = False
+
+    original_status = root / "artifacts" / "qwen25_coder_7b" / STATUS_FILENAME
+    original_checks = validate_qwen_pilot(root)
+    if original_status.is_file():
+        checks["original_pilot_validator"] = all(original_checks.values())
+    else:
+        checks["original_pilot_validator"] = True
 
     return checks

@@ -103,6 +103,10 @@ def write_source_pilot(root: Path, *, layer: int = 18, offset: int = -1) -> None
     artifacts_dir.mkdir(parents=True)
     example_ids, content_hashes = _complete_usage()
     write_artifact(
+        results_dir / "00_preflight.json",
+        _envelope(experiment="preflight", results={"n_layers": 28}, config=config),
+    )
+    write_artifact(
         results_dir / "01_baseline.json",
         _envelope(
             experiment="baseline",
@@ -110,6 +114,14 @@ def write_source_pilot(root: Path, *, layer: int = 18, offset: int = -1) -> None
                 "example_ids": example_ids,
                 "content_hashes": content_hashes,
             },
+            config=config,
+        ),
+    )
+    write_artifact(
+        results_dir / "02_candidates.json",
+        _envelope(
+            experiment="extract_candidate_directions",
+            results={"candidate_count": 28},
             config=config,
         ),
     )
@@ -135,6 +147,18 @@ def write_source_pilot(root: Path, *, layer: int = 18, offset: int = -1) -> None
             config=config,
         ),
     )
+    write_artifact(
+        results_dir / "final_evaluation.json",
+        _envelope(experiment="final_evaluation", results={}, config=config),
+    )
+    write_artifact(
+        results_dir / "execution_manifest.json",
+        _envelope(
+            experiment="execution_manifest",
+            results={"status": STATUS_CAUSAL_GATE_FAILED},
+            config=config,
+        ),
+    )
     _write_json(
         results_dir / "pilot_evaluation.json",
         {
@@ -142,6 +166,8 @@ def write_source_pilot(root: Path, *, layer: int = 18, offset: int = -1) -> None
             "operational_success": True,
             "run_id": PILOT_RUN,
             "implementation_commit": PILOT_COMMIT,
+            "model_name": QWEN_MODEL,
+            "model_revision": QWEN_REVISION,
         },
     )
     save_direction(
@@ -637,3 +663,293 @@ def test_fake_model_measure_threads_fractional_ablation_coefficient(
     assert "leftover harmful prompt" not in dumped
     assert "generation" not in (baseline.get("results") or {})
     assert "text" not in (baseline.get("results") or {})
+
+
+def test_confirmation_resumes_exactly_once_from_validated_03(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    results_dir = tmp_path / "results" / "qwen25_coder_7b_dose"
+    evaluation_path = results_dir / "dose_followup_evaluation.json"
+    evaluation_path.unlink()
+    second = ScriptedMetrics()
+    result = run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=second)
+    assert result["status"] == STATUS_PASS
+    assert evaluation_path.is_file()
+    assert not any(item[2] == "dose_confirmation" for item in second.calls)
+    assert not any(
+        item[0].startswith("ablation") or item[0].startswith("baseline")
+        for item in second.calls
+    )
+
+
+def test_skip_prepare_requires_valid_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    results_dir = tmp_path / "results" / "qwen25_coder_7b_dose"
+    (results_dir / "dose_followup_evaluation.json").unlink()
+    (results_dir / "00_dose_prepare.json").unlink()
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    assert (results_dir / "00_dose_prepare.json").is_file()
+
+
+def test_skip_sweep_requires_selection_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    results_dir = tmp_path / "results" / "qwen25_coder_7b_dose"
+    (results_dir / "dose_followup_evaluation.json").unlink()
+    (results_dir / "02_dose_selection.json").unlink()
+    (results_dir / "03_dose_confirmation.json").unlink()
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    assert (results_dir / "02_dose_selection.json").is_file()
+
+
+def test_checkpoint_rejects_wrong_implementation_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    results_dir = tmp_path / "results" / "qwen25_coder_7b_dose"
+    path = results_dir / coefficient_checkpoint_name(0.35)
+    payload = _read(path)
+    payload["provenance"]["implementation_commit"] = "b" * 40
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    (results_dir / "dose_followup_evaluation.json").unlink()
+    (results_dir / "02_dose_selection.json").unlink()
+    (results_dir / "03_dose_confirmation.json").unlink()
+    with pytest.raises(ValueError, match="stale"):
+        run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+
+
+def test_checkpoint_rejects_mismatched_coefficient(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    results_dir = tmp_path / "results" / "qwen25_coder_7b_dose"
+    path = results_dir / coefficient_checkpoint_name(0.35)
+    payload = _read(path)
+    payload["results"]["coefficient"] = 0.75
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    (results_dir / "dose_followup_evaluation.json").unlink()
+    (results_dir / "02_dose_selection.json").unlink()
+    (results_dir / "03_dose_confirmation.json").unlink()
+    with pytest.raises(ValueError, match="coefficient"):
+        run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+
+
+def test_source_hashes_include_pilot_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    prepare = _read(tmp_path / "results" / "qwen25_coder_7b_dose" / "00_dose_prepare.json")
+    hashes = prepare["provenance"]["source_artifact_hashes"]
+    assert hashes["pilot_evaluation"] == sha256_file(
+        tmp_path / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+    )
+
+
+def test_source_envelopes_must_share_run_id_and_commit(tmp_path: Path) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    config = load_config(tmp_path, profile="qwen25_coder_7b.json")
+    write_artifact(
+        tmp_path / "results" / "qwen25_coder_7b" / "02_candidates.json",
+        ArtifactEnvelope(
+            experiment="extract_candidate_directions",
+            config=config,
+            results={"candidate_count": 28},
+            provenance={
+                "model_name": QWEN_MODEL,
+                "requested_model_revision": QWEN_REVISION,
+                "resolved_model_revision": QWEN_REVISION,
+                "upstream_commit": UPSTREAM_COMMIT,
+                "run_id": "other-run",
+                "implementation_commit": PILOT_COMMIT,
+                "runtime": {"device": "cuda", "dtype": "bfloat16"},
+            },
+        ),
+    )
+    with pytest.raises(ValueError, match="source"):
+        run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+
+
+def test_load_model_rejects_mismatched_commit_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_qwen_pilot import ChatTokenizer, FakeQwenModel
+
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+
+    def load_model(_config):
+        return FakeQwenModel(revision="deadbeef" * 5), ChatTokenizer(), torch.bfloat16
+
+    with pytest.raises(ValueError, match="commit_hash|revision"):
+        run_qwen_dose(tmp_path, run_id=DOSE_RUN, load_model=load_model)
+
+
+def test_single_release_boundary_per_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    releases: list[str] = []
+
+    def release() -> None:
+        releases.append("released")
+
+    run_qwen_dose(
+        tmp_path,
+        run_id=DOSE_RUN,
+        measure=ScriptedMetrics(),
+        release_resources=release,
+    )
+    assert len(releases) == 3
+
+
+def test_seed_everything_runs_before_measurements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    order: list[str] = []
+
+    def fake_seed(seed: int) -> None:
+        order.append(f"seed:{seed}")
+
+    monkeypatch.setattr(
+        "refusal_direction_replication.qwen_dose_runtime.seed_everything",
+        fake_seed,
+    )
+    inner = ScriptedMetrics()
+
+    def measure(**kwargs):
+        order.append("measure")
+        return inner(**kwargs)
+
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=measure)
+    assert order[0].startswith("seed:")
+    assert "measure" in order
+    assert order.index(order[0]) < order.index("measure")
+
+
+def test_atomic_json_write_uses_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from refusal_direction_replication.artifacts import atomic_write_json
+
+    replaced: list[tuple[str, str]] = []
+    real_replace = __import__("os").replace
+
+    def tracking_replace(src, dst):
+        replaced.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("os.replace", tracking_replace)
+    path = tmp_path / "compact.json"
+    atomic_write_json(path, {"ok": True})
+    assert replaced
+    assert _read(path) == {"ok": True}
+
+
+def test_fake_model_actually_executes_registered_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_qwen_pilot import ChatTokenizer, FakeQwenModel
+
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    invocations = {"count": 0}
+
+    class CountingModule(_HookModule):
+        def register_forward_pre_hook(self, hook):
+            original = hook
+
+            def wrapped(module, inputs):
+                invocations["count"] += 1
+                return original(module, inputs)
+
+            self._pre = getattr(self, "_pre", [])
+            self._pre.append(wrapped)
+
+            def remove() -> None:
+                if wrapped in self._pre:
+                    self._pre.remove(wrapped)
+
+            return SimpleNamespace(remove=remove)
+
+        def register_forward_hook(self, hook):
+            original = hook
+            self._fwd = getattr(self, "_fwd", [])
+
+            def wrapped(module, inputs, output):
+                invocations["count"] += 1
+                return original(module, inputs, output)
+
+            self._fwd.append(wrapped)
+
+            def remove() -> None:
+                if wrapped in self._fwd:
+                    self._fwd.remove(wrapped)
+
+            return SimpleNamespace(remove=remove)
+
+    class ExecutingFake(FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__(hidden_size=8)
+            layers = []
+            for _ in range(28):
+                block = CountingModule()
+                block.self_attn = CountingModule()
+                block.mlp = CountingModule()
+                layers.append(block)
+            self.model = SimpleNamespace(layers=layers)
+            self._param = torch.nn.Parameter(torch.zeros(8, dtype=torch.bfloat16))
+
+        def __call__(self, input_ids=None, attention_mask=None, **kwargs):
+            batch, seq = input_ids.shape
+            hidden = torch.ones(batch, seq, 8, dtype=torch.float32)
+            for block in self.model.layers:
+                for hook in getattr(block, "_pre", []):
+                    result = hook(block, (hidden,))
+                    if result is not None:
+                        hidden = result[0] if isinstance(result, tuple) else result
+            logits = hidden.sum(-1, keepdim=True).expand(batch, seq, 32)
+            return SimpleNamespace(logits=logits)
+
+    def load_model(_config):
+        return ExecutingFake(), ChatTokenizer(), torch.bfloat16
+
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, load_model=load_model)
+    assert invocations["count"] > 0

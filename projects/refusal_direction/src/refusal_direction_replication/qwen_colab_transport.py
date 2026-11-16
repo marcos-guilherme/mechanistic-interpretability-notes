@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import tarfile
 import tempfile
 from collections.abc import Callable
@@ -34,17 +35,21 @@ DOSE_FETCH_ALLOWLIST = frozenset(
     {
         f"{DOSE_ARTIFACTS_DIR}/status.json",
         f"{DOSE_ARTIFACTS_DIR}/events.jsonl",
+        f"{DOSE_RESULTS_DIR}/00_dose_prepare.json",
+        f"{DOSE_RESULTS_DIR}/01_dose_baseline.json",
+        f"{DOSE_RESULTS_DIR}/02_dose_selection.json",
+        f"{DOSE_RESULTS_DIR}/03_dose_confirmation.json",
+        f"{DOSE_RESULTS_DIR}/dose_followup_evaluation.json",
+        f"{DOSE_RESULTS_DIR}/execution_manifest.json",
     }
 )
+DOSE_TENSOR_ALLOWLIST = frozenset()
 
 RESULT_JSON_PATTERN = re.compile(
     r"^results/qwen25_coder_7b/[^/]+\.json$"
 )
-DOSE_RESULT_JSON_PATTERN = re.compile(
-    r"^results/qwen25_coder_7b_dose/[^/]+\.json$"
-)
-DOSE_CHECKPOINT_TENSOR_PATTERN = re.compile(
-    r"^artifacts/qwen25_coder_7b_dose/[^/]+\.pt$"
+DOSE_CHECKPOINT_JSON_PATTERN = re.compile(
+    r"^results/qwen25_coder_7b_dose/checkpoint_coeff_[0-9]+(?:\.[0-9]+)?\.json$"
 )
 
 MAX_MEMBER_BYTES = 2 * 1024**3
@@ -96,6 +101,21 @@ def is_dose_unsafe_member_name(name: str) -> bool:
     return False
 
 
+def path_is_link_or_junction(path: Path) -> bool:
+    if not os.path.lexists(path):
+        return False
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        pass
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+
 def is_allowed_dose_fetch_member(name: str) -> bool:
     try:
         normalized = normalize_member_name(name)
@@ -105,9 +125,9 @@ def is_allowed_dose_fetch_member(name: str) -> bool:
         return False
     if normalized in DOSE_FETCH_ALLOWLIST:
         return True
-    if DOSE_RESULT_JSON_PATTERN.fullmatch(normalized):
+    if normalized in DOSE_TENSOR_ALLOWLIST:
         return True
-    return bool(DOSE_CHECKPOINT_TENSOR_PATTERN.fullmatch(normalized))
+    return bool(DOSE_CHECKPOINT_JSON_PATTERN.fullmatch(normalized))
 
 
 def collect_qwen_pack_entries(root: Path) -> list[Path]:
@@ -132,20 +152,22 @@ def pack_qwen_results(root: Path, archive: Path) -> None:
 
 def collect_qwen_dose_pack_entries(root: Path) -> list[Path]:
     entries: list[Path] = []
+    candidates: list[Path] = []
     results_dir = root / "results" / "qwen25_coder_7b_dose"
     if results_dir.is_dir():
-        for path in sorted(results_dir.glob("*.json")):
-            if path.is_file() and not path.is_symlink():
-                entries.append(path)
+        candidates.extend(sorted(results_dir.glob("*.json")))
     artifacts_dir = root / "artifacts" / "qwen25_coder_7b_dose"
     if artifacts_dir.is_dir():
-        for name in ("status.json", "events.jsonl"):
-            path = artifacts_dir / name
-            if path.is_file() and not path.is_symlink():
-                entries.append(path)
-        for path in sorted(artifacts_dir.glob("*.pt")):
-            if path.is_file() and not path.is_symlink():
-                entries.append(path)
+        candidates.extend(
+            artifacts_dir / name for name in ("status.json", "events.jsonl")
+        )
+        candidates.extend(sorted(artifacts_dir.glob("*.pt")))
+    for path in candidates:
+        if not path.is_file() or path.is_symlink() or path_is_link_or_junction(path):
+            continue
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        if is_allowed_dose_fetch_member(relative):
+            entries.append(path)
     return entries
 
 
@@ -298,6 +320,13 @@ def _extract_allowlisted_archive(
                 relative = normalize_member_name(member.name)
                 target = project / relative
                 source = staging / relative
+                current = project
+                for part in Path(relative).parts:
+                    current = current / part
+                    if path_is_link_or_junction(current):
+                        raise ValueError(
+                            f"result destination is a symlink or junction: {current}"
+                        )
                 backup: Path | None = None
                 had_original = target.exists()
                 if had_original:

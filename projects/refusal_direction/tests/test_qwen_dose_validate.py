@@ -244,6 +244,99 @@ def test_validator_requires_32_examples_per_class(
     assert checks["split_counts"] is False
 
 
+def test_validator_rejects_extra_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    source = root / "results" / "qwen25_coder_7b_dose" / coefficient_checkpoint_name(0.35)
+    extra = root / "results" / "qwen25_coder_7b_dose" / "checkpoint_coeff_9.json"
+    extra.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    checks = validate_qwen_dose(root)
+    assert checks["complete_configured_grid"] is False
+
+
+def test_validator_rebuilds_curves_from_checkpoint_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = (
+        root
+        / "results"
+        / "qwen25_coder_7b_dose"
+        / coefficient_checkpoint_name(0.35)
+    )
+    payload = _read(path)
+    payload["results"]["harmful_refusal_drop"] = 0.01
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["selector_reproducible_from_curve"] is False
+
+
+def test_validator_rejects_selected_pair_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "03_dose_confirmation.json"
+    payload = _read(path)
+    payload["results"]["selected_pair"]["ablation"] = 1.0
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["selected_pair_consistent"] is False
+
+
+def test_validator_rejects_random_control_coefficient_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "03_dose_confirmation.json"
+    payload = _read(path)
+    payload["results"]["random_control"]["coefficient"] = 1.0
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["random_control_uses_ablation_coefficient"] is False
+
+
+def test_validator_status_pass_requires_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "dose_followup_evaluation.json"
+    payload = _read(path)
+    payload["causal_gate"]["passed"] = False
+    payload["status"] = STATUS_PASS
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["status_matches_gate"] is False
+
+
+def test_validator_requires_events_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    (root / "artifacts" / "qwen25_coder_7b_dose" / "events.jsonl").unlink()
+    checks = validate_qwen_dose(root)
+    assert checks["events_present"] is False
+
+
+def test_validator_requires_provenance_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "00_dose_prepare.json"
+    payload = _read(path)
+    payload["provenance"].pop("source_pilot_run_id")
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["required_provenance"] is False
+
+
 def test_original_pilot_validator_still_passes_on_frozen_artifacts() -> None:
     checks = validate_qwen_pilot(ROOT)
     present = (ROOT / "results" / "qwen25_coder_7b" / "pilot_evaluation.json").is_file()

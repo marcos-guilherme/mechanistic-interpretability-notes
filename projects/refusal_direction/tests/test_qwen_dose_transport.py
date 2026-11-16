@@ -44,10 +44,20 @@ def make_json_member(name: str, payload: bytes) -> tarfile.TarInfo:
 
 def test_dose_allowlist_accepts_compact_dose_json_and_status() -> None:
     assert is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/00_dose_prepare.json")
+    assert is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/01_dose_baseline.json")
+    assert is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/02_dose_selection.json")
+    assert is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/03_dose_confirmation.json")
+    assert is_allowed_dose_fetch_member(
+        "results/qwen25_coder_7b_dose/dose_followup_evaluation.json"
+    )
+    assert is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/execution_manifest.json")
     assert is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/checkpoint_coeff_0.1.json")
+    assert is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/checkpoint_coeff_0.35.json")
     assert is_allowed_dose_fetch_member("artifacts/qwen25_coder_7b_dose/status.json")
     assert is_allowed_dose_fetch_member("artifacts/qwen25_coder_7b_dose/events.jsonl")
-    assert is_allowed_dose_fetch_member("artifacts/qwen25_coder_7b_dose/resume.pt")
+    assert not is_allowed_dose_fetch_member("artifacts/qwen25_coder_7b_dose/resume.pt")
+    assert not is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/other.json")
+    assert not is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/notes.txt")
 
 
 def test_dose_allowlist_rejects_original_qwen_gemma_and_generations() -> None:
@@ -59,6 +69,7 @@ def test_dose_allowlist_rejects_original_qwen_gemma_and_generations() -> None:
     )
     assert not is_allowed_dose_fetch_member("results/qwen25_coder_7b_dose/nested/a.json")
     assert not is_allowed_dose_fetch_member("projects/jspace_llama/results/x.json")
+    assert not is_allowed_dose_fetch_member("artifacts/qwen25_coder_7b_dose/selected_direction.pt")
 
 
 def test_dose_pack_contains_only_allowlisted_files(tmp_path: Path) -> None:
@@ -71,6 +82,7 @@ def test_dose_pack_contains_only_allowlisted_files(tmp_path: Path) -> None:
     (artifacts / "status.json").write_text("{}", encoding="utf-8")
     (artifacts / "events.jsonl").write_text("{}\n", encoding="utf-8")
     (artifacts / "resume.pt").write_bytes(b"pt")
+    (results / "other.json").write_text("{}", encoding="utf-8")
     (root / "results" / "qwen25_coder_7b").mkdir(parents=True)
     (root / "results" / "qwen25_coder_7b" / "final_evaluation.json").write_text(
         "pilot", encoding="utf-8"
@@ -82,7 +94,6 @@ def test_dose_pack_contains_only_allowlisted_files(tmp_path: Path) -> None:
         names = sorted(member.name.replace("\\", "/") for member in handle.getmembers())
     assert names == [
         "artifacts/qwen25_coder_7b_dose/events.jsonl",
-        "artifacts/qwen25_coder_7b_dose/resume.pt",
         "artifacts/qwen25_coder_7b_dose/status.json",
         "results/qwen25_coder_7b_dose/00_dose_prepare.json",
     ]
@@ -111,7 +122,7 @@ def test_dose_fetch_rollback_after_install_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
-    existing = project / "results" / "qwen25_coder_7b_dose" / "existing.json"
+    existing = project / "results" / "qwen25_coder_7b_dose" / "00_dose_prepare.json"
     existing.parent.mkdir(parents=True)
     existing.write_text('{"old": true}', encoding="utf-8")
     archive = tmp_path / "pair.tar.gz"
@@ -119,11 +130,11 @@ def test_dose_fetch_rollback_after_install_failure(
     second = b'{"new": 2}'
     with tarfile.open(archive, "w:gz") as handle:
         handle.addfile(
-            make_json_member("results/qwen25_coder_7b_dose/existing.json", first),
+            make_json_member("results/qwen25_coder_7b_dose/00_dose_prepare.json", first),
             io.BytesIO(first),
         )
         handle.addfile(
-            make_json_member("results/qwen25_coder_7b_dose/other.json", second),
+            make_json_member("results/qwen25_coder_7b_dose/01_dose_baseline.json", second),
             io.BytesIO(second),
         )
 
@@ -140,7 +151,32 @@ def test_dose_fetch_rollback_after_install_failure(
     with pytest.raises(OSError, match="simulated"):
         extract_qwen_dose_archive(archive, project)
     assert json.loads(existing.read_text(encoding="utf-8")) == {"old": True}
-    assert not (project / "results" / "qwen25_coder_7b_dose" / "other.json").exists()
+    assert not (
+        project / "results" / "qwen25_coder_7b_dose" / "01_dose_baseline.json"
+    ).exists()
+
+
+def test_dose_fetch_rejects_symlink_destination(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    dest_dir = project / "results" / "qwen25_coder_7b_dose"
+    dest_dir.mkdir(parents=True)
+    victim = tmp_path / "victim.json"
+    victim.write_text('{"keep": true}', encoding="utf-8")
+    target = dest_dir / "00_dose_prepare.json"
+    try:
+        target.symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks are not permitted in this environment")
+    archive = tmp_path / "link-dest.tar.gz"
+    payload = b'{"hijack": true}'
+    with tarfile.open(archive, "w:gz") as handle:
+        handle.addfile(
+            make_json_member("results/qwen25_coder_7b_dose/00_dose_prepare.json", payload),
+            io.BytesIO(payload),
+        )
+    with pytest.raises(ValueError, match="symlink|junction|reparse"):
+        extract_qwen_dose_archive(archive, project)
+    assert json.loads(victim.read_text(encoding="utf-8")) == {"keep": True}
 
 
 def test_collect_dose_pack_entries_skips_missing_and_original(tmp_path: Path) -> None:

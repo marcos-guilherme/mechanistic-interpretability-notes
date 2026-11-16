@@ -40,6 +40,15 @@ ORIGINAL_SPLIT_KEYS = (
     "harmful_test",
     "harmless_test",
 )
+ORIGINAL_SOURCE_ENVELOPES = (
+    "00_preflight.json",
+    "01_baseline.json",
+    "02_candidates.json",
+    "03_interventions.json",
+    "final_evaluation.json",
+    "execution_manifest.json",
+    "pilot_evaluation.json",
+)
 ABLATION_METRIC_FIELDS = (
     "coefficient",
     "harmful_refusal_drop",
@@ -82,12 +91,76 @@ def coefficient_checkpoint_name(coefficient: float) -> str:
     return f"checkpoint_coeff_{format(float(coefficient), 'g')}.json"
 
 
+def source_envelope_identity(payload: Mapping[str, Any]) -> dict[str, str]:
+    provenance = payload.get("provenance") or {}
+    config = payload.get("config") or {}
+    run_id = provenance.get("run_id") or payload.get("run_id")
+    commit = provenance.get("implementation_commit") or payload.get(
+        "implementation_commit"
+    )
+    model_name = (
+        provenance.get("model_name")
+        or config.get("model_name")
+        or payload.get("model_name")
+    )
+    revision = (
+        provenance.get("requested_model_revision")
+        or config.get("model_revision")
+        or payload.get("model_revision")
+    )
+    missing = [
+        name
+        for name, value in (
+            ("run_id", run_id),
+            ("implementation_commit", commit),
+            ("model_name", model_name),
+            ("model_revision", revision),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "source envelope is missing identity fields: " + ", ".join(missing)
+        )
+    return {
+        "run_id": str(run_id),
+        "implementation_commit": str(commit),
+        "model_name": str(model_name),
+        "model_revision": str(revision),
+    }
+
+
+def load_source_envelopes(root: Path) -> dict[str, dict[str, Any]]:
+    results_dir = root / "results" / "qwen25_coder_7b"
+    envelopes: dict[str, dict[str, Any]] = {}
+    identities: list[dict[str, str]] = []
+    for name in ORIGINAL_SOURCE_ENVELOPES:
+        path = results_dir / name
+        if not path.is_file():
+            raise ValueError(f"source envelope missing: {name}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"source envelope is not an object: {name}")
+        envelopes[name] = payload
+        identities.append(source_envelope_identity(payload))
+    first = identities[0]
+    for name, identity in zip(ORIGINAL_SOURCE_ENVELOPES, identities):
+        if identity != first:
+            raise ValueError(
+                f"source envelope {name} does not share run_id/commit/model"
+            )
+    return envelopes
+
+
 def source_artifact_hashes(root: Path, config: Mapping[str, Any]) -> dict[str, str]:
     evidence = config["source_evidence"]
     return {
         "selected_direction": sha256_file(root / config["source_direction"]),
         "baseline": sha256_file(root / evidence["baseline"]),
         "interventions": sha256_file(root / evidence["interventions"]),
+        "pilot_evaluation": sha256_file(
+            root / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
+        ),
     }
 
 

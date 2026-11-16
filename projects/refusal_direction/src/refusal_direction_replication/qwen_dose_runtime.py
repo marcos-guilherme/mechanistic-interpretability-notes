@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .artifacts import ArtifactEnvelope, write_artifact
+from .artifacts import ArtifactEnvelope, atomic_write_json, write_artifact
 from .data import PromptExample, content_hashes_for_examples
 from .directions import CandidateDirection, load_direction
 from .gates import (
@@ -48,11 +48,13 @@ from .qwen_dose import (
     build_dose_evaluation,
     build_dose_splits,
     coefficient_checkpoint_name,
+    load_source_envelopes,
     select_dose_coefficients,
     source_artifact_hashes,
 )
 from .qwen_pilot import resolve_run_id
 from .run_progress import RunProgressStore
+from .runtime import seed_everything
 
 DOSE_STAGES = ("prepare", "sweep", "confirm")
 DOSE_PROFILE = "qwen25_coder_7b_dose.json"
@@ -68,11 +70,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(path, payload)
 
 
 def _dose_provenance(
@@ -116,11 +114,20 @@ def _write_compact(
     return _read_json(path)
 
 
+def _grid_values(value: object) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    return [float(item) for item in value]
+
+
 def load_reusable_artifact(
     path: Path,
     *,
     run_id: str,
     source_hashes: Mapping[str, str],
+    implementation_commit: str | None = None,
+    dose_grid: Sequence[float] | None = None,
+    coefficient: float | None = None,
 ) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -132,21 +139,44 @@ def load_reusable_artifact(
     stored_hashes = provenance.get("source_artifact_hashes")
     if stored_hashes != dict(source_hashes):
         raise ValueError(f"stale source hash in {path.name}")
+    if implementation_commit is not None:
+        stored_commit = provenance.get("implementation_commit")
+        if stored_commit != implementation_commit:
+            raise ValueError(f"stale implementation_commit in {path.name}")
+    if dose_grid is not None:
+        stored_grid = _grid_values((payload.get("config") or {}).get("dose_grid"))
+        if stored_grid != [float(item) for item in dose_grid]:
+            raise ValueError(f"stale dose_grid in {path.name}")
+    if coefficient is not None:
+        stored_coefficient = (payload.get("results") or {}).get("coefficient")
+        if stored_coefficient is None or float(stored_coefficient) != float(
+            coefficient
+        ):
+            raise ValueError(f"coefficient mismatch in {path.name}")
     return payload
 
 
+def _assert_resolved_revision(model, config: Mapping[str, Any]) -> str:
+    resolved = getattr(getattr(model, "config", None), "_commit_hash", None)
+    requested = config["model_revision"]
+    if resolved != requested:
+        raise ValueError(
+            f"resolved commit_hash {resolved} does not match requested revision {requested}"
+        )
+    return str(resolved)
+
+
 def _source_context(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+    envelopes = load_source_envelopes(root)
     evidence = config["source_evidence"]
     baseline_path = root / evidence["baseline"]
     interventions_path = root / evidence["interventions"]
     evaluation_path = root / "results" / "qwen25_coder_7b" / "pilot_evaluation.json"
     direction_path = root / config["source_direction"]
-    if not evaluation_path.is_file():
-        raise ValueError("source pilot evaluation is missing")
-    evaluation = _read_json(evaluation_path)
+    evaluation = envelopes["pilot_evaluation.json"]
     if evaluation.get("status") != STATUS_CAUSAL_GATE_FAILED:
         raise ValueError("source pilot must remain causal_gate_failed")
-    interventions = _read_json(interventions_path)
+    interventions = envelopes["03_interventions.json"]
     selected = (interventions.get("results") or {}).get("selected") or {}
     layer = int(selected.get("layer", -1))
     offset = int(selected.get("position_offset", 0))
@@ -337,6 +367,8 @@ def run_dose_prepare(
         results_dir / "00_dose_prepare.json",
         run_id=run_id,
         source_hashes=source["source_hashes"],
+        implementation_commit=implementation_commit,
+        dose_grid=config.get("dose_grid"),
     )
     if existing is not None:
         return existing
@@ -423,7 +455,7 @@ def run_dose_sweep(
     store: RunProgressStore,
     measure: MeasureFn | None = None,
     load_model=None,
-    release_resources: Callable[[], None] | None = None,
+    resource_holder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = load_config(root, profile=profile)
     results_dir, _artifacts_dir = project_paths(root, config)
@@ -442,10 +474,26 @@ def run_dose_sweep(
     model = None
     tokenizer = None
     bound: MeasureFn | None = measure
+    holder = resource_holder if resource_holder is not None else {}
     try:
+        seed_everything(int(config["seed"]))
         if bound is None:
             loader = load_model or _load_model_for_config
             model, tokenizer, _dtype = loader(config)
+            resolved = _assert_resolved_revision(model, config)
+            holder["model"] = model
+            holder["tokenizer"] = tokenizer
+            provenance = _dose_provenance(
+                config=config,
+                run_id=run_id,
+                implementation_commit=implementation_commit,
+                source_pilot_run_id=source["source_pilot_run_id"],
+                source_pilot_implementation_commit=source[
+                    "source_pilot_implementation_commit"
+                ],
+                source_hashes=source["source_hashes"],
+                resolved_model_revision=resolved,
+            )
             control = random_direction_control(
                 source["direction"].vector,
                 seed=int(config["seed"]) + 1000,
@@ -464,6 +512,8 @@ def run_dose_sweep(
             baseline_path,
             run_id=run_id,
             source_hashes=source["source_hashes"],
+            implementation_commit=implementation_commit,
+            dose_grid=grid,
         )
         if baseline is None:
             harmful_baseline = bound(
@@ -511,6 +561,9 @@ def run_dose_sweep(
                 checkpoint_path,
                 run_id=run_id,
                 source_hashes=source["source_hashes"],
+                implementation_commit=implementation_commit,
+                dose_grid=grid,
+                coefficient=coefficient,
             )
             if checkpoint is None:
                 ablation_harmful = bound(
@@ -638,10 +691,77 @@ def run_dose_sweep(
             return evaluation
         return selection
     finally:
-        releaser = release_resources or (
-            lambda: release_compute_resources(model, tokenizer)
-        )
-        releaser()
+        del model
+        del tokenizer
+        del bound
+
+
+def _evaluation_from_confirmation(
+    confirmation: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any],
+    run_id: str,
+    implementation_commit: str,
+    source: Mapping[str, Any],
+    provenance: dict[str, Any],
+    results_dir: Path,
+    store: RunProgressStore,
+) -> dict[str, Any]:
+    conf_results = confirmation["results"]
+    selected_pair = conf_results["selected_pair"]
+    gate = evaluate_causal_gate(
+        baseline_harmful_refusal_rate=float(
+            conf_results["baseline"]["harmful_refusal_rate"]
+        ),
+        baseline_harmless_refusal_rate=float(
+            conf_results["baseline"]["harmless_refusal_rate"]
+        ),
+        ablation_harmful_refusal_rate=float(
+            conf_results["ablation"]["harmful_refusal_rate"]
+        ),
+        addition_harmless_refusal_rate=float(
+            conf_results["addition"]["harmless_refusal_rate"]
+        ),
+        random_control_harmful_refusal_rate=float(
+            conf_results["random_control"]["harmful_refusal_rate"]
+        ),
+        ablation_harmless_kl=float(conf_results["ablation"]["harmless_kl"]),
+        thresholds=config["causal_gate"],
+    )
+    status = STATUS_PASS if gate.passed else STATUS_CAUSAL_GATE_FAILED
+    evaluation = build_dose_evaluation(
+        status=status,
+        operational_success=True,
+        causal_gate=gate,
+        run_id=run_id,
+        implementation_commit=implementation_commit,
+        source_pilot_run_id=source["source_pilot_run_id"],
+        source_pilot_implementation_commit=source[
+            "source_pilot_implementation_commit"
+        ],
+        source_artifact_hashes=source["source_hashes"],
+        model_revision=str(config["model_revision"]),
+        selected_pair=selected_pair,
+    )
+    _write_evaluation(results_dir, evaluation)
+    _write_manifest(
+        results_dir,
+        config=dict(config),
+        provenance=provenance,
+        completed_stages=["prepare", "sweep", "confirm"],
+        result_files=[
+            "00_dose_prepare.json",
+            "01_dose_baseline.json",
+            "02_dose_selection.json",
+            "03_dose_confirmation.json",
+            "dose_followup_evaluation.json",
+            "execution_manifest.json",
+        ],
+        status=status,
+    )
+    if not gate.passed:
+        store.abort(gate="causal", reason=gate.reason)
+    return evaluation
 
 
 def run_dose_confirm(
@@ -653,7 +773,7 @@ def run_dose_confirm(
     store: RunProgressStore,
     measure: MeasureFn | None = None,
     load_model=None,
-    release_resources: Callable[[], None] | None = None,
+    resource_holder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = load_config(root, profile=profile)
     results_dir, _artifacts_dir = project_paths(root, config)
@@ -666,16 +786,69 @@ def run_dose_confirm(
         source_pilot_implementation_commit=source["source_pilot_implementation_commit"],
         source_hashes=source["source_hashes"],
     )
+    grid = [float(item) for item in config["dose_grid"]]
     selection = load_reusable_artifact(
         results_dir / "02_dose_selection.json",
         run_id=run_id,
         source_hashes=source["source_hashes"],
+        implementation_commit=implementation_commit,
+        dose_grid=grid,
     )
     if selection is None:
         raise ValueError("dose selection artifact is missing")
     selected_pair = selection["results"].get("selected_pair")
     if not selected_pair:
-        raise ValueError("confirmation requires a selected dose pair")
+        evaluation = build_dose_evaluation(
+            status=STATUS_NO_DOSE_QUALIFIED,
+            operational_success=True,
+            run_id=run_id,
+            implementation_commit=implementation_commit,
+            source_pilot_run_id=source["source_pilot_run_id"],
+            source_pilot_implementation_commit=source[
+                "source_pilot_implementation_commit"
+            ],
+            source_artifact_hashes=source["source_hashes"],
+            model_revision=str(config["model_revision"]),
+            selected_pair=None,
+        )
+        _write_evaluation(results_dir, evaluation)
+        _write_manifest(
+            results_dir,
+            config=config,
+            provenance=provenance,
+            completed_stages=["prepare", "sweep"],
+            result_files=[
+                "00_dose_prepare.json",
+                "01_dose_baseline.json",
+                "02_dose_selection.json",
+                "dose_followup_evaluation.json",
+                "execution_manifest.json",
+            ],
+            status=STATUS_NO_DOSE_QUALIFIED,
+        )
+        store.abort(gate="dose", reason="no qualifying dose pair")
+        return evaluation
+    existing_confirmation = load_reusable_artifact(
+        results_dir / "03_dose_confirmation.json",
+        run_id=run_id,
+        source_hashes=source["source_hashes"],
+        implementation_commit=implementation_commit,
+        dose_grid=grid,
+    )
+    if existing_confirmation is not None:
+        stored_pair = (existing_confirmation.get("results") or {}).get("selected_pair")
+        if stored_pair != selected_pair:
+            raise ValueError("stale selected_pair in 03_dose_confirmation.json")
+        return _evaluation_from_confirmation(
+            existing_confirmation,
+            config=config,
+            run_id=run_id,
+            implementation_commit=implementation_commit,
+            source=source,
+            provenance=provenance,
+            results_dir=results_dir,
+            store=store,
+        )
     ablation_coefficient = float(selected_pair["ablation"])
     addition_coefficient = float(selected_pair["addition"])
     splits, _metadata = _rebuild_splits(root, config)
@@ -683,10 +856,26 @@ def run_dose_confirm(
     model = None
     tokenizer = None
     bound: MeasureFn | None = measure
+    holder = resource_holder if resource_holder is not None else {}
     try:
+        seed_everything(int(config["seed"]))
         if bound is None:
             loader = load_model or _load_model_for_config
             model, tokenizer, _dtype = loader(config)
+            resolved = _assert_resolved_revision(model, config)
+            holder["model"] = model
+            holder["tokenizer"] = tokenizer
+            provenance = _dose_provenance(
+                config=config,
+                run_id=run_id,
+                implementation_commit=implementation_commit,
+                source_pilot_run_id=source["source_pilot_run_id"],
+                source_pilot_implementation_commit=source[
+                    "source_pilot_implementation_commit"
+                ],
+                source_hashes=source["source_hashes"],
+                resolved_model_revision=resolved,
+            )
             control = random_direction_control(
                 source["direction"].vector,
                 seed=int(config["seed"]) + 1000,
@@ -769,57 +958,20 @@ def run_dose_confirm(
             },
             provenance=provenance,
         )
-        gate = evaluate_causal_gate(
-            baseline_harmful_refusal_rate=float(harmful_baseline["refusal_rate"]),
-            baseline_harmless_refusal_rate=float(harmless_baseline["refusal_rate"]),
-            ablation_harmful_refusal_rate=float(ablation_harmful["refusal_rate"]),
-            addition_harmless_refusal_rate=float(addition_harmless["refusal_rate"]),
-            random_control_harmful_refusal_rate=float(
-                random_control["refusal_rate"]
-            ),
-            ablation_harmless_kl=float(kl_payload["harmless_kl"]),
-            thresholds=config["causal_gate"],
-        )
-        status = STATUS_PASS if gate.passed else STATUS_CAUSAL_GATE_FAILED
-        evaluation = build_dose_evaluation(
-            status=status,
-            operational_success=True,
-            causal_gate=gate,
+        return _evaluation_from_confirmation(
+            confirmation,
+            config=config,
             run_id=run_id,
             implementation_commit=implementation_commit,
-            source_pilot_run_id=source["source_pilot_run_id"],
-            source_pilot_implementation_commit=source[
-                "source_pilot_implementation_commit"
-            ],
-            source_artifact_hashes=source["source_hashes"],
-            model_revision=str(config["model_revision"]),
-            selected_pair=selected_pair,
-        )
-        _write_evaluation(results_dir, evaluation)
-        _write_manifest(
-            results_dir,
-            config=config,
+            source=source,
             provenance=provenance,
-            completed_stages=["prepare", "sweep", "confirm"],
-            result_files=[
-                "00_dose_prepare.json",
-                "01_dose_baseline.json",
-                "02_dose_selection.json",
-                "03_dose_confirmation.json",
-                "dose_followup_evaluation.json",
-                "execution_manifest.json",
-            ],
-            status=status,
+            results_dir=results_dir,
+            store=store,
         )
-        if not gate.passed:
-            store.abort(gate="causal", reason=gate.reason)
-        del confirmation
-        return evaluation
     finally:
-        releaser = release_resources or (
-            lambda: release_compute_resources(model, tokenizer)
-        )
-        releaser()
+        del model
+        del tokenizer
+        del bound
 
 
 def _existing_terminal_evaluation(
@@ -886,7 +1038,19 @@ def run_qwen_dose(
             return _read_json(fallback)
 
     commit = implementation_commit_hash()
-    releaser = release_resources or release_compute_resources
+    resource_holder: dict[str, Any] = {"model": None, "tokenizer": None}
+
+    def release_loaded() -> None:
+        if release_resources is not None:
+            release_resources()
+        else:
+            release_compute_resources(
+                resource_holder.get("model"),
+                resource_holder.get("tokenizer"),
+            )
+        resource_holder["model"] = None
+        resource_holder["tokenizer"] = None
+
     last: dict[str, Any] | None = None
     grid = list(config["dose_grid"])
 
@@ -907,7 +1071,7 @@ def run_qwen_dose(
             store=store,
             measure=measure,
             load_model=load_model,
-            release_resources=release_resources,
+            resource_holder=resource_holder,
         )
 
     def default_confirm(root_path: Path, **_kwargs) -> dict[str, Any]:
@@ -919,7 +1083,7 @@ def run_qwen_dose(
             store=store,
             measure=measure,
             load_model=load_model,
-            release_resources=release_resources,
+            resource_holder=resource_holder,
         )
 
     runners = stage_runners or {
@@ -929,14 +1093,28 @@ def run_qwen_dose(
     }
 
     for stage in DOSE_STAGES:
-        if store.should_skip_stage(stage):
-            if stage == "prepare":
-                load_reusable_artifact(
-                    results_dir / "00_dose_prepare.json",
-                    run_id=resolved_run_id,
-                    source_hashes=source["source_hashes"],
-                )
-            continue
+        if stage == "prepare":
+            existing = load_reusable_artifact(
+                results_dir / "00_dose_prepare.json",
+                run_id=resolved_run_id,
+                source_hashes=source["source_hashes"],
+                implementation_commit=commit,
+                dose_grid=grid,
+            )
+            if existing is not None:
+                last = existing
+                continue
+        elif stage == "sweep":
+            existing = load_reusable_artifact(
+                results_dir / "02_dose_selection.json",
+                run_id=resolved_run_id,
+                source_hashes=source["source_hashes"],
+                implementation_commit=commit,
+                dose_grid=grid,
+            )
+            if existing is not None:
+                last = existing
+                continue
         try:
             total_units = len(grid) if stage == "sweep" else 1
             store.initialize(stage=stage, total_units=total_units)
@@ -978,7 +1156,7 @@ def run_qwen_dose(
                 pass
             raise
         finally:
-            releaser()
+            release_loaded()
     if last is None:
         fallback = results_dir / "dose_followup_evaluation.json"
         if fallback.is_file():
