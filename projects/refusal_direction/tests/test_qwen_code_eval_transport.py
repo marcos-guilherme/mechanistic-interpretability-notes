@@ -286,7 +286,15 @@ def test_code_eval_fetch_rolls_back_partial_same_identity_install(
     result.parent.mkdir(parents=True)
     raw.parent.mkdir(parents=True)
     result.write_text(json.dumps(_compact_identity("same-run")), encoding="utf-8")
-    raw.write_text("old raw\n", encoding="utf-8")
+    raw_identity = {
+        "run_id": "same-run",
+        "implementation_commit": "a" * 40,
+        "source_artifact_hashes": {"direction": "b" * 64},
+    }
+    raw.write_text(
+        json.dumps({**raw_identity, "response": "old"}) + "\n",
+        encoding="utf-8",
+    )
 
     incoming = tmp_path / "incoming"
     incoming_result = incoming / result.relative_to(destination)
@@ -296,7 +304,10 @@ def test_code_eval_fetch_rolls_back_partial_same_identity_install(
     incoming_result.write_text(
         json.dumps(_compact_identity("same-run"), indent=2), encoding="utf-8"
     )
-    incoming_raw.write_text("new raw\n", encoding="utf-8")
+    incoming_raw.write_text(
+        json.dumps({**raw_identity, "response": "new"}) + "\n",
+        encoding="utf-8",
+    )
     archive = tmp_path / "rollback.tar.gz"
     pack_qwen_code_eval_results(incoming, archive)
 
@@ -311,7 +322,7 @@ def test_code_eval_fetch_rolls_back_partial_same_identity_install(
     with pytest.raises(OSError, match="simulated"):
         extract_qwen_code_eval_archive(archive, destination)
     assert json.loads(result.read_text()) == _compact_identity("same-run")
-    assert raw.read_text(encoding="utf-8") == "old raw\n"
+    assert json.loads(raw.read_text(encoding="utf-8"))["response"] == "old"
 
 
 def test_colab_profile_routes_sync_bootstrap_run_status_and_fetch(
