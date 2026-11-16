@@ -337,6 +337,58 @@ def test_validator_requires_provenance_fields(
     assert checks["required_provenance"] is False
 
 
+def test_validator_rejects_invalid_checkpoint_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    extra = root / "results" / "qwen25_coder_7b_dose" / "checkpoint_coeff_foo.json"
+    extra.write_text("{}", encoding="utf-8")
+    checks = validate_qwen_dose(root)
+    assert checks["complete_configured_grid"] is False
+    assert checks["file_list_matches"] is False
+
+
+def test_validator_rejects_missing_selected_pair_on_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "dose_followup_evaluation.json"
+    payload = _read(path)
+    payload["selected_pair"] = None
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["selected_pair_consistent"] is False
+
+
+def test_validator_rejects_source_pilot_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "01_dose_baseline.json"
+    payload = _read(path)
+    payload["provenance"]["source_pilot_run_id"] = "not-the-pilot"
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["source_pilot_identity_matches"] is False
+
+
+def test_validator_rejects_wrong_status_profile_or_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "artifacts" / "qwen25_coder_7b_dose" / "status.json"
+    payload = _read(path)
+    payload["profile"] = "qwen25_coder_7b.json"
+    payload["completed_units"] = 0
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["observability_reconciles"] is False
+
+
 def test_original_pilot_validator_still_passes_on_frozen_artifacts() -> None:
     checks = validate_qwen_pilot(ROOT)
     present = (ROOT / "results" / "qwen25_coder_7b" / "pilot_evaluation.json").is_file()

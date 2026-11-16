@@ -157,6 +157,9 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         "selected_pair_consistent": True,
         "random_control_uses_ablation_coefficient": True,
         "original_pilot_validator": True,
+        "source_pilot_identity_matches": True,
+        "observability_reconciles": True,
+        "file_list_matches": True,
     }
     if not evaluation_path.is_file() or not status_path.is_file():
         return checks
@@ -215,8 +218,19 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
             source_commit,
         }:
             checks["source_pilot_status"] = False
+        for payload in payloads:
+            provenance = payload.get("provenance") or {}
+            stored_run = provenance.get("source_pilot_run_id") or payload.get(
+                "source_pilot_run_id"
+            )
+            stored_commit = provenance.get(
+                "source_pilot_implementation_commit"
+            ) or payload.get("source_pilot_implementation_commit")
+            if stored_run != source_run or stored_commit != source_commit:
+                checks["source_pilot_identity_matches"] = False
     else:
         checks["source_pilot_status"] = False
+        checks["source_pilot_identity_matches"] = False
 
     try:
         current_hashes = source_artifact_hashes(root, config)
@@ -268,13 +282,21 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
     expected_checkpoint_names = [
         coefficient_checkpoint_name(coefficient) for coefficient in grid
     ]
-    found_checkpoint_names = sorted(
+    raw_checkpoint_names = [
         path.name
         for path in results_dir.glob("checkpoint_coeff_*.json")
-        if path.is_file() and CHECKPOINT_NAME_RE.fullmatch(path.name)
+        if path.is_file()
+    ]
+    invalid_checkpoint_names = [
+        name for name in raw_checkpoint_names if not CHECKPOINT_NAME_RE.fullmatch(name)
+    ]
+    found_checkpoint_names = sorted(
+        name for name in raw_checkpoint_names if CHECKPOINT_NAME_RE.fullmatch(name)
     )
-    checks["complete_configured_grid"] = bool(grid) and found_checkpoint_names == sorted(
-        expected_checkpoint_names
+    checks["complete_configured_grid"] = (
+        bool(grid)
+        and not invalid_checkpoint_names
+        and found_checkpoint_names == sorted(expected_checkpoint_names)
     )
 
     ablation_curve: list[dict[str, float]] = []
@@ -405,12 +427,12 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         checks["selected_pair_consistent"] = (
             selection_pair is None and evaluation_pair is None
         )
+    elif status in {STATUS_PASS, STATUS_CAUSAL_GATE_FAILED}:
+        checks["selected_pair_consistent"] = bool(
+            selection_pair and confirmation_pair and evaluation_pair
+        ) and all(item == pairs[0] for item in pairs)
     elif pairs:
         checks["selected_pair_consistent"] = all(item == pairs[0] for item in pairs)
-        if confirmation_path.is_file() and (
-            confirmation_pair is None or evaluation_pair is None or selection_pair is None
-        ):
-            checks["selected_pair_consistent"] = False
 
     run_ids: set[str] = set()
     missing_run_id = not _run_id_ok(evaluation.get("run_id"))
@@ -478,5 +500,45 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         checks["original_pilot_validator"] = all(original_checks.values())
     else:
         checks["original_pilot_validator"] = True
+
+    expected_files = set(required)
+    if status != STATUS_OPERATIONAL_ERROR:
+        expected_files.update(expected_checkpoint_names)
+    actual_files = {
+        path.name for path in results_dir.iterdir() if path.is_file()
+    }
+    checks["file_list_matches"] = actual_files == expected_files
+
+    expected_stage = {
+        STATUS_PASS: "confirm",
+        STATUS_CAUSAL_GATE_FAILED: "confirm",
+        STATUS_NO_DOSE_QUALIFIED: "sweep",
+        STATUS_OPERATIONAL_ERROR: status_payload.get("current_stage"),
+    }.get(str(status))
+    terminal_event = {
+        STATUS_PASS: "stage_completed",
+        STATUS_CAUSAL_GATE_FAILED: "aborted",
+        STATUS_NO_DOSE_QUALIFIED: "aborted",
+    }.get(str(status))
+    events_ok = False
+    if events_path.is_file() and terminal_event is not None:
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if (
+                record.get("event") == terminal_event
+                and record.get("state") == state
+                and record.get("stage") == expected_stage
+            ):
+                events_ok = True
+                break
+    checks["observability_reconciles"] = (
+        status_payload.get("run_id") == evaluation.get("run_id")
+        and status_payload.get("profile") == DOSE_PROFILE
+        and status_payload.get("current_stage") == expected_stage
+        and status_payload.get("completed_units") == status_payload.get("total_units")
+        and events_ok
+    )
 
     return checks

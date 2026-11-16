@@ -91,7 +91,29 @@ def coefficient_checkpoint_name(coefficient: float) -> str:
     return f"checkpoint_coeff_{format(float(coefficient), 'g')}.json"
 
 
-def source_envelope_identity(payload: Mapping[str, Any]) -> dict[str, str]:
+def source_envelope_identity(
+    payload: Mapping[str, Any],
+    *,
+    name: str,
+) -> dict[str, str]:
+    if name == "pilot_evaluation.json":
+        run_id = payload.get("run_id")
+        commit = payload.get("implementation_commit")
+        missing = [
+            field
+            for field, value in (("run_id", run_id), ("implementation_commit", commit))
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "source envelope is missing identity fields: " + ", ".join(missing)
+            )
+        if payload.get("status") != STATUS_CAUSAL_GATE_FAILED:
+            raise ValueError("source pilot must remain causal_gate_failed")
+        return {
+            "run_id": str(run_id),
+            "implementation_commit": str(commit),
+        }
     provenance = payload.get("provenance") or {}
     config = payload.get("config") or {}
     run_id = provenance.get("run_id") or payload.get("run_id")
@@ -109,8 +131,8 @@ def source_envelope_identity(payload: Mapping[str, Any]) -> dict[str, str]:
         or payload.get("model_revision")
     )
     missing = [
-        name
-        for name, value in (
+        field
+        for field, value in (
             ("run_id", run_id),
             ("implementation_commit", commit),
             ("model_name", model_name),
@@ -133,7 +155,7 @@ def source_envelope_identity(payload: Mapping[str, Any]) -> dict[str, str]:
 def load_source_envelopes(root: Path) -> dict[str, dict[str, Any]]:
     results_dir = root / "results" / "qwen25_coder_7b"
     envelopes: dict[str, dict[str, Any]] = {}
-    identities: list[dict[str, str]] = []
+    identities: dict[str, dict[str, str]] = {}
     for name in ORIGINAL_SOURCE_ENVELOPES:
         path = results_dir / name
         if not path.is_file():
@@ -142,13 +164,23 @@ def load_source_envelopes(root: Path) -> dict[str, dict[str, Any]]:
         if not isinstance(payload, dict):
             raise ValueError(f"source envelope is not an object: {name}")
         envelopes[name] = payload
-        identities.append(source_envelope_identity(payload))
-    first = identities[0]
-    for name, identity in zip(ORIGINAL_SOURCE_ENVELOPES, identities):
-        if identity != first:
+        identities[name] = source_envelope_identity(payload, name=name)
+    compact_names = [
+        name for name in ORIGINAL_SOURCE_ENVELOPES if name != "pilot_evaluation.json"
+    ]
+    first = identities[compact_names[0]]
+    for name in compact_names:
+        if identities[name] != first:
             raise ValueError(
                 f"source envelope {name} does not share run_id/commit/model"
             )
+    pilot = identities["pilot_evaluation.json"]
+    if first["run_id"] != pilot["run_id"] or first["implementation_commit"] != pilot[
+        "implementation_commit"
+    ]:
+        raise ValueError(
+            "source envelope pilot_evaluation.json does not share run_id/commit"
+        )
     return envelopes
 
 

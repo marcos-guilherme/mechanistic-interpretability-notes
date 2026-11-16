@@ -18,8 +18,11 @@ from refusal_direction_replication.gates import (
     STATUS_PASS,
     evaluate_causal_gate,
 )
-from refusal_direction_replication.interventions import directional_ablation_hook_specs
-from refusal_direction_replication.pipeline import load_config
+from refusal_direction_replication.interventions import (
+    ablate_direction,
+    directional_ablation_hook_specs,
+)
+from refusal_direction_replication.pipeline import load_config, temporary_hooks
 from refusal_direction_replication.qwen_dose import (
     STATUS_NO_DOSE_QUALIFIED,
     coefficient_checkpoint_name,
@@ -31,7 +34,7 @@ from refusal_direction_replication.qwen_dose_runtime import (
     DOSE_STAGES,
     run_qwen_dose,
 )
-from refusal_direction_replication.run_progress import RunProgressStore
+from refusal_direction_replication.run_progress import EVENTS_FILENAME, RunProgressStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -166,8 +169,6 @@ def write_source_pilot(root: Path, *, layer: int = 18, offset: int = -1) -> None
             "operational_success": True,
             "run_id": PILOT_RUN,
             "implementation_commit": PILOT_COMMIT,
-            "model_name": QWEN_MODEL,
-            "model_revision": QWEN_REVISION,
         },
     )
     save_direction(
@@ -953,3 +954,130 @@ def test_fake_model_actually_executes_registered_hooks(
 
     run_qwen_dose(tmp_path, run_id=DOSE_RUN, load_model=load_model)
     assert invocations["count"] > 0
+
+
+def test_existing_evaluation_reconciles_manifest_status_and_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    first = ScriptedMetrics()
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=first)
+    results_dir = tmp_path / "results" / "qwen25_coder_7b_dose"
+    artifacts_dir = tmp_path / "artifacts" / "qwen25_coder_7b_dose"
+    (results_dir / "execution_manifest.json").unlink()
+    (artifacts_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": "wrong-profile.json",
+                "run_id": "wrong-run",
+                "current_stage": "prepare",
+                "state": "pending",
+                "completed_units": 0,
+                "total_units": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifacts_dir / EVENTS_FILENAME).write_text("", encoding="utf-8")
+    second = ScriptedMetrics()
+    result = run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=second)
+    assert result["status"] == STATUS_PASS
+    assert second.calls == []
+    manifest = _read(results_dir / "execution_manifest.json")
+    assert manifest["results"]["status"] == STATUS_PASS
+    status = _read(artifacts_dir / "status.json")
+    assert status["run_id"] == DOSE_RUN
+    assert status["profile"] == DOSE_PROFILE
+    assert status["current_stage"] == "confirm"
+    assert status["state"] == "completed"
+    assert status["completed_units"] == status["total_units"]
+    events = [
+        json.loads(line)
+        for line in (artifacts_dir / EVENTS_FILENAME).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(
+        item.get("event") == "stage_completed"
+        and item.get("state") == "completed"
+        and item.get("stage") == "confirm"
+        for item in events
+    )
+
+
+def test_release_clears_holder_before_gc(monkeypatch: pytest.MonkeyPatch) -> None:
+    from refusal_direction_replication.qwen_dose_runtime import _release_resource_holder
+
+    holder = {"model": object(), "tokenizer": object()}
+    seen: list[object] = []
+
+    def fake_collect() -> None:
+        seen.append(holder.get("model"))
+
+    monkeypatch.setattr(
+        "refusal_direction_replication.pipeline.gc.collect",
+        fake_collect,
+    )
+    _release_resource_holder(holder)
+    assert holder["model"] is None
+    assert holder["tokenizer"] is None
+    assert seen == [None]
+
+
+def test_ablation_hooks_apply_to_block_attention_and_mlp_numerically() -> None:
+    hidden = torch.ones(1, 2, 8)
+    direction = torch.ones(8)
+    coefficient = 0.35
+    expected = ablate_direction(hidden, direction, coefficient=coefficient)
+
+    class ExecModule:
+        def __init__(self) -> None:
+            self._pre: list = []
+            self._fwd: list = []
+
+        def register_forward_pre_hook(self, hook):
+            self._pre.append(hook)
+            return SimpleNamespace(
+                remove=lambda current=hook: self._pre.remove(current)
+                if current in self._pre
+                else None
+            )
+
+        def register_forward_hook(self, hook):
+            self._fwd.append(hook)
+            return SimpleNamespace(
+                remove=lambda current=hook: self._fwd.remove(current)
+                if current in self._fwd
+                else None
+            )
+
+    block, attention, mlp = ExecModule(), ExecModule(), ExecModule()
+    pre_hooks, forward_hooks = directional_ablation_hook_specs(
+        [block],
+        [attention],
+        [mlp],
+        direction,
+        coefficient=coefficient,
+    )
+    with temporary_hooks(pre_hooks=pre_hooks, forward_hooks=forward_hooks):
+        block_hidden = hidden.clone()
+        for hook in block._pre:
+            result = hook(block, (block_hidden,))
+            block_hidden = result[0] if isinstance(result, tuple) else result
+        attn_hidden = hidden.clone()
+        for hook in attention._fwd:
+            result = hook(attention, (attn_hidden,), attn_hidden)
+            attn_hidden = result[0] if isinstance(result, tuple) else result
+        mlp_hidden = hidden.clone()
+        for hook in mlp._fwd:
+            result = hook(mlp, (mlp_hidden,), mlp_hidden)
+            mlp_hidden = result[0] if isinstance(result, tuple) else result
+    assert torch.allclose(block_hidden, expected)
+    assert torch.allclose(attn_hidden, expected)
+    assert torch.allclose(mlp_hidden, expected)
+    assert block._pre == []
+    assert attention._fwd == []
+    assert mlp._fwd == []

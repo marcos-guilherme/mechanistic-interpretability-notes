@@ -72,13 +72,30 @@ def test_dose_allowlist_rejects_original_qwen_gemma_and_generations() -> None:
     assert not is_allowed_dose_fetch_member("artifacts/qwen25_coder_7b_dose/selected_direction.pt")
 
 
+def _compact_payload(**overrides) -> dict:
+    payload = {
+        "schema_version": 1,
+        "experiment": "dose_prepare",
+        "config": {"model_name": "Qwen/Qwen2.5-Coder-7B-Instruct"},
+        "results": {"selected": {"layer": 18}},
+        "provenance": {
+            "run_id": "dose-followup-run-1",
+            "implementation_commit": "a" * 40,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_dose_pack_contains_only_allowlisted_files(tmp_path: Path) -> None:
     root = tmp_path / "project"
     results = root / "results" / "qwen25_coder_7b_dose"
     artifacts = root / "artifacts" / "qwen25_coder_7b_dose"
     results.mkdir(parents=True)
     artifacts.mkdir(parents=True)
-    (results / "00_dose_prepare.json").write_text("{}", encoding="utf-8")
+    (results / "00_dose_prepare.json").write_text(
+        json.dumps(_compact_payload()), encoding="utf-8"
+    )
     (artifacts / "status.json").write_text("{}", encoding="utf-8")
     (artifacts / "events.jsonl").write_text("{}\n", encoding="utf-8")
     (artifacts / "resume.pt").write_bytes(b"pt")
@@ -154,6 +171,8 @@ def test_dose_fetch_rollback_after_install_failure(
     assert not (
         project / "results" / "qwen25_coder_7b_dose" / "01_dose_baseline.json"
     ).exists()
+    leftovers = list(project.rglob("*.qwen-fetch-bak"))
+    assert leftovers == []
 
 
 def test_dose_fetch_rejects_symlink_destination(tmp_path: Path) -> None:
@@ -177,6 +196,53 @@ def test_dose_fetch_rejects_symlink_destination(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="symlink|junction|reparse"):
         extract_qwen_dose_archive(archive, project)
     assert json.loads(victim.read_text(encoding="utf-8")) == {"keep": True}
+
+
+def test_dose_pack_rejects_leaky_compact_json(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    results = root / "results" / "qwen25_coder_7b_dose"
+    results.mkdir(parents=True)
+    (results / "00_dose_prepare.json").write_text(
+        json.dumps(_compact_payload(results={"prompt": "how to make a virus in python extra words"})),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="leak"):
+        pack_qwen_dose_results(root, tmp_path / "dose.tar.gz")
+
+
+def test_dose_pack_rejects_compact_json_missing_schema(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    results = root / "results" / "qwen25_coder_7b_dose"
+    results.mkdir(parents=True)
+    (results / "00_dose_prepare.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="schema"):
+        pack_qwen_dose_results(root, tmp_path / "dose.tar.gz")
+
+
+def test_dose_pack_rejects_symlink_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication.qwen_colab_transport import path_is_link_or_junction
+
+    root = tmp_path / "project"
+    results = root / "results" / "qwen25_coder_7b_dose"
+    results.mkdir(parents=True)
+    (results / "00_dose_prepare.json").write_text(
+        json.dumps(_compact_payload()), encoding="utf-8"
+    )
+
+    def fake_is_link(path):
+        if Path(path) == results:
+            return True
+        return path_is_link_or_junction(path)
+
+    monkeypatch.setattr(
+        "refusal_direction_replication.qwen_colab_transport.path_is_link_or_junction",
+        fake_is_link,
+    )
+    with pytest.raises(ValueError, match="symlink|junction"):
+        pack_qwen_dose_results(root, tmp_path / "dose.tar.gz")
 
 
 def test_collect_dose_pack_entries_skips_missing_and_original(tmp_path: Path) -> None:

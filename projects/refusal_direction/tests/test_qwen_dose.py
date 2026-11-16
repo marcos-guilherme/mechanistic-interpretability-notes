@@ -25,6 +25,7 @@ from refusal_direction_replication.qwen_dose import (
     collect_original_usage,
     compact_split_metadata,
     eligible_examples,
+    load_source_envelopes,
     metadata_contains_leak,
     sample_dose_halves,
     select_dose_coefficients,
@@ -803,3 +804,22 @@ def test_sampled_splits_rejects_source_direction_even_without_dose_grid(
     assert "source_direction" in config
     with pytest.raises(ValueError, match="build_dose_splits"):
         _sampled_splits(tmp_path, config)
+
+
+def test_real_pilot_evaluation_is_validated_without_model_or_revision() -> None:
+    evaluation = json.loads(
+        (ORIGINAL_RESULTS / "pilot_evaluation.json").read_text(encoding="utf-8")
+    )
+    assert "model_name" not in evaluation
+    assert "model_revision" not in evaluation
+    envelopes = load_source_envelopes(ROOT)
+    assert envelopes["pilot_evaluation.json"]["run_id"] == evaluation["run_id"]
+    assert (
+        envelopes["pilot_evaluation.json"]["implementation_commit"]
+        == evaluation["implementation_commit"]
+    )
+    identity = envelopes["00_preflight.json"]["provenance"]
+    assert identity["model_name"] == "Qwen/Qwen2.5-Coder-7B-Instruct"
+    assert identity["requested_model_revision"] == (
+        "c03e6d358207e414f1eca0bb1891e29f1db0e242"
+    )

@@ -275,6 +275,38 @@ class RunProgressStore:
             event="failed",
         )
 
+    def write_terminal_snapshot(self, payload: dict[str, Any]) -> None:
+        record = dict(payload)
+        record["updated_at_utc"] = utc_now()
+        self._atomic_write_json(self.status_path, record)
+
+    def has_matching_event(
+        self,
+        *,
+        event: str,
+        state: str,
+        stage: str,
+        abort_gate: str | None = None,
+    ) -> bool:
+        if not self.events_path.is_file():
+            return False
+        for line in self.events_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if (
+                record.get("run_id") == self.run_id
+                and record.get("event") == event
+                and record.get("state") == state
+                and record.get("stage") == stage
+                and record.get("abort_gate") == abort_gate
+            ):
+                return True
+        return False
+
+    def append_public_event(self, payload: dict[str, Any]) -> None:
+        self._append_event(payload)
+
     def should_skip_stage(self, stage: str) -> bool:
         status = self.read_status()
         if (

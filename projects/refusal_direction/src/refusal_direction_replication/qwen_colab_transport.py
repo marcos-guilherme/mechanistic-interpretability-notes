@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -11,6 +12,8 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from .qwen_dose import metadata_contains_leak
 
 QWEN_RESULTS_DIR = "results/qwen25_coder_7b"
 QWEN_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b"
@@ -54,6 +57,20 @@ DOSE_CHECKPOINT_JSON_PATTERN = re.compile(
 
 MAX_MEMBER_BYTES = 2 * 1024**3
 MAX_TOTAL_UNCOMPRESSED_BYTES = 4 * 1024**3
+COMPACT_SCHEMA_FIELDS = (
+    "schema_version",
+    "experiment",
+    "config",
+    "results",
+    "provenance",
+)
+EVALUATION_SCHEMA_FIELDS = (
+    "status",
+    "run_id",
+    "implementation_commit",
+    "source_artifact_hashes",
+    "source_pilot_run_id",
+)
 
 
 def normalize_member_name(name: str) -> str:
@@ -150,6 +167,35 @@ def pack_qwen_results(root: Path, archive: Path) -> None:
     _pack_entries(collect_qwen_pack_entries(root), root, archive, kind="Qwen")
 
 
+def _assert_pack_path_safe(root: Path, path: Path) -> None:
+    current = path
+    while True:
+        if path_is_link_or_junction(current):
+            raise ValueError(f"pack path is a symlink or junction: {current}")
+        if current == root or current.parent == current:
+            break
+        current = current.parent
+
+
+def validate_dose_pack_json(path: Path, relative: str) -> None:
+    name = Path(relative).name
+    if name in {"status.json", "events.jsonl"}:
+        return
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if metadata_contains_leak(payload):
+        raise ValueError(f"compact json leakage in {relative}")
+    fields = (
+        EVALUATION_SCHEMA_FIELDS
+        if name == "dose_followup_evaluation.json"
+        else COMPACT_SCHEMA_FIELDS
+    )
+    missing = [field for field in fields if field not in payload]
+    if missing:
+        raise ValueError(
+            f"compact json schema missing {', '.join(missing)} in {relative}"
+        )
+
+
 def collect_qwen_dose_pack_entries(root: Path) -> list[Path]:
     entries: list[Path] = []
     candidates: list[Path] = []
@@ -166,8 +212,12 @@ def collect_qwen_dose_pack_entries(root: Path) -> list[Path]:
         if not path.is_file() or path.is_symlink() or path_is_link_or_junction(path):
             continue
         relative = str(path.relative_to(root)).replace("\\", "/")
-        if is_allowed_dose_fetch_member(relative):
-            entries.append(path)
+        if not is_allowed_dose_fetch_member(relative):
+            continue
+        _assert_pack_path_safe(root, path)
+        if relative.endswith(".json"):
+            validate_dose_pack_json(path, relative)
+        entries.append(path)
     return entries
 
 
@@ -316,6 +366,7 @@ def _extract_allowlisted_archive(
                 with destination.open("wb") as out:
                     shutil.copyfileobj(extracted, out)
 
+            backup_root = staging / ".backups"
             for member in file_members:
                 relative = normalize_member_name(member.name)
                 target = project / relative
@@ -330,20 +381,16 @@ def _extract_allowlisted_archive(
                 backup: Path | None = None
                 had_original = target.exists()
                 if had_original:
-                    backup = target.with_suffix(target.suffix + ".qwen-fetch-bak")
+                    backup = backup_root / relative
+                    backup.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(target, backup)
                 records.append(
                     InstallRecord(target=target, backup=backup, had_original=had_original)
                 )
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(source, target)
-
-            for record in records:
-                if record.backup is not None and record.backup.exists():
-                    record.backup.unlink()
         except Exception:
             _rollback_install_records(records)
-            shutil.rmtree(staging, ignore_errors=True)
             raise
-        else:
+        finally:
             shutil.rmtree(staging, ignore_errors=True)

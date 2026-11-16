@@ -156,6 +156,139 @@ def load_reusable_artifact(
     return payload
 
 
+def _release_resource_holder(
+    holder: dict[str, Any],
+    release_resources: Callable[[], None] | None = None,
+) -> None:
+    model = holder.pop("model", None)
+    tokenizer = holder.pop("tokenizer", None)
+    holder["model"] = None
+    holder["tokenizer"] = None
+    if release_resources is not None:
+        release_resources()
+        return
+    release_compute_resources(model, tokenizer)
+
+
+def _result_files_for_status(status: str) -> list[str]:
+    if status == STATUS_NO_DOSE_QUALIFIED:
+        return [
+            "00_dose_prepare.json",
+            "01_dose_baseline.json",
+            "02_dose_selection.json",
+            "dose_followup_evaluation.json",
+            "execution_manifest.json",
+        ]
+    if status == STATUS_OPERATIONAL_ERROR:
+        return ["dose_followup_evaluation.json"]
+    return [
+        "00_dose_prepare.json",
+        "01_dose_baseline.json",
+        "02_dose_selection.json",
+        "03_dose_confirmation.json",
+        "dose_followup_evaluation.json",
+        "execution_manifest.json",
+    ]
+
+
+def _terminal_observability(
+    status: str,
+    *,
+    grid_len: int,
+) -> dict[str, Any]:
+    if status == STATUS_PASS:
+        return {
+            "state": "completed",
+            "current_stage": "confirm",
+            "abort_gate": None,
+            "completed_units": 1,
+            "total_units": 1,
+            "event": "stage_completed",
+        }
+    if status == STATUS_NO_DOSE_QUALIFIED:
+        return {
+            "state": "aborted",
+            "current_stage": "sweep",
+            "abort_gate": "dose",
+            "completed_units": grid_len,
+            "total_units": grid_len,
+            "event": "aborted",
+        }
+    if status == STATUS_CAUSAL_GATE_FAILED:
+        return {
+            "state": "aborted",
+            "current_stage": "confirm",
+            "abort_gate": "causal",
+            "completed_units": 1,
+            "total_units": 1,
+            "event": "aborted",
+        }
+    raise ValueError(f"cannot reconcile non-terminal status: {status}")
+
+
+def _reconcile_terminal_observability(
+    *,
+    store: RunProgressStore,
+    results_dir: Path,
+    config: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> None:
+    status = str(evaluation.get("status"))
+    spec = _terminal_observability(status, grid_len=len(config["dose_grid"]))
+    provenance = _dose_provenance(
+        config=config,
+        run_id=str(evaluation.get("run_id") or store.run_id),
+        implementation_commit=str(evaluation.get("implementation_commit") or ""),
+        source_pilot_run_id=source["source_pilot_run_id"],
+        source_pilot_implementation_commit=source["source_pilot_implementation_commit"],
+        source_hashes=source["source_hashes"],
+        resolved_model_revision=str(
+            evaluation.get("model_revision") or config["model_revision"]
+        ),
+    )
+    completed_stages = ["prepare", "sweep"]
+    if status != STATUS_NO_DOSE_QUALIFIED:
+        completed_stages.append("confirm")
+    _write_manifest(
+        results_dir,
+        config=dict(config),
+        provenance=provenance,
+        completed_stages=completed_stages,
+        result_files=_result_files_for_status(status),
+        status=status,
+    )
+    snapshot = {
+        "schema_version": 1,
+        "profile": store.profile,
+        "run_id": store.run_id,
+        "current_stage": spec["current_stage"],
+        "state": spec["state"],
+        "completed_units": spec["completed_units"],
+        "total_units": spec["total_units"],
+    }
+    if spec["abort_gate"] is not None:
+        snapshot["abort_gate"] = spec["abort_gate"]
+        snapshot["abort_reason"] = evaluation.get("message") or status
+    store.write_terminal_snapshot(snapshot)
+    event = {
+        "event": spec["event"],
+        "state": spec["state"],
+        "stage": spec["current_stage"],
+        "completed_units": spec["completed_units"],
+        "total_units": spec["total_units"],
+    }
+    if spec["abort_gate"] is not None:
+        event["abort_gate"] = spec["abort_gate"]
+    if not store.has_matching_event(
+        event=spec["event"],
+        state=spec["state"],
+        stage=spec["current_stage"],
+        abort_gate=spec["abort_gate"],
+    ):
+        store.append_public_event(event)
+
+
 def _assert_resolved_revision(model, config: Mapping[str, Any]) -> str:
     resolved = getattr(getattr(model, "config", None), "_commit_hash", None)
     requested = config["model_revision"]
@@ -1026,6 +1159,13 @@ def run_qwen_dose(
         source_hashes=source["source_hashes"],
     )
     if existing is not None:
+        _reconcile_terminal_observability(
+            store=store,
+            results_dir=results_dir,
+            config=config,
+            evaluation=existing,
+            source=source,
+        )
         return existing
     current = store.read_status()
     if (
@@ -1035,21 +1175,22 @@ def run_qwen_dose(
     ):
         fallback = results_dir / "dose_followup_evaluation.json"
         if fallback.is_file():
-            return _read_json(fallback)
+            payload = _read_json(fallback)
+            if payload.get("status") in TERMINAL_SCIENCE:
+                _reconcile_terminal_observability(
+                    store=store,
+                    results_dir=results_dir,
+                    config=config,
+                    evaluation=payload,
+                    source=source,
+                )
+            return payload
 
     commit = implementation_commit_hash()
     resource_holder: dict[str, Any] = {"model": None, "tokenizer": None}
 
     def release_loaded() -> None:
-        if release_resources is not None:
-            release_resources()
-        else:
-            release_compute_resources(
-                resource_holder.get("model"),
-                resource_holder.get("tokenizer"),
-            )
-        resource_holder["model"] = None
-        resource_holder["tokenizer"] = None
+        _release_resource_holder(resource_holder, release_resources)
 
     last: dict[str, Any] | None = None
     grid = list(config["dose_grid"])
