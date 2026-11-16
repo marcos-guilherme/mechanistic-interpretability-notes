@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .qwen_dose import metadata_contains_leak
+from .qwen_code_eval import compact_contains_leak
 from .qwen_jlens import (
     jlens_metadata_contains_leak,
     load_fit_checkpoint,
@@ -116,6 +117,60 @@ JLENS_EVALUATION_SCHEMA_FIELDS = (
     "run_id",
     "implementation_commit",
 )
+CODE_EVAL_RESULTS_DIR = "results/qwen25_coder_7b_code_eval"
+CODE_EVAL_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b_code_eval"
+CODE_EVAL_REMOTE_ARCHIVE = Path("/content/qwen_code_eval_results.tar.gz")
+CODE_EVAL_DIRECTION_RELATIVE = Path("artifacts/qwen25_coder_7b/selected_direction.pt")
+CODE_EVAL_LENS_RELATIVE = (
+    Path("artifacts")
+    / "qwen25_coder_7b_jlens"
+    / "qwen25_coder_7b_jacobian_lens.pt"
+)
+REMOTE_CODE_EVAL_DIRECTION_STAGING = "/content/code_eval_source_direction.pt"
+REMOTE_CODE_EVAL_LENS_STAGING = "/content/code_eval_source_lens.pt"
+CODE_EVAL_COMPACT_NAMES = frozenset(
+    {
+        "00_prepare.json",
+        "01_generate.json",
+        "02_evaluate.json",
+        "03_readout.json",
+        "04_finalize.json",
+        "code_eval_evaluation.json",
+        "execution_manifest.json",
+    }
+)
+CODE_EVAL_DATASETS = r"(?:mitre|mitre_frr|humaneval_plus)"
+CODE_EVAL_CONDITIONS = r"(?:baseline|ablation|addition|random_control)"
+CODE_EVAL_RAW_PATTERNS = (
+    re.compile(
+        rf"^{CODE_EVAL_ARTIFACTS_DIR}/datasets/{CODE_EVAL_DATASETS}\.jsonl$"
+    ),
+    re.compile(
+        rf"^{CODE_EVAL_ARTIFACTS_DIR}/generations/"
+        rf"{CODE_EVAL_DATASETS}__{CODE_EVAL_CONDITIONS}\.jsonl$"
+    ),
+    re.compile(
+        rf"^{CODE_EVAL_ARTIFACTS_DIR}/logits/"
+        rf"{CODE_EVAL_DATASETS}__baseline\.pt$"
+    ),
+    re.compile(
+        rf"^{CODE_EVAL_ARTIFACTS_DIR}/evalplus/"
+        rf"(?:selected_problems\.jsonl|samples__{CODE_EVAL_CONDITIONS}\.jsonl|"
+        rf"results__{CODE_EVAL_CONDITIONS}\.json)$"
+    ),
+    re.compile(
+        rf"^{CODE_EVAL_ARTIFACTS_DIR}/readout/"
+        rf"{CODE_EVAL_DATASETS}__{CODE_EVAL_CONDITIONS}\.jsonl$"
+    ),
+    re.compile(
+        rf"^{CODE_EVAL_ARTIFACTS_DIR}/"
+        r"(?:manual_review_blind\.jsonl|manual_review_key\.json|"
+        r"refusal_lexicon\.json)$"
+    ),
+)
+MAX_CODE_EVAL_JSON_BYTES = 64 * 1024**2
+MAX_CODE_EVAL_JSONL_BYTES = 512 * 1024**2
+MAX_CODE_EVAL_TOTAL_BYTES = 4 * 1024**3
 
 
 def normalize_member_name(name: str) -> str:
@@ -264,6 +319,129 @@ def atomic_install_dose_source_direction(
         raise
     _validate_regular_direction_file(destination, origin="destination")
     return _assert_confined_direction_destination(project, destination)
+
+
+def _validate_code_eval_source(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+) -> None:
+    if not os.path.lexists(path):
+        raise FileNotFoundError(f"code-eval {label} source missing: {path}")
+    if path_is_link_or_junction(path) or not path.is_file():
+        raise ValueError(f"code-eval {label} source must be a regular file: {path}")
+    size = path.stat().st_size
+    if size <= 0 or size > max_bytes:
+        raise ValueError(
+            f"code-eval {label} source size {size} exceeds {max_bytes} bytes"
+        )
+
+
+def _assert_code_eval_source_destination(
+    project: Path,
+    destination: Path,
+    relative: Path,
+) -> Path:
+    expected = (project.resolve() / relative).resolve()
+    current = destination
+    while current != project and current.parent != current:
+        if path_is_link_or_junction(current):
+            raise ValueError("code-eval source destination is a link or junction")
+        current = current.parent
+    if destination.resolve() != expected:
+        raise ValueError("code-eval source destination escaped its fixed path")
+    return destination
+
+
+def require_local_code_eval_sources(project: Path) -> tuple[Path, Path]:
+    direction = project / CODE_EVAL_DIRECTION_RELATIVE
+    lens = project / CODE_EVAL_LENS_RELATIVE
+    _validate_code_eval_source(
+        direction,
+        label="direction",
+        max_bytes=MAX_DOSE_SOURCE_DIRECTION_BYTES,
+    )
+    _validate_code_eval_source(
+        lens,
+        label="lens",
+        max_bytes=MAX_MEMBER_BYTES,
+    )
+    return (
+        _assert_code_eval_source_destination(
+            project, direction, CODE_EVAL_DIRECTION_RELATIVE
+        ),
+        _assert_code_eval_source_destination(
+            project, lens, CODE_EVAL_LENS_RELATIVE
+        ),
+    )
+
+
+def atomic_install_code_eval_sources(
+    *,
+    staged_direction: Path,
+    staged_lens: Path,
+    project: Path,
+) -> tuple[Path, Path]:
+    """Install the frozen direction and lens as one rollback-safe pair."""
+
+    _validate_code_eval_source(
+        staged_direction,
+        label="direction staging",
+        max_bytes=MAX_DOSE_SOURCE_DIRECTION_BYTES,
+    )
+    _validate_code_eval_source(
+        staged_lens,
+        label="lens staging",
+        max_bytes=MAX_MEMBER_BYTES,
+    )
+    destinations = (
+        project / CODE_EVAL_DIRECTION_RELATIVE,
+        project / CODE_EVAL_LENS_RELATIVE,
+    )
+    relatives = (CODE_EVAL_DIRECTION_RELATIVE, CODE_EVAL_LENS_RELATIVE)
+    for destination, relative in zip(destinations, relatives):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _assert_code_eval_source_destination(project, destination, relative)
+    backup_root = Path(
+        tempfile.mkdtemp(
+            prefix=".code_eval_sources_backup.",
+            dir=project,
+        )
+    )
+    records: list[InstallRecord] = []
+    try:
+        for destination, relative in zip(destinations, relatives):
+            had_original = destination.exists()
+            backup = backup_root / relative if had_original else None
+            if backup is not None:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(destination, backup)
+            records.append(
+                InstallRecord(
+                    target=destination,
+                    backup=backup,
+                    had_original=had_original,
+                )
+            )
+        _stream_install_regular_file(
+            staged=staged_direction,
+            destination=destinations[0],
+            max_bytes=MAX_DOSE_SOURCE_DIRECTION_BYTES,
+            prefix=".code_eval_direction.",
+        )
+        _stream_install_regular_file(
+            staged=staged_lens,
+            destination=destinations[1],
+            max_bytes=MAX_MEMBER_BYTES,
+            prefix=".code_eval_lens.",
+        )
+        return require_local_code_eval_sources(project)
+    except Exception:
+        _rollback_install_records(records)
+        raise
+    finally:
+        shutil.rmtree(backup_root, ignore_errors=True)
 
 
 def jlens_checkpoint_path(project: Path) -> Path:
@@ -930,6 +1108,118 @@ def extract_qwen_jlens_archive(archive: Path, project: Path) -> None:
         validator=validate_qwen_jlens_archive,
         prefix="qwen-jlens-fetch-",
         post_stage_validate=_revalidate_staged_jlens_members,
+    )
+
+
+def is_code_eval_unsafe_member_name(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return True
+    return not normalized.startswith(
+        (f"{CODE_EVAL_RESULTS_DIR}/", f"{CODE_EVAL_ARTIFACTS_DIR}/")
+    )
+
+
+def is_allowed_code_eval_fetch_member(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return False
+    if is_code_eval_unsafe_member_name(normalized):
+        return False
+    if normalized in {
+        f"{CODE_EVAL_ARTIFACTS_DIR}/status.json",
+        f"{CODE_EVAL_ARTIFACTS_DIR}/events.jsonl",
+    }:
+        return True
+    if normalized.startswith(f"{CODE_EVAL_RESULTS_DIR}/"):
+        return Path(normalized).name in CODE_EVAL_COMPACT_NAMES
+    return any(pattern.fullmatch(normalized) for pattern in CODE_EVAL_RAW_PATTERNS)
+
+
+def code_eval_member_byte_limit(name: str) -> int:
+    normalized = normalize_member_name(name)
+    if normalized.endswith(".pt"):
+        return MAX_MEMBER_BYTES
+    if normalized.endswith(".jsonl"):
+        return MAX_CODE_EVAL_JSONL_BYTES
+    return MAX_CODE_EVAL_JSON_BYTES
+
+
+def _validate_code_eval_compact(path: Path, relative: str) -> None:
+    if not relative.startswith(f"{CODE_EVAL_RESULTS_DIR}/"):
+        return
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if compact_contains_leak(payload):
+        raise ValueError(f"compact json leakage in {relative}")
+
+
+def collect_qwen_code_eval_pack_entries(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    results_dir = root / CODE_EVAL_RESULTS_DIR
+    artifacts_dir = root / CODE_EVAL_ARTIFACTS_DIR
+    if results_dir.is_dir():
+        candidates.extend(sorted(results_dir.glob("*.json")))
+    if artifacts_dir.is_dir():
+        candidates.extend(
+            path for path in sorted(artifacts_dir.rglob("*")) if path.is_file()
+        )
+    entries: list[Path] = []
+    for path in candidates:
+        if path.is_symlink() or path_is_link_or_junction(path):
+            continue
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        if not is_allowed_code_eval_fetch_member(relative):
+            continue
+        _assert_pack_path_safe(root, path)
+        if path.stat().st_size > code_eval_member_byte_limit(relative):
+            raise ValueError(f"code-eval member exceeds size limit: {relative}")
+        _validate_code_eval_compact(path, relative)
+        entries.append(path)
+    return entries
+
+
+def pack_qwen_code_eval_results(root: Path, archive: Path) -> None:
+    _pack_entries(
+        collect_qwen_code_eval_pack_entries(root),
+        root,
+        archive,
+        kind="Qwen code eval",
+    )
+
+
+def validate_qwen_code_eval_archive(
+    members: list[tarfile.TarInfo],
+) -> list[tarfile.TarInfo]:
+    return _validate_archive(
+        members,
+        is_unsafe=is_code_eval_unsafe_member_name,
+        is_allowed=is_allowed_code_eval_fetch_member,
+        max_total=MAX_CODE_EVAL_TOTAL_BYTES,
+        member_limit_for=code_eval_member_byte_limit,
+    )
+
+
+def _revalidate_code_eval_members(
+    staging: Path,
+    members: list[tarfile.TarInfo],
+) -> None:
+    for member in members:
+        relative = normalize_member_name(member.name)
+        path = staging / relative
+        if path.stat().st_size > code_eval_member_byte_limit(relative):
+            raise ValueError(f"code-eval member exceeds size limit: {relative}")
+        _validate_code_eval_compact(path, relative)
+
+
+def extract_qwen_code_eval_archive(archive: Path, project: Path) -> None:
+    _extract_allowlisted_archive(
+        archive,
+        project,
+        validator=validate_qwen_code_eval_archive,
+        prefix="qwen-code-eval-fetch-",
+        post_stage_validate=_revalidate_code_eval_members,
     )
 
 

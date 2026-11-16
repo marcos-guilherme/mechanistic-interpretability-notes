@@ -16,6 +16,7 @@ PROFILE_SESSIONS = {
     "qwen25-coder": "refusal-qwen",
     "qwen25-coder-dose": "refusal-qwen",
     "qwen25-coder-jlens": "refusal-qwen",
+    "qwen25-coder-code-eval": "refusal-qwen",
 }
 EXCLUDED_PARTS = {
     ".git",
@@ -87,6 +88,8 @@ def resolve_session(profile: str, session: str | None) -> str:
 
 
 def fetch_pack_script(profile: str) -> Path:
+    if profile == "qwen25-coder-code-eval":
+        return PROJECT / "scripts" / "colab_pack_qwen_code_eval_results.py"
     if profile == "qwen25-coder-jlens":
         return PROJECT / "scripts" / "colab_pack_qwen_jlens_results.py"
     if profile == "qwen25-coder-dose":
@@ -102,7 +105,9 @@ def stamps_implementation_commit(profile: str) -> bool:
 
 def status_command(session: str, *, profile: str = "qwen25-coder") -> list[str]:
     script = PROJECT / "scripts" / "qwen_run_status.py"
-    if profile == "qwen25-coder-jlens":
+    if profile == "qwen25-coder-code-eval":
+        script = PROJECT / "scripts" / "qwen_run_code_eval_status.py"
+    elif profile == "qwen25-coder-jlens":
         script = PROJECT / "scripts" / "qwen_run_jlens_status.py"
     elif profile == "qwen25-coder-dose":
         script = PROJECT / "scripts" / "qwen_run_dose_status.py"
@@ -142,6 +147,14 @@ def jlens_command(session: str, *, timeout: int) -> list[str]:
     )
 
 
+def code_eval_command(session: str, *, timeout: int) -> list[str]:
+    return exec_command(
+        session,
+        PROJECT / "scripts" / "qwen_run_code_eval.py",
+        timeout=timeout,
+    )
+
+
 def extract_qwen_results_archive(archive: Path, project: Path) -> None:
     sys.path.insert(0, str(project / "src"))
     from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
@@ -167,6 +180,15 @@ def extract_qwen_jlens_results_archive(archive: Path, project: Path) -> None:
     )
 
     extract_qwen_jlens_archive(archive, project)
+
+
+def extract_qwen_code_eval_results_archive(archive: Path, project: Path) -> None:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        extract_qwen_code_eval_archive,
+    )
+
+    extract_qwen_code_eval_archive(archive, project)
 
 
 def require_dose_source_direction(project: Path) -> Path:
@@ -196,6 +218,15 @@ def optional_jlens_resume_bundle(project: Path) -> list[tuple[Path, str]]:
     return optional_local_jlens_resume_bundle(project)
 
 
+def require_code_eval_sources(project: Path) -> tuple[Path, Path]:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        require_local_code_eval_sources,
+    )
+
+    return require_local_code_eval_sources(project)
+
+
 def bootstrap_scripts(profile: str) -> list[Path]:
     scripts = [PROJECT / "scripts" / "colab_bootstrap.py"]
     if profile == "qwen25-coder-dose":
@@ -203,6 +234,8 @@ def bootstrap_scripts(profile: str) -> list[Path]:
     if profile == "qwen25-coder-jlens":
         scripts.append(PROJECT / "scripts" / "colab_install_jlens.py")
         scripts.append(PROJECT / "scripts" / "colab_install_jlens_checkpoint.py")
+    if profile == "qwen25-coder-code-eval":
+        scripts.append(PROJECT / "scripts" / "colab_install_code_eval.py")
     return scripts
 
 
@@ -284,6 +317,7 @@ def main() -> int:
             "pilot",
             "dose",
             "jlens",
+            "code-eval",
             "stop",
         ),
     )
@@ -309,8 +343,11 @@ def main() -> int:
         run(start_command(session, args.gpu))
     elif args.action == "sync":
         direction = None
+        code_eval_sources = None
         if args.profile == "qwen25-coder-dose":
             direction = require_dose_source_direction(PROJECT)
+        elif args.profile == "qwen25-coder-code-eval":
+            code_eval_sources = require_code_eval_sources(PROJECT)
         archive = build_archive(
             stamp_commit=stamps_implementation_commit(args.profile)
         )
@@ -327,6 +364,22 @@ def main() -> int:
                     session,
                     direction,
                     "/content/dose_source_direction.pt",
+                )
+            )
+        if code_eval_sources is not None:
+            source_direction, source_lens = code_eval_sources
+            run(
+                upload_command(
+                    session,
+                    source_direction,
+                    "/content/code_eval_source_direction.pt",
+                )
+            )
+            run(
+                upload_command(
+                    session,
+                    source_lens,
+                    "/content/code_eval_source_lens.pt",
                 )
             )
         if args.profile == "qwen25-coder-jlens":
@@ -375,7 +428,10 @@ def main() -> int:
             )
         )
     elif args.action == "fetch":
-        if args.profile == "qwen25-coder-jlens":
+        if args.profile == "qwen25-coder-code-eval":
+            remote_archive = "/content/qwen_code_eval_results.tar.gz"
+            local_name = "qwen_code_eval_results.tar.gz"
+        elif args.profile == "qwen25-coder-jlens":
             remote_archive = "/content/qwen_jlens_results.tar.gz"
             local_name = "qwen_jlens_results.tar.gz"
         elif args.profile == "qwen25-coder-dose":
@@ -403,7 +459,9 @@ def main() -> int:
                 local,
             )
         )
-        if args.profile == "qwen25-coder-jlens":
+        if args.profile == "qwen25-coder-code-eval":
+            extract_qwen_code_eval_results_archive(local, PROJECT)
+        elif args.profile == "qwen25-coder-jlens":
             extract_qwen_jlens_results_archive(local, PROJECT)
         elif args.profile == "qwen25-coder-dose":
             extract_qwen_dose_results_archive(local, PROJECT)
@@ -417,6 +475,7 @@ def main() -> int:
             "qwen25-coder",
             "qwen25-coder-dose",
             "qwen25-coder-jlens",
+            "qwen25-coder-code-eval",
         ):
             parser.error("status is only available for Qwen profiles")
         run(status_command(session, profile=args.profile))
@@ -432,6 +491,12 @@ def main() -> int:
         if args.profile != "qwen25-coder-jlens":
             parser.error("jlens is only available for --profile qwen25-coder-jlens")
         run(jlens_command(session, timeout=args.timeout))
+    elif args.action == "code-eval":
+        if args.profile != "qwen25-coder-code-eval":
+            parser.error(
+                "code-eval is only available for --profile qwen25-coder-code-eval"
+            )
+        run(code_eval_command(session, timeout=args.timeout))
     elif args.action == "stop":
         run(stop_command(session))
     return 0
