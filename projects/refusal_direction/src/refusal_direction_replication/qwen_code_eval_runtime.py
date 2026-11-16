@@ -68,7 +68,11 @@ from .qwen_code_eval import (
     write_blind_review_sample,
 )
 from .qwen_dose import EXPECTED_SOURCE_LAYER, EXPECTED_SOURCE_OFFSET, sha256_file
-from .qwen_jlens import assert_jlens_contract, wrap_hf_model_for_jlens
+from .qwen_jlens import (
+    EXPECTED_SOURCE_LAYERS,
+    assert_jlens_contract,
+    wrap_hf_model_for_jlens,
+)
 from .qwen_pilot import resolve_run_id
 from .run_progress import RunProgressStore
 from .runtime import seed_everything
@@ -780,12 +784,26 @@ def _readout_checkpoint_complete(path: Path) -> bool:
     if not path.is_file():
         return False
     records = _read_jsonl(path)
-    instruction_ids = {
-        record["example_id"]
+    observed = {
+        (
+            str(record.get("example_id")),
+            str(record.get("position_kind")),
+            int(record.get("layer", -1)),
+        )
         for record in records
-        if record.get("position_kind") == "instruction_last"
     }
-    return len(instruction_ids) == DATASET_SIZE
+    if len(records) != len(observed):
+        return False
+    example_ids = sorted({item[0] for item in observed})
+    if len(example_ids) != DATASET_SIZE:
+        return False
+    normalized_expected = {
+        (example_id, position, layer)
+        for example_id in example_ids
+        for position in ("instruction_last", "response_first")
+        for layer in EXPECTED_SOURCE_LAYERS
+    }
+    return observed == normalized_expected
 
 
 def run_readout_stage(

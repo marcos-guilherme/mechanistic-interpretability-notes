@@ -201,4 +201,11 @@ def test_code_eval_scripts_exist_and_pin_dependencies() -> None:
     assert "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e" in install
     assert "581d398613e5602a5af361e1c34d3a92ea82ba8e" in install
     assert "--no-deps" in install
+    for dependency in (
+        "psutil",
+        "termcolor",
+        "tree_sitter",
+        "tree-sitter-python",
+    ):
+        assert dependency in install
     assert CODE_EVAL_REMOTE_ARCHIVE == Path("/content/qwen_code_eval_results.tar.gz")

@@ -246,3 +246,42 @@ def test_stage_dimensions_cover_every_dataset_condition() -> None:
     assert stage_total_units("evaluate") == len(CONDITIONS) * 32
     assert stage_total_units("readout") == len(DATASETS) * len(CONDITIONS) * 32
     assert stage_total_units("finalize") == 1
+
+
+def test_readout_checkpoint_requires_every_position_and_layer(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_code_eval_runtime import (
+        _readout_checkpoint_complete,
+    )
+
+    checkpoint = tmp_path / "readout.jsonl"
+    incomplete = [
+        {
+            "example_id": f"item-{index}",
+            "position_kind": "instruction_last",
+            "layer": 0,
+            "available": True,
+        }
+        for index in range(32)
+    ]
+    checkpoint.write_text(
+        "".join(json.dumps(record) + "\n" for record in incomplete),
+        encoding="utf-8",
+    )
+    assert not _readout_checkpoint_complete(checkpoint)
+
+    complete = [
+        {
+            "example_id": f"item-{index}",
+            "position_kind": position,
+            "layer": layer,
+            "available": position == "instruction_last",
+        }
+        for index in range(32)
+        for position in ("instruction_last", "response_first")
+        for layer in range(27)
+    ]
+    checkpoint.write_text(
+        "".join(json.dumps(record) + "\n" for record in complete),
+        encoding="utf-8",
+    )
+    assert _readout_checkpoint_complete(checkpoint)

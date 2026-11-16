@@ -30,11 +30,40 @@ EVALPLUS_SPEC = (
 JLENS_COMMIT = "581d398613e5602a5af361e1c34d3a92ea82ba8e"
 PURPLE_LLAMA_COMMIT = "0654501399e7cbd560db9501965dc09c567a5563"
 SOURCE_ROOT = Path("/content/qwen_code_eval_sources")
+EVALPLUS_RUNTIME_DEPENDENCIES = (
+    "appdirs==1.4.4",
+    "fire==0.7.0",
+    "multipledispatch==1.0.0",
+    "psutil==6.1.1",
+    "rich==13.9.4",
+    "tempdir==0.7.1",
+    "termcolor==2.5.0",
+    "tqdm==4.67.1",
+    "tree_sitter==0.23.2",
+    "tree-sitter-python==0.23.6",
+    "wget==3.2",
+)
 
 
 def _install(spec: str) -> None:
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "--no-deps", spec],
+        check=True,
+    )
+
+
+def _install_evalplus_runtime_dependencies() -> None:
+    # EvalPlus declares optional model-provider stacks alongside its execution
+    # dependencies. Install only the packages exercised by data loading,
+    # sanitization and the local correctness worker.
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            *EVALPLUS_RUNTIME_DEPENDENCIES,
+        ],
         check=True,
     )
 
@@ -91,6 +120,7 @@ def main() -> int:
     if JLENS_UPSTREAM_SPEC.rsplit("@", 1)[-1] != JLENS_COMMIT:
         raise ValueError("Jacobian-lens install spec differs from the pinned commit")
     _install(JLENS_UPSTREAM_SPEC)
+    _install_evalplus_runtime_dependencies()
     _install(EVALPLUS_SPEC)
     _install_purplellama_source()
     assert_jlens_contract()
