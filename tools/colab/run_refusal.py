@@ -187,6 +187,15 @@ def optional_jlens_checkpoint(project: Path) -> Path | None:
     return optional_local_jlens_checkpoint(project)
 
 
+def optional_jlens_resume_bundle(project: Path) -> list[tuple[Path, str]]:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        optional_local_jlens_resume_bundle,
+    )
+
+    return optional_local_jlens_resume_bundle(project)
+
+
 def bootstrap_scripts(profile: str) -> list[Path]:
     scripts = [PROJECT / "scripts" / "colab_bootstrap.py"]
     if profile == "qwen25-coder-dose":
@@ -321,15 +330,8 @@ def main() -> int:
                 )
             )
         if args.profile == "qwen25-coder-jlens":
-            checkpoint = optional_jlens_checkpoint(PROJECT)
-            if checkpoint is not None:
-                run(
-                    upload_command(
-                        session,
-                        checkpoint,
-                        "/content/jlens_fit_checkpoint.pt",
-                    )
-                )
+            for local_path, remote in optional_jlens_resume_bundle(PROJECT):
+                run(upload_command(session, local_path, remote))
     elif args.action == "bootstrap":
         for script in bootstrap_scripts(args.profile):
             run(

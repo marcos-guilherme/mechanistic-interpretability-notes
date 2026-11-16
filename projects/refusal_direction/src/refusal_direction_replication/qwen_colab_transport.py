@@ -69,7 +69,11 @@ MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES = 5 * 1024**3
 MAX_JLENS_JSON_BYTES = 16 * 1024 * 1024
 MAX_JLENS_JSONL_BYTES = 32 * 1024 * 1024
 JLENS_CHECKPOINT_RELATIVE = Path("artifacts") / "qwen25_coder_7b_jlens" / "jlens_fit_checkpoint.pt"
+JLENS_STATUS_RELATIVE = Path("artifacts") / "qwen25_coder_7b_jlens" / "status.json"
+JLENS_EVENTS_RELATIVE = Path("artifacts") / "qwen25_coder_7b_jlens" / "events.jsonl"
 REMOTE_JLENS_CHECKPOINT_STAGING = "/content/jlens_fit_checkpoint.pt"
+REMOTE_JLENS_STATUS_STAGING = "/content/jlens_status.json"
+REMOTE_JLENS_EVENTS_STAGING = "/content/jlens_events.jsonl"
 MAX_JLENS_CHECKPOINT_BYTES = MAX_MEMBER_BYTES
 COMPACT_SCHEMA_FIELDS = (
     "schema_version",
@@ -341,7 +345,8 @@ def atomic_install_jlens_checkpoint(
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(staged.read_bytes())
+            with staged.open("rb") as incoming:
+                shutil.copyfileobj(incoming, handle)
             handle.flush()
             os.fsync(handle.fileno())
         if tmp_path.stat().st_size > MAX_JLENS_CHECKPOINT_BYTES:
@@ -355,6 +360,98 @@ def atomic_install_jlens_checkpoint(
     installed = load_fit_checkpoint(destination)
     validate_checkpoint_structure(installed)
     return _assert_confined_jlens_checkpoint(project, destination)
+
+
+def _stream_install_regular_file(
+    *,
+    staged: Path,
+    destination: Path,
+    max_bytes: int,
+    prefix: str,
+) -> Path:
+    if path_is_link_or_junction(staged) or not staged.is_file():
+        raise ValueError(f"jlens resume member must be a regular file: {staged}")
+    size = staged.stat().st_size
+    if size <= 0 or size > max_bytes:
+        raise ValueError(f"jlens resume member size {size} exceeds {max_bytes} bytes")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            with staged.open("rb") as incoming:
+                shutil.copyfileobj(incoming, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if tmp_path.stat().st_size > max_bytes:
+            raise ValueError("jlens resume member size exceeds limit after copy")
+        os.replace(tmp_path, destination)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    return destination
+
+
+def optional_local_jlens_resume_bundle(project: Path) -> list[tuple[Path, str]]:
+    checkpoint = optional_local_jlens_checkpoint(project)
+    if checkpoint is None:
+        return []
+    status = project / JLENS_STATUS_RELATIVE
+    events = project / JLENS_EVENTS_RELATIVE
+    if not status.is_file():
+        raise ValueError("jlens resume requires status.json with the checkpoint")
+    if not events.is_file():
+        raise ValueError("jlens resume requires events.jsonl with the checkpoint")
+    if path_is_link_or_junction(status) or path_is_link_or_junction(events):
+        raise ValueError("jlens resume status/events must be regular files")
+    if status.stat().st_size > MAX_JLENS_JSON_BYTES:
+        raise ValueError("jlens status.json exceeds size limit")
+    if events.stat().st_size > MAX_JLENS_JSONL_BYTES:
+        raise ValueError("jlens events.jsonl exceeds size limit")
+    validate_jlens_pack_json(status, str(JLENS_STATUS_RELATIVE).replace("\\", "/"))
+    validate_jlens_pack_json(events, str(JLENS_EVENTS_RELATIVE).replace("\\", "/"))
+    return [
+        (checkpoint, REMOTE_JLENS_CHECKPOINT_STAGING),
+        (status, REMOTE_JLENS_STATUS_STAGING),
+        (events, REMOTE_JLENS_EVENTS_STAGING),
+    ]
+
+
+def atomic_install_jlens_resume(
+    *,
+    checkpoint: Path,
+    status: Path,
+    events: Path,
+    project: Path,
+    missing_ok: bool = False,
+) -> Path | None:
+    if not os.path.lexists(checkpoint):
+        if missing_ok:
+            return None
+        raise FileNotFoundError(f"jlens checkpoint missing (staging: {checkpoint})")
+    installed = atomic_install_jlens_checkpoint(staged=checkpoint, project=project)
+    status_dest = project / JLENS_STATUS_RELATIVE
+    events_dest = project / JLENS_EVENTS_RELATIVE
+    _stream_install_regular_file(
+        staged=status,
+        destination=status_dest,
+        max_bytes=MAX_JLENS_JSON_BYTES,
+        prefix=".jlens_status.",
+    )
+    validate_jlens_pack_json(status_dest, str(JLENS_STATUS_RELATIVE).replace("\\", "/"))
+    _stream_install_regular_file(
+        staged=events,
+        destination=events_dest,
+        max_bytes=MAX_JLENS_JSONL_BYTES,
+        prefix=".jlens_events.",
+    )
+    validate_jlens_pack_json(events_dest, str(JLENS_EVENTS_RELATIVE).replace("\\", "/"))
+    return installed
 
 
 def is_allowed_dose_fetch_member(name: str) -> bool:

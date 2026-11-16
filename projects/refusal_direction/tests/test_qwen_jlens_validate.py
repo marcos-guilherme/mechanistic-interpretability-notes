@@ -41,6 +41,7 @@ def _envelope(experiment: str, config: dict, results: dict) -> ArtifactEnvelope:
             "requested_model_revision": QWEN_REVISION,
             "resolved_model_revision": QWEN_REVISION,
             "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
+            "dataset_repo_id": config["dataset_repo_id"],
             "dataset_revision": config["dataset_revision"],
             "source_dose_run_id": SOURCE_DOSE_RUN_ID,
         },
@@ -203,6 +204,8 @@ def write_jlens_tree(root: Path, *, tiny: bool = True) -> Path:
             "state": "completed",
             "completed_units": 20,
             "total_units": 20,
+            "fit_completed_units": 100,
+            "fit_total_units": 100,
             "updated_at_utc": "2026-01-01T00:00:00+00:00",
         },
     )
@@ -416,6 +419,90 @@ def test_validator_runs_original_validators_on_project_root() -> None:
     checks = validate_qwen_jlens(ROOT)
     assert checks["original_pilot_validator"] is True
     assert checks["original_dose_validator"] is True
+
+
+def test_validator_rejects_missing_provenance_and_non_sha256(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    prepare_path = root / "results" / "qwen25_coder_7b_jlens" / "00_jlens_prepare.json"
+    payload = json.loads(prepare_path.read_text(encoding="utf-8"))
+    del payload["provenance"]["model_name"]
+    payload["results"]["corpus_hash"] = "not-a-hash"
+    prepare_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["model_dataset_upstream_revisions"] is False
+
+
+def test_validator_rejects_holdout_order_zero_positions_and_layer_mismatch(
+    tmp_path: Path,
+) -> None:
+    root = write_jlens_tree(tmp_path)
+    holdout_path = root / "results" / "qwen25_coder_7b_jlens" / "03_jlens_holdout.json"
+    holdout = json.loads(holdout_path.read_text(encoding="utf-8"))
+    holdout["results"]["holdout_ids"] = list(reversed(holdout["results"]["holdout_ids"]))
+    first_id = next(iter(holdout["results"]["by_item"]))
+    first_layer = next(iter(holdout["results"]["by_item"][first_id]))
+    holdout["results"]["by_item"][first_id][first_layer]["n_positions"] = 0
+    holdout["results"]["by_layer"][first_layer]["jlens"]["mean_rank"] = 99.0
+    holdout_path.write_text(json.dumps(holdout, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["holdout_complete"] is False
+    assert checks["holdout_metric_arithmetic"] is False
+
+
+def test_validator_accepts_resume_event_history(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    events_path = root / "artifacts" / "qwen25_coder_7b_jlens" / "events.jsonl"
+    extra = [
+        {"event": "initialized", "run_id": RUN_ID, "stage": "prepare", "state": "pending"},
+        {"event": "initialized", "run_id": RUN_ID, "stage": "fit", "state": "pending"},
+        {
+            "event": "checkpoint",
+            "run_id": RUN_ID,
+            "n_done": 100,
+            "state": "running",
+            "stage": "fit",
+        },
+        {
+            "event": "initialized",
+            "run_id": RUN_ID,
+            "stage": "holdout",
+            "state": "pending",
+        },
+        {
+            "event": "stage_completed",
+            "run_id": RUN_ID,
+            "stage": "holdout",
+            "state": "completed",
+        },
+    ]
+    events_path.write_text(
+        events_path.read_text(encoding="utf-8")
+        + "".join(json.dumps(item) + "\n" for item in extra),
+        encoding="utf-8",
+    )
+    checks = validate_qwen_jlens(root)
+    assert checks["run_status_events_manifest"] is True
+
+
+def test_validator_rejects_empty_manifest_and_incomplete_checkpoint(
+    tmp_path: Path,
+) -> None:
+    root = write_jlens_tree(tmp_path)
+    manifest_path = root / "results" / "qwen25_coder_7b_jlens" / "execution_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["results"]["result_files"] = []
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    checkpoint_path = root / "artifacts" / "qwen25_coder_7b_jlens" / "jlens_fit_checkpoint.pt"
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    payload["n_done"] = 99
+    torch.save(payload, checkpoint_path)
+    evaluation_path = root / "results" / "qwen25_coder_7b_jlens" / "jlens_evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    evaluation["lens_bytes"] = 1
+    evaluation_path.write_text(json.dumps(evaluation, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["run_status_events_manifest"] is False
+    assert checks["checkpoint_and_lens_identity"] is False
 
 
 def test_validator_recomputes_lens_hash_and_holdout_item_stats(tmp_path: Path) -> None:

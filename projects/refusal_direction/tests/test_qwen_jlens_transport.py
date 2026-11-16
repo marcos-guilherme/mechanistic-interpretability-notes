@@ -14,12 +14,16 @@ from refusal_direction_replication.qwen_colab_transport import (
     MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES,
     MAX_MEMBER_BYTES,
     REMOTE_JLENS_CHECKPOINT_STAGING,
+    REMOTE_JLENS_EVENTS_STAGING,
+    REMOTE_JLENS_STATUS_STAGING,
     atomic_install_jlens_checkpoint,
+    atomic_install_jlens_resume,
     collect_qwen_jlens_pack_entries,
     extract_qwen_jlens_archive,
     is_allowed_jlens_fetch_member,
     jlens_member_byte_limit,
     optional_local_jlens_checkpoint,
+    optional_local_jlens_resume_bundle,
     pack_qwen_jlens_results,
 )
 
@@ -324,6 +328,15 @@ def test_optional_checkpoint_upload_and_validated_install(
         },
         checkpoint,
     )
+    (artifacts / "status.json").write_text(
+        json.dumps({"run_id": "jlens-run-1", "state": "running", "current_stage": "fit"})
+        + "\n",
+        encoding="utf-8",
+    )
+    (artifacts / "events.jsonl").write_text(
+        json.dumps({"event": "checkpoint", "run_id": "jlens-run-1", "n_done": 8}) + "\n",
+        encoding="utf-8",
+    )
     (project / "hello.py").write_text("print('ok')\n", encoding="utf-8")
     commands: list[list[str]] = []
     monkeypatch.setattr(RUN_REFUSAL, "PROJECT", project)
@@ -340,6 +353,8 @@ def test_optional_checkpoint_upload_and_validated_install(
     RUN_REFUSAL.main()
     uploaded = [item for command in commands for item in command]
     assert REMOTE_JLENS_CHECKPOINT_STAGING in uploaded
+    assert REMOTE_JLENS_STATUS_STAGING in uploaded
+    assert REMOTE_JLENS_EVENTS_STAGING in uploaded
     assert str(checkpoint) in uploaded
     archive = tmp_path / ".colab-staging" / "refusal_direction.tar.gz"
     with tarfile.open(archive, "r:gz") as handle:
@@ -363,3 +378,38 @@ def test_checkpoint_install_rejects_corrupt_payload(tmp_path: Path) -> None:
     staged.write_bytes(b"not-a-checkpoint")
     with pytest.raises(ValueError, match="checkpoint"):
         atomic_install_jlens_checkpoint(staged=staged, project=tmp_path / "proj")
+
+
+def test_checkpoint_install_streams_bytes() -> None:
+    import inspect
+
+    source = inspect.getsource(atomic_install_jlens_checkpoint)
+    assert "read_bytes()" not in source
+    assert "copyfileobj" in source
+
+
+def test_resume_bundle_requires_checkpoint_status_and_events(tmp_path: Path) -> None:
+    import torch
+
+    project = tmp_path / "project"
+    artifacts = project / "artifacts" / "qwen25_coder_7b_jlens"
+    artifacts.mkdir(parents=True)
+    torch.save(
+        {
+            "jacobian_sum": {0: torch.eye(4)},
+            "n_done": 1,
+            "next_idx": 1,
+            "source_layers": [0],
+            "target_layer": 1,
+            "skip_first": 16,
+            "corpus_hash": "c" * 64,
+            "config_hash": "d" * 64,
+            "model_revision": "c" * 40,
+            "implementation_commit": "a" * 40,
+            "run_id": "jlens-run-1",
+            "dim_batch": 16,
+        },
+        artifacts / "jlens_fit_checkpoint.pt",
+    )
+    with pytest.raises(ValueError, match="status.json"):
+        optional_local_jlens_resume_bundle(project)

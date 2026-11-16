@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -136,18 +137,27 @@ class RunProgressStore:
         stage: str,
         total_units: int,
         message: str | None = None,
+        completed_units: int = 0,
+        extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        validate_progress(completed_units=0, total_units=total_units)
+        previous = self.read_status()
+        validate_progress(completed_units=completed_units, total_units=total_units)
         payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "profile": self.profile,
             "run_id": self.run_id,
             "current_stage": stage,
             "state": "pending",
-            "completed_units": 0,
+            "completed_units": completed_units,
             "total_units": total_units,
             "updated_at_utc": utc_now(),
         }
+        if previous:
+            for key in ("fit_completed_units", "fit_total_units"):
+                if key in previous:
+                    payload[key] = previous[key]
+        if extra:
+            payload.update(dict(extra))
         if message is not None:
             payload["message"] = message
         self._write_status(payload)
@@ -172,6 +182,7 @@ class RunProgressStore:
         abort_reason: str | None = None,
         stage: str | None = None,
         event: str,
+        extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         current = self.read_status()
         if current is None:
@@ -208,6 +219,8 @@ class RunProgressStore:
             payload["abort_gate"] = abort_gate
         if abort_reason is not None:
             payload["abort_reason"] = abort_reason
+        if extra:
+            payload.update(dict(extra))
         self._write_status(payload)
         event_record: dict[str, Any] = {
             "event": event,
@@ -241,12 +254,14 @@ class RunProgressStore:
         completed_units: int,
         total_units: int | None = None,
         message: str | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._mutate_status(
             completed_units=completed_units,
             total_units=total_units,
             message=message,
             event="progress",
+            extra=extra,
         )
 
     def complete_stage(self, message: str | None = None) -> dict[str, Any]:

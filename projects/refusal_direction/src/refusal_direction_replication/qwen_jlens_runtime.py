@@ -56,6 +56,7 @@ from .qwen_jlens import (
     valid_token_positions,
     validate_checkpoint_identity,
     validate_checkpoint_payload,
+    validate_checkpoint_structure,
     validate_fitted_lens,
     wrap_hf_model_for_jlens,
     write_fit_checkpoint,
@@ -130,6 +131,23 @@ def require_source_dose_pass(root: Path, config: Mapping[str, Any]) -> dict[str,
     if payload.get("run_id") != expected_run:
         raise ValueError("source dose run_id does not match the passing follow-up")
     return payload
+
+
+def resolve_jlens_run_id(
+    artifacts_dir: Path,
+    *,
+    requested: str | None,
+    checkpoint_path: Path,
+) -> str:
+    if requested:
+        return requested
+    if checkpoint_path.is_file():
+        payload = load_fit_checkpoint(checkpoint_path)
+        validate_checkpoint_structure(payload)
+        existing = payload.get("run_id")
+        if existing:
+            return str(existing)
+    return resolve_run_id(artifacts_dir, requested=None)
 
 
 def default_load_rows(config: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
@@ -364,7 +382,13 @@ def run_qwen_jlens(
     results_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     source_dose = require_source_dose_pass(root, config)
-    resolved_run_id = resolve_run_id(artifacts_dir, run_id)
+    checkpoint_path = artifacts_dir / CHECKPOINT_FILENAME
+    lens_path = artifacts_dir / FINAL_LENS_FILENAME
+    resolved_run_id = resolve_jlens_run_id(
+        artifacts_dir,
+        requested=run_id,
+        checkpoint_path=checkpoint_path,
+    )
     commit = implementation_commit_hash()
     store = RunProgressStore(
         artifacts_dir, profile=profile, run_id=resolved_run_id
@@ -380,8 +404,6 @@ def run_qwen_jlens(
     max_seq_len = int(config.get("max_seq_len", MAX_SEQ_LEN))
     d_model = int(config["d_model"])
     hashed_config = config_hash(config)
-    checkpoint_path = artifacts_dir / CHECKPOINT_FILENAME
-    lens_path = artifacts_dir / FINAL_LENS_FILENAME
     model: Any = None
     tokenizer: Any = None
     bound: Any = None
@@ -407,14 +429,30 @@ def run_qwen_jlens(
             model, tokenizer = loader(config) if load_model is None else loader()
         return model, tokenizer
 
-    def enter_stage(stage: str, total_units: int) -> None:
-        store.initialize(stage=stage, total_units=total_units)
+    def enter_stage(
+        stage: str,
+        total_units: int,
+        *,
+        completed_units: int = 0,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        store.initialize(
+            stage=stage,
+            total_units=total_units,
+            completed_units=completed_units,
+            extra=extra,
+        )
         store.begin_running()
 
     def resolved_revision() -> str:
         observed = getattr(getattr(model, "config", None), "_commit_hash", None)
         if not observed:
             raise ValueError("resolved model revision is missing")
+        requested = str(config["model_revision"])
+        if str(observed) != requested:
+            raise ValueError(
+                f"resolved model revision {observed!r} != requested {requested!r}"
+            )
         return str(observed)
 
     rows_fn = load_rows or (lambda **_kwargs: default_load_rows(config))
@@ -642,9 +680,24 @@ def run_qwen_jlens(
         if bound is None:
             hf_model, tokenizer = ensure_model()
             bound = wrap(hf_model, tokenizer)
-        enter_stage("fit", FIT_COUNT)
+        enter_stage(
+            "fit",
+            FIT_COUNT,
+            completed_units=n_done,
+            extra={
+                "fit_completed_units": n_done,
+                "fit_total_units": FIT_COUNT,
+            },
+        )
         if n_done:
-            store.update_progress(completed_units=n_done, total_units=FIT_COUNT)
+            store.update_progress(
+                completed_units=n_done,
+                total_units=FIT_COUNT,
+                extra={
+                    "fit_completed_units": n_done,
+                    "fit_total_units": FIT_COUNT,
+                },
+            )
         for prompt_idx, item in enumerate(corpus.fit):
             if prompt_idx < next_idx:
                 continue
@@ -669,7 +722,14 @@ def run_qwen_jlens(
                 dim_batch=int(selected_dim_batch),
                 **identity,
             )
-            store.update_progress(completed_units=n_done, total_units=FIT_COUNT)
+            store.update_progress(
+                completed_units=n_done,
+                total_units=FIT_COUNT,
+                extra={
+                    "fit_completed_units": n_done,
+                    "fit_total_units": FIT_COUNT,
+                },
+            )
             store.append_public_event(
                 {
                     "event": "checkpoint",
@@ -730,7 +790,14 @@ def run_qwen_jlens(
             d_model=d_model,
             n_prompts=n_done,
         )
-        enter_stage("holdout", HOLDOUT_COUNT)
+        enter_stage(
+            "holdout",
+            HOLDOUT_COUNT,
+            extra={
+                "fit_completed_units": FIT_COUNT,
+                "fit_total_units": FIT_COUNT,
+            },
+        )
         records = run_holdout_readout(
             lens=loaded_lens,
             model=bound,

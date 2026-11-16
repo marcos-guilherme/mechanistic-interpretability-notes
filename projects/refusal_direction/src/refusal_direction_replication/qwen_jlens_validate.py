@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from .pipeline import load_config
 from .qwen_dose_validate import validate_qwen_dose
 from .qwen_dose import sha256_file
 from .qwen_jlens import (
+    DATASET_REPO_ID,
     DIM_BATCH_PROBE_ORDER,
     EXPECTED_D_MODEL,
     EXPECTED_N_LAYERS,
@@ -23,9 +25,13 @@ from .qwen_jlens import (
     JLENS_UPSTREAM_COMMIT,
     QWEN_MODEL,
     QWEN_REVISION,
+    SHA256_RE,
     SKIP_FIRST,
     SOURCE_DOSE_RUN_ID,
     jlens_metadata_contains_leak,
+    load_fit_checkpoint,
+    validate_checkpoint_identity,
+    validate_checkpoint_payload,
     validate_fitted_lens,
 )
 from .qwen_pilot_validate import _commit_ok, validate_qwen_pilot
@@ -60,6 +66,89 @@ def _weighted_mean(by_layer: dict[str, Any], method: str, field: str) -> float:
         total += float(block[field]) * n_obs
         weight += n_obs
     return total / weight if weight else 0.0
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and bool(SHA256_RE.fullmatch(value))
+
+
+def _metric_from_counts(
+    *,
+    n_pos: int,
+    rank_sum: int,
+    hits1: int,
+    hits5: int,
+    hits10: int,
+) -> dict[str, float | int]:
+    return {
+        "n_observations": n_pos,
+        "mean_rank": (rank_sum / n_pos) if n_pos else 0.0,
+        "pass@1": (hits1 / n_pos) if n_pos else 0.0,
+        "pass@5": (hits5 / n_pos) if n_pos else 0.0,
+        "pass@10": (hits10 / n_pos) if n_pos else 0.0,
+    }
+
+
+def _recompose_by_layer(
+    by_item: dict[str, Any],
+    source_layers: Sequence[int],
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    recomposed: dict[str, dict[str, dict[str, float | int]]] = {}
+    for layer in source_layers:
+        layer_key = str(int(layer))
+        jlens = {"n_pos": 0, "rank_sum": 0, "hits1": 0, "hits5": 0, "hits10": 0}
+        logit = {"n_pos": 0, "rank_sum": 0, "hits1": 0, "hits5": 0, "hits10": 0}
+        for layers in by_item.values():
+            block = (layers or {}).get(layer_key) or {}
+            n_pos = int(block.get("n_positions") or 0)
+            jlens["n_pos"] += n_pos
+            jlens["rank_sum"] += int(block.get("jlens_rank_sum") or 0)
+            jlens["hits1"] += int(block.get("jlens_hits@1") or 0)
+            jlens["hits5"] += int(block.get("jlens_hits@5") or 0)
+            jlens["hits10"] += int(block.get("jlens_hits@10") or 0)
+            logit["n_pos"] += n_pos
+            logit["rank_sum"] += int(block.get("logit_lens_rank_sum") or 0)
+            logit["hits1"] += int(block.get("logit_lens_hits@1") or 0)
+            logit["hits5"] += int(block.get("logit_lens_hits@5") or 0)
+            logit["hits10"] += int(block.get("logit_lens_hits@10") or 0)
+        recomposed[layer_key] = {
+            "jlens": _metric_from_counts(
+                n_pos=jlens["n_pos"],
+                rank_sum=jlens["rank_sum"],
+                hits1=jlens["hits1"],
+                hits5=jlens["hits5"],
+                hits10=jlens["hits10"],
+            ),
+            "logit_lens": _metric_from_counts(
+                n_pos=logit["n_pos"],
+                rank_sum=logit["rank_sum"],
+                hits1=logit["hits1"],
+                hits5=logit["hits5"],
+                hits10=logit["hits10"],
+            ),
+        }
+    return recomposed
+
+
+ALLOWED_INIT_TRANSITIONS: dict[str | None, frozenset[str]] = {
+    None: frozenset({"prepare"}),
+    "prepare": frozenset({"probe", "fit"}),
+    "probe": frozenset({"fit"}),
+    "fit": frozenset({"holdout", "prepare", "fit"}),
+    "holdout": frozenset({"prepare"}),
+}
+
+
+def _initialized_stages_resume_aware(stages: Sequence[Any]) -> bool:
+    previous: str | None = None
+    for stage in stages:
+        if not isinstance(stage, str):
+            return False
+        allowed = ALLOWED_INIT_TRANSITIONS.get(previous)
+        if allowed is None or stage not in allowed:
+            return False
+        previous = stage
+    return True
 
 
 class _LoadedLens:
@@ -153,26 +242,78 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         path for path in sorted(results_dir.glob("*.json")) if path.is_file()
     ]
     payloads = [_load(path) for path in compact_files]
+    expected_dataset_revision = config.get("dataset_revision")
+    expected_dataset_repo = config.get("dataset_repo_id", DATASET_REPO_ID)
+    expected_source_dose = config.get("source_dose_run_id", SOURCE_DOSE_RUN_ID)
+    expected_provenance = {
+        "model_name": QWEN_MODEL,
+        "requested_model_revision": QWEN_REVISION,
+        "resolved_model_revision": QWEN_REVISION,
+        "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
+        "dataset_repo_id": expected_dataset_repo,
+        "dataset_revision": expected_dataset_revision,
+        "source_dose_run_id": expected_source_dose,
+        "run_id": evaluation.get("run_id"),
+        "implementation_commit": evaluation.get("implementation_commit"),
+    }
     run_ids = {evaluation.get("run_id")}
-    for payload in payloads:
+    seen_corpus: set[str] = set()
+    seen_config: set[str] = set()
+    for path, payload in zip(compact_files, payloads, strict=True):
         if jlens_metadata_contains_leak(payload):
             checks["no_raw_text_leakage"] = False
-        provenance = payload.get("provenance") or {}
-        if provenance.get("model_name") not in {None, QWEN_MODEL}:
-            checks["model_dataset_upstream_revisions"] = False
-        if provenance.get("requested_model_revision") not in {None, QWEN_REVISION}:
-            checks["model_dataset_upstream_revisions"] = False
-        if provenance.get("jlens_upstream_commit") not in {None, JLENS_UPSTREAM_COMMIT}:
-            checks["model_dataset_upstream_revisions"] = False
-        if provenance.get("dataset_revision") not in {
-            None,
-            config.get("dataset_revision"),
-        }:
-            checks["model_dataset_upstream_revisions"] = False
-        if not _commit_ok(provenance.get("implementation_commit") or evaluation.get("implementation_commit")):
-            if provenance.get("implementation_commit"):
+        if path.name == "jlens_evaluation.json":
+            if payload.get("model_revision") != QWEN_REVISION:
+                checks["model_dataset_upstream_revisions"] = False
+            if payload.get("jlens_upstream_commit") != JLENS_UPSTREAM_COMMIT:
+                checks["model_dataset_upstream_revisions"] = False
+            if payload.get("dataset_revision") != expected_dataset_revision:
+                checks["model_dataset_upstream_revisions"] = False
+            if payload.get("run_id") != evaluation.get("run_id"):
                 checks["run_status_events_manifest"] = False
-        run_ids.add(provenance.get("run_id") or evaluation.get("run_id"))
+            continue
+        provenance = payload.get("provenance")
+        if not isinstance(provenance, dict):
+            checks["model_dataset_upstream_revisions"] = False
+            checks["run_status_events_manifest"] = False
+            continue
+        if provenance.get("resolved_model_revision") != provenance.get(
+            "requested_model_revision"
+        ):
+            checks["model_dataset_upstream_revisions"] = False
+        for field_name, expected_value in expected_provenance.items():
+            if field_name not in provenance or provenance.get(field_name) != expected_value:
+                if field_name in {
+                    "run_id",
+                    "implementation_commit",
+                }:
+                    checks["run_status_events_manifest"] = False
+                else:
+                    checks["model_dataset_upstream_revisions"] = False
+        if not _commit_ok(provenance.get("implementation_commit")):
+            checks["run_status_events_manifest"] = False
+        run_ids.add(provenance.get("run_id"))
+        results = payload.get("results") or {}
+        for hash_name in ("corpus_hash", "config_hash", "lens_sha256"):
+            if hash_name in results and not _is_sha256(results.get(hash_name)):
+                checks["model_dataset_upstream_revisions"] = False
+        if "corpus_hash" in results:
+            seen_corpus.add(str(results.get("corpus_hash")))
+        if "config_hash" in results:
+            seen_config.add(str(results.get("config_hash")))
+        for hash_list_name in ("fit_hashes", "holdout_hashes"):
+            values = list(results.get(hash_list_name) or [])
+            if values and any(not _is_sha256(item) for item in values):
+                checks["model_dataset_upstream_revisions"] = False
+    for hash_name in ("corpus_hash", "config_hash", "lens_sha256"):
+        if hash_name in evaluation and not _is_sha256(evaluation.get(hash_name)):
+            checks["model_dataset_upstream_revisions"] = False
+    if "corpus_hash" in evaluation:
+        seen_corpus.add(str(evaluation.get("corpus_hash")))
+    if "config_hash" in evaluation:
+        seen_config.add(str(evaluation.get("config_hash")))
+    if len(seen_corpus) > 1 or len(seen_config) > 1:
+        checks["model_dataset_upstream_revisions"] = False
 
     prepare_path = results_dir / "00_jlens_prepare.json"
     if prepare_path.is_file():
@@ -261,13 +402,55 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             checks["holdout_complete"] = False
         overall = holdout.get("overall") or {}
         by_item = holdout.get("by_item") or {}
+        holdout_ids = list(holdout.get("holdout_ids") or [])
+        holdout_hashes = list(holdout.get("holdout_hashes") or [])
         if len(by_item) != HOLDOUT_COUNT:
             checks["holdout_complete"] = False
-        for item_id, layers in by_item.items():
+        if len(holdout_ids) != HOLDOUT_COUNT or len(set(holdout_ids)) != HOLDOUT_COUNT:
+            checks["holdout_complete"] = False
+        if len(holdout_hashes) != HOLDOUT_COUNT or len(set(holdout_hashes)) != HOLDOUT_COUNT:
+            checks["holdout_complete"] = False
+        if any(not _is_sha256(item) for item in holdout_hashes):
+            checks["holdout_complete"] = False
+            checks["model_dataset_upstream_revisions"] = False
+        prepare_holdout_ids = (
+            list((_load(prepare_path).get("results") or {}).get("holdout_ids") or [])
+            if prepare_path.is_file()
+            else []
+        )
+        prepare_holdout_hashes = (
+            list((_load(prepare_path).get("results") or {}).get("holdout_hashes") or [])
+            if prepare_path.is_file()
+            else []
+        )
+        if holdout_ids != prepare_holdout_ids or holdout_hashes != prepare_holdout_hashes:
+            checks["holdout_complete"] = False
+        if set(by_item.keys()) != set(holdout_ids):
+            checks["holdout_complete"] = False
+        cell_count = 0
+        for item_id in holdout_ids:
+            layers = by_item.get(item_id) or {}
             if {int(key) for key in layers} != set(source_layers):
                 checks["holdout_complete"] = False
-        if len(holdout.get("holdout_ids") or []) != HOLDOUT_COUNT:
+            for layer in source_layers:
+                block = layers.get(str(int(layer))) or {}
+                n_positions = int(block.get("n_positions") or 0)
+                if n_positions <= 0:
+                    checks["holdout_complete"] = False
+                cell_count += 1
+        if cell_count != HOLDOUT_COUNT * len(source_layers):
             checks["holdout_complete"] = False
+        recomposed = _recompose_by_layer(by_item, source_layers)
+        for layer in source_layers:
+            layer_key = str(int(layer))
+            stored = by_layer.get(layer_key) or {}
+            expected_layer = recomposed.get(layer_key) or {}
+            for method in ("jlens", "logit_lens"):
+                for field_name in ("n_observations", "mean_rank", "pass@1", "pass@5", "pass@10"):
+                    observed = float((stored.get(method) or {}).get(field_name) or 0)
+                    wanted = float((expected_layer.get(method) or {}).get(field_name) or 0)
+                    if abs(observed - wanted) > 1e-9:
+                        checks["holdout_metric_arithmetic"] = False
         for method in ("jlens", "logit_lens"):
             expected_pass1 = _weighted_mean(by_layer, method, "pass@1")
             expected_pass5 = _weighted_mean(by_layer, method, "pass@5")
@@ -330,9 +513,13 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 checks["checkpoint_and_lens_identity"] = False
             if int(fit_results.get("lens_bytes") or -1) != actual_size:
                 checks["checkpoint_and_lens_identity"] = False
-            if evaluation.get("lens_sha256") not in {None, actual_hash}:
+            if evaluation.get("lens_sha256") != actual_hash:
+                checks["checkpoint_and_lens_identity"] = False
+            if evaluation.get("lens_bytes") != actual_size:
                 checks["checkpoint_and_lens_identity"] = False
             if status == "pass" and evaluation.get("lens_sha256") != actual_hash:
+                checks["checkpoint_and_lens_identity"] = False
+            if status == "pass" and evaluation.get("lens_bytes") != actual_size:
                 checks["checkpoint_and_lens_identity"] = False
             for field_name in (
                 "corpus_hash",
@@ -349,8 +536,33 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         checks["checkpoint_and_lens_identity"] = False
     if checkpoint_path.is_file():
         try:
-            checkpoint = torch.load(
-                checkpoint_path, map_location="cpu", weights_only=True
+            checkpoint = load_fit_checkpoint(checkpoint_path)
+            fit_path = results_dir / "02_jlens_fit.json"
+            fit_results = (
+                _load(fit_path).get("results") if fit_path.is_file() else {}
+            ) or {}
+            identity_corpus = (
+                fit_results.get("corpus_hash") or evaluation.get("corpus_hash")
+            )
+            identity_config = (
+                fit_results.get("config_hash") or evaluation.get("config_hash")
+            )
+            validate_checkpoint_identity(
+                checkpoint,
+                source_layers=config["source_layers"],
+                target_layer=int(config["target_layer"]),
+                skip_first=SKIP_FIRST,
+                corpus_hash=str(identity_corpus or ""),
+                config_hash=str(identity_config or ""),
+                model_revision=QWEN_REVISION,
+                implementation_commit=str(evaluation.get("implementation_commit") or ""),
+                run_id=str(evaluation.get("run_id") or ""),
+            )
+            validate_checkpoint_payload(
+                checkpoint,
+                source_layers=config["source_layers"],
+                d_model=int(config["d_model"]),
+                dim_batch=int(checkpoint["dim_batch"]),
             )
             if checkpoint.get("run_id") != evaluation.get("run_id"):
                 checks["checkpoint_and_lens_identity"] = False
@@ -362,6 +574,12 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 int(layer) for layer in config["source_layers"]
             ]:
                 checks["checkpoint_and_lens_identity"] = False
+            if status == "pass" and int(checkpoint.get("n_done") or -1) != FIT_COUNT:
+                checks["checkpoint_and_lens_identity"] = False
+            for hash_name in ("corpus_hash", "config_hash"):
+                if not _is_sha256(checkpoint.get(hash_name)):
+                    checks["checkpoint_and_lens_identity"] = False
+                    checks["model_dataset_upstream_revisions"] = False
         except Exception:
             checks["checkpoint_and_lens_identity"] = False
 
@@ -376,6 +594,10 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 status_payload.get("total_units") or -2
             ):
                 checks["run_status_events_manifest"] = False
+            if int(status_payload.get("fit_completed_units") or -1) != FIT_COUNT:
+                checks["run_status_events_manifest"] = False
+            if int(status_payload.get("fit_total_units") or -1) != FIT_COUNT:
+                checks["run_status_events_manifest"] = False
         events_path = artifacts_dir / EVENTS_FILENAME
         if events_path.is_file():
             events = [
@@ -389,19 +611,25 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             checkpoint_events = [
                 item for item in events if item.get("event") == "checkpoint"
             ]
-            if status == "pass" and len(checkpoint_events) != FIT_COUNT:
+            checkpoint_done = {
+                int(item.get("n_done"))
+                for item in checkpoint_events
+                if item.get("n_done") is not None
+            }
+            if status == "pass" and checkpoint_done != set(range(1, FIT_COUNT + 1)):
                 checks["run_status_events_manifest"] = False
             initialized_stages = [
                 item.get("stage")
                 for item in events
                 if item.get("event") == "initialized"
             ]
-            if status == "pass" and initialized_stages != [
+            if not _initialized_stages_resume_aware(initialized_stages):
+                checks["run_status_events_manifest"] = False
+            if status == "pass" and not {
                 "prepare",
-                "probe",
                 "fit",
                 "holdout",
-            ]:
+            }.issubset(set(initialized_stages)):
                 checks["run_status_events_manifest"] = False
             if status == "pass":
                 if status_payload.get("current_stage") != "holdout":
@@ -422,7 +650,7 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             checks["run_status_events_manifest"] = False
         listed = list((manifest.get("results") or {}).get("result_files") or [])
         expected_files = list(ABORTED_FILES if status == "aborted" else PASS_FILES)
-        if listed and set(listed) != set(expected_files):
+        if listed != expected_files:
             checks["run_status_events_manifest"] = False
         actual = {path.name for path in results_dir.glob("*.json") if path.is_file()}
         if expected_files and not set(expected_files).issubset(actual):

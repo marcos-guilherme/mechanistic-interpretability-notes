@@ -1,4 +1,4 @@
-"""Install a validated J-lens checkpoint for resume in a new Colab session."""
+"""Install a validated J-lens resume bundle in a new Colab session."""
 
 import sys
 from pathlib import Path
@@ -10,13 +10,17 @@ if _SRC not in sys.path:
 
 from refusal_direction_replication.qwen_colab_transport import (
     REMOTE_JLENS_CHECKPOINT_STAGING,
-    atomic_install_jlens_checkpoint,
+    REMOTE_JLENS_EVENTS_STAGING,
+    REMOTE_JLENS_STATUS_STAGING,
+    atomic_install_jlens_resume,
 )
 
 
 def main() -> int:
-    atomic_install_jlens_checkpoint(
-        staged=Path(REMOTE_JLENS_CHECKPOINT_STAGING),
+    atomic_install_jlens_resume(
+        checkpoint=Path(REMOTE_JLENS_CHECKPOINT_STAGING),
+        status=Path(REMOTE_JLENS_STATUS_STAGING),
+        events=Path(REMOTE_JLENS_EVENTS_STAGING),
         project=ROOT,
         missing_ok=True,
     )

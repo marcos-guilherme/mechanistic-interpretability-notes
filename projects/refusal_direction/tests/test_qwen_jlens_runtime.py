@@ -496,7 +496,7 @@ def test_runtime_records_resolved_revision_lens_hash_and_lifecycle(
     from refusal_direction_replication import qwen_jlens_runtime as runtime
 
     install_runtime_fakes(monkeypatch)
-    observed = "b" * 40
+    observed = QWEN_REVISION
     model = SimpleNamespace(
         n_layers=4,
         d_model=8,
@@ -531,6 +531,7 @@ def test_runtime_records_resolved_revision_lens_hash_and_lifecycle(
     assert fit["results"]["run_id"] == "jlens-run-rev"
     evaluation = json.loads((results / "jlens_evaluation.json").read_text(encoding="utf-8"))
     assert evaluation["lens_sha256"] == fit["results"]["lens_sha256"]
+    assert evaluation["lens_bytes"] == lens_path.stat().st_size
     assert evaluation["model_revision"] == observed
     holdout = json.loads((results / "03_jlens_holdout.json").read_text(encoding="utf-8"))
     assert "by_item" in holdout["results"]
@@ -546,6 +547,8 @@ def test_runtime_records_resolved_revision_lens_hash_and_lifecycle(
     status = json.loads((artifacts / STATUS_FILENAME).read_text(encoding="utf-8"))
     assert status["current_stage"] == "holdout"
     assert status["state"] == "completed"
+    assert status["fit_completed_units"] == 100
+    assert status["fit_total_units"] == 100
 
 
 def test_release_compute_runs_if_release_resources_raises(
@@ -620,3 +623,253 @@ def test_readout_rejects_nonfinite_model_logits() -> None:
             skip_first=16,
             max_seq_len=128,
         )
+
+
+def test_runtime_rejects_resolved_revision_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_dose(tmp_path)
+    from refusal_direction_replication import qwen_jlens_runtime as runtime
+
+    install_runtime_fakes(monkeypatch)
+    with pytest.raises(ValueError, match="resolved model revision"):
+        run_qwen_jlens(
+            tmp_path,
+            run_id="jlens-run-mismatch",
+            load_rows=lambda **_kwargs: [_row(index) for index in range(130)],
+            load_model=lambda **_kwargs: (
+                SimpleNamespace(
+                    n_layers=4,
+                    d_model=8,
+                    config=SimpleNamespace(_commit_hash="b" * 40),
+                ),
+                CountingTokenizer(),
+            ),
+            wrap_model=lambda hf_model, tok: hf_model,
+            jacobian_for_prompt_fn=fake_jacobian,
+            lens_cls=FakeLens,
+            release_resources=lambda: None,
+            clock=lambda: 0.0,
+            assert_contract=lambda: None,
+        )
+
+
+def test_runtime_resumes_run_id_from_checkpoint_without_explicit_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_dose(tmp_path)
+    from refusal_direction_replication import qwen_jlens_runtime as runtime
+    from refusal_direction_replication.qwen_jlens import (
+        build_codesearchnet_corpus,
+        config_hash,
+        corpus_hash,
+        write_fit_checkpoint,
+    )
+
+    monkeypatch.setattr(runtime, "implementation_commit_hash", lambda: IMPLEMENTATION_COMMIT)
+    rows = [_row(index) for index in range(130)]
+    config = load_config(tmp_path, profile=JLENS_PROFILE)
+    tokenizer = CountingTokenizer()
+    corpus = build_codesearchnet_corpus(
+        rows,
+        tokenizer=tokenizer,
+        fit_count=100,
+        holdout_count=20,
+        min_tokens=128,
+        dataset_revision=config["dataset_revision"],
+    )
+    artifacts = tmp_path / "artifacts" / "qwen25_coder_7b_jlens"
+    artifacts.mkdir(parents=True)
+    write_fit_checkpoint(
+        artifacts / "jlens_fit_checkpoint.pt",
+        jacobian_sum={layer: torch.eye(8) for layer in (0, 1, 2)},
+        n_done=40,
+        next_idx=40,
+        dim_batch=32,
+        source_layers=[0, 1, 2],
+        target_layer=3,
+        skip_first=16,
+        corpus_hash=corpus_hash(corpus),
+        config_hash=config_hash(config),
+        model_revision=QWEN_REVISION,
+        implementation_commit=IMPLEMENTATION_COMMIT,
+        run_id="checkpoint-run-id",
+    )
+    jacobian_calls: list[int] = []
+
+    def counting_jacobian(model, prompt, source_layers, **kwargs):
+        jacobian_calls.append(1)
+        return fake_jacobian(model, prompt, source_layers, **kwargs)
+
+    payload = run_qwen_jlens(
+        tmp_path,
+        run_id=None,
+        load_rows=lambda **_kwargs: rows,
+        load_model=lambda **_kwargs: (
+            SimpleNamespace(
+                n_layers=4,
+                d_model=8,
+                config=SimpleNamespace(_commit_hash=QWEN_REVISION),
+            ),
+            tokenizer,
+        ),
+        wrap_model=lambda hf_model, tok: hf_model,
+        jacobian_for_prompt_fn=counting_jacobian,
+        lens_cls=FakeLens,
+        release_resources=lambda: None,
+        clock=lambda: 0.0,
+        assert_contract=lambda: None,
+    )
+    assert payload["status"] == "pass"
+    assert payload["run_id"] == "checkpoint-run-id"
+    assert len(jacobian_calls) == 60
+
+
+def test_fetch_sync_bootstrap_resume_without_run_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication.qwen_colab_transport import (
+        REMOTE_JLENS_CHECKPOINT_STAGING,
+        REMOTE_JLENS_EVENTS_STAGING,
+        REMOTE_JLENS_STATUS_STAGING,
+        atomic_install_jlens_resume,
+        extract_qwen_jlens_archive,
+        optional_local_jlens_resume_bundle,
+        pack_qwen_jlens_results,
+    )
+    from refusal_direction_replication.qwen_jlens import (
+        build_codesearchnet_corpus,
+        config_hash,
+        corpus_hash,
+        write_fit_checkpoint,
+    )
+
+    session_a = tmp_path / "session_a"
+    write_source_dose(session_a)
+    rows = [_row(index) for index in range(130)]
+    config = load_config(session_a, profile=JLENS_PROFILE)
+    tokenizer = CountingTokenizer()
+    corpus = build_codesearchnet_corpus(
+        rows,
+        tokenizer=tokenizer,
+        fit_count=100,
+        holdout_count=20,
+        min_tokens=128,
+        dataset_revision=config["dataset_revision"],
+    )
+    artifacts_a = session_a / "artifacts" / "qwen25_coder_7b_jlens"
+    artifacts_a.mkdir(parents=True)
+    write_fit_checkpoint(
+        artifacts_a / "jlens_fit_checkpoint.pt",
+        jacobian_sum={layer: torch.eye(8) for layer in (0, 1, 2)},
+        n_done=40,
+        next_idx=40,
+        dim_batch=32,
+        source_layers=[0, 1, 2],
+        target_layer=3,
+        skip_first=16,
+        corpus_hash=corpus_hash(corpus),
+        config_hash=config_hash(config),
+        model_revision=QWEN_REVISION,
+        implementation_commit=IMPLEMENTATION_COMMIT,
+        run_id="resume-e2e-run",
+    )
+    (artifacts_a / "status.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "profile": JLENS_PROFILE,
+                "run_id": "resume-e2e-run",
+                "current_stage": "fit",
+                "state": "running",
+                "completed_units": 40,
+                "total_units": 100,
+                "fit_completed_units": 40,
+                "fit_total_units": 100,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    events = [
+        {"event": "initialized", "run_id": "resume-e2e-run", "stage": "prepare"},
+        {"event": "initialized", "run_id": "resume-e2e-run", "stage": "probe"},
+        {"event": "probe_choice", "run_id": "resume-e2e-run", "dim_batch": 32},
+        {"event": "initialized", "run_id": "resume-e2e-run", "stage": "fit"},
+    ]
+    events.extend(
+        {
+            "event": "checkpoint",
+            "run_id": "resume-e2e-run",
+            "n_done": index,
+            "stage": "fit",
+        }
+        for index in range(1, 41)
+    )
+    (artifacts_a / "events.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in events),
+        encoding="utf-8",
+    )
+    archive = tmp_path / "fetched.tar.gz"
+    pack_qwen_jlens_results(session_a, archive)
+    fetched = tmp_path / "fetched_local"
+    fetched.mkdir()
+    extract_qwen_jlens_archive(archive, fetched)
+    bundle = optional_local_jlens_resume_bundle(fetched)
+    remotes = {remote for _path, remote in bundle}
+    assert REMOTE_JLENS_CHECKPOINT_STAGING in remotes
+    assert REMOTE_JLENS_STATUS_STAGING in remotes
+    assert REMOTE_JLENS_EVENTS_STAGING in remotes
+    staging = tmp_path / "remote_staging"
+    staging.mkdir()
+    staged_paths = {}
+    for path, remote in bundle:
+        dest = staging / Path(remote).name
+        dest.write_bytes(path.read_bytes())
+        staged_paths[remote] = dest
+    session_b = tmp_path / "session_b"
+    write_source_dose(session_b)
+    atomic_install_jlens_resume(
+        checkpoint=staged_paths[REMOTE_JLENS_CHECKPOINT_STAGING],
+        status=staged_paths[REMOTE_JLENS_STATUS_STAGING],
+        events=staged_paths[REMOTE_JLENS_EVENTS_STAGING],
+        project=session_b,
+    )
+    from refusal_direction_replication import qwen_jlens_runtime as runtime
+
+    monkeypatch.setattr(runtime, "implementation_commit_hash", lambda: IMPLEMENTATION_COMMIT)
+    jacobian_calls: list[int] = []
+
+    def counting_jacobian(model, prompt, source_layers, **kwargs):
+        jacobian_calls.append(1)
+        return fake_jacobian(model, prompt, source_layers, **kwargs)
+
+    payload = run_qwen_jlens(
+        session_b,
+        run_id=None,
+        load_rows=lambda **_kwargs: rows,
+        load_model=lambda **_kwargs: (
+            SimpleNamespace(
+                n_layers=4,
+                d_model=8,
+                config=SimpleNamespace(_commit_hash=QWEN_REVISION),
+            ),
+            tokenizer,
+        ),
+        wrap_model=lambda hf_model, tok: hf_model,
+        jacobian_for_prompt_fn=counting_jacobian,
+        lens_cls=FakeLens,
+        release_resources=lambda: None,
+        clock=lambda: 0.0,
+        assert_contract=lambda: None,
+    )
+    assert payload["status"] == "pass"
+    assert payload["run_id"] == "resume-e2e-run"
+    assert len(jacobian_calls) == 60
+    events_b = (
+        session_b / "artifacts" / "qwen25_coder_7b_jlens" / "events.jsonl"
+    ).read_text(encoding="utf-8")
+    assert events_b.count('"event": "checkpoint"') >= 100
