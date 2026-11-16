@@ -151,12 +151,12 @@ CODE_EVAL_RAW_PATTERNS = (
     ),
     re.compile(
         rf"^{CODE_EVAL_ARTIFACTS_DIR}/logits/"
-        rf"{CODE_EVAL_DATASETS}__baseline\.pt$"
+        rf"{CODE_EVAL_DATASETS}__{CODE_EVAL_CONDITIONS}\.pt$"
     ),
     re.compile(
         rf"^{CODE_EVAL_ARTIFACTS_DIR}/evalplus/"
         rf"(?:selected_problems\.jsonl|samples__{CODE_EVAL_CONDITIONS}\.jsonl|"
-        rf"results__{CODE_EVAL_CONDITIONS}\.json)$"
+        rf"(?:results|identity)__{CODE_EVAL_CONDITIONS}\.json)$"
     ),
     re.compile(
         rf"^{CODE_EVAL_ARTIFACTS_DIR}/readout/"
@@ -1213,13 +1213,73 @@ def _revalidate_code_eval_members(
         _validate_code_eval_compact(path, relative)
 
 
+def _code_eval_tree_identity(root: Path) -> dict[str, Any] | None:
+    results_dir = root / CODE_EVAL_RESULTS_DIR
+    if not results_dir.is_dir():
+        return None
+    identities: list[dict[str, Any]] = []
+    for path in sorted(results_dir.glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        source = payload.get("provenance") or payload
+        if not all(
+            field in source
+            for field in (
+                "run_id",
+                "implementation_commit",
+                "source_artifact_hashes",
+            )
+        ):
+            continue
+        identities.append(
+            {
+                "run_id": source["run_id"],
+                "implementation_commit": source["implementation_commit"],
+                "source_artifact_hashes": source["source_artifact_hashes"],
+            }
+        )
+    if not identities:
+        return None
+    first = identities[0]
+    if any(identity != first for identity in identities[1:]):
+        raise ValueError("code-eval tree contains conflicting identities")
+    return first
+
+
+def _code_eval_destination_exists(project: Path) -> bool:
+    return any(
+        any(candidate.is_file() for candidate in path.rglob("*"))
+        for path in (
+            project / CODE_EVAL_RESULTS_DIR,
+            project / CODE_EVAL_ARTIFACTS_DIR,
+        )
+        if path.is_dir()
+    )
+
+
+def _validate_code_eval_fetch_identity(staging: Path, project: Path) -> None:
+    if not _code_eval_destination_exists(project):
+        return
+    incoming = _code_eval_tree_identity(staging)
+    existing = _code_eval_tree_identity(project)
+    if incoming is None or existing is None:
+        raise ValueError("code-eval identity conflict: identity is unavailable")
+    if incoming != existing:
+        raise ValueError(
+            "code-eval identity conflict: run, commit, or source hashes differ"
+        )
+
+
 def extract_qwen_code_eval_archive(archive: Path, project: Path) -> None:
+    def validate_staged(staging: Path, members: list[tarfile.TarInfo]) -> None:
+        _revalidate_code_eval_members(staging, members)
+        _validate_code_eval_fetch_identity(staging, project)
+
     _extract_allowlisted_archive(
         archive,
         project,
         validator=validate_qwen_code_eval_archive,
         prefix="qwen-code-eval-fetch-",
-        post_stage_validate=_revalidate_code_eval_members,
+        post_stage_validate=validate_staged,
     )
 
 

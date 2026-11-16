@@ -47,7 +47,9 @@ def test_code_eval_fetch_allowlist_separates_profile_and_allows_raw_artifacts() 
         "artifacts/qwen25_coder_7b_code_eval/datasets/mitre.jsonl",
         "artifacts/qwen25_coder_7b_code_eval/generations/mitre__baseline.jsonl",
         "artifacts/qwen25_coder_7b_code_eval/logits/mitre__baseline.pt",
+        "artifacts/qwen25_coder_7b_code_eval/logits/mitre__addition.pt",
         "artifacts/qwen25_coder_7b_code_eval/evalplus/results__baseline.json",
+        "artifacts/qwen25_coder_7b_code_eval/evalplus/identity__baseline.json",
         "artifacts/qwen25_coder_7b_code_eval/readout/mitre__baseline.jsonl",
         "artifacts/qwen25_coder_7b_code_eval/manual_review_blind.jsonl",
         "artifacts/qwen25_coder_7b_code_eval/manual_review_key.json",
@@ -145,6 +147,104 @@ def test_pack_extract_keeps_raw_ignored_artifacts_inside_profile(tmp_path: Path)
         destination
         / "artifacts/qwen25_coder_7b_code_eval/generations/mitre__baseline.jsonl"
     ).is_file()
+
+
+def _compact_identity(run_id: str) -> dict:
+    return {
+        "schema_version": 1,
+        "experiment": "code_eval_prepare",
+        "config": {},
+        "results": {},
+        "provenance": {
+            "run_id": run_id,
+            "implementation_commit": "a" * 40,
+            "source_artifact_hashes": {"direction": "b" * 64},
+        },
+    }
+
+
+def test_code_eval_fetch_rejects_identity_conflict_and_allows_incremental(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "destination"
+    existing = destination / "results/qwen25_coder_7b_code_eval/00_prepare.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(json.dumps(_compact_identity("local-run")), encoding="utf-8")
+
+    conflicting_root = tmp_path / "conflicting"
+    conflict = (
+        conflicting_root / "results/qwen25_coder_7b_code_eval/01_generate.json"
+    )
+    conflict.parent.mkdir(parents=True)
+    conflict.write_text(json.dumps(_compact_identity("remote-run")), encoding="utf-8")
+    archive = tmp_path / "conflict.tar.gz"
+    pack_qwen_code_eval_results(conflicting_root, archive)
+    before = existing.read_bytes()
+    with pytest.raises(ValueError, match="identity conflict"):
+        extract_qwen_code_eval_archive(archive, destination)
+    assert existing.read_bytes() == before
+    assert not (
+        destination / "results/qwen25_coder_7b_code_eval/01_generate.json"
+    ).exists()
+
+    incremental_root = tmp_path / "incremental"
+    incremental = (
+        incremental_root / "results/qwen25_coder_7b_code_eval/01_generate.json"
+    )
+    incremental.parent.mkdir(parents=True)
+    incremental.write_text(
+        json.dumps(_compact_identity("local-run")), encoding="utf-8"
+    )
+    archive = tmp_path / "incremental.tar.gz"
+    pack_qwen_code_eval_results(incremental_root, archive)
+    extract_qwen_code_eval_archive(archive, destination)
+    assert existing.read_bytes() == before
+    assert (
+        destination / "results/qwen25_coder_7b_code_eval/01_generate.json"
+    ).is_file()
+
+
+def test_code_eval_fetch_rolls_back_partial_same_identity_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import refusal_direction_replication.qwen_colab_transport as transport
+
+    destination = tmp_path / "destination"
+    result = destination / "results/qwen25_coder_7b_code_eval/00_prepare.json"
+    raw = (
+        destination
+        / "artifacts/qwen25_coder_7b_code_eval/generations/mitre__baseline.jsonl"
+    )
+    result.parent.mkdir(parents=True)
+    raw.parent.mkdir(parents=True)
+    result.write_text(json.dumps(_compact_identity("same-run")), encoding="utf-8")
+    raw.write_text("old raw\n", encoding="utf-8")
+
+    incoming = tmp_path / "incoming"
+    incoming_result = incoming / result.relative_to(destination)
+    incoming_raw = incoming / raw.relative_to(destination)
+    incoming_result.parent.mkdir(parents=True)
+    incoming_raw.parent.mkdir(parents=True)
+    incoming_result.write_text(
+        json.dumps(_compact_identity("same-run"), indent=2), encoding="utf-8"
+    )
+    incoming_raw.write_text("new raw\n", encoding="utf-8")
+    archive = tmp_path / "rollback.tar.gz"
+    pack_qwen_code_eval_results(incoming, archive)
+
+    real_replace = transport.os.replace
+
+    def fail_raw_install(source, target):
+        if Path(target) == raw and ".backups" not in str(source):
+            raise OSError("simulated install failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(transport.os, "replace", fail_raw_install)
+    with pytest.raises(OSError, match="simulated"):
+        extract_qwen_code_eval_archive(archive, destination)
+    assert json.loads(result.read_text()) == _compact_identity("same-run")
+    assert raw.read_text(encoding="utf-8") == "old raw\n"
 
 
 def test_colab_profile_routes_sync_bootstrap_run_status_and_fetch(
