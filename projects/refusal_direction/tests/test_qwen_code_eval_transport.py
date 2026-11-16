@@ -212,6 +212,27 @@ def test_code_eval_fetch_rejects_identity_conflict_and_allows_incremental(
     ).is_file()
 
 
+def test_code_eval_fetch_rejects_internally_conflicting_new_tree(
+    tmp_path: Path,
+) -> None:
+    incoming = tmp_path / "incoming"
+    results = incoming / "results/qwen25_coder_7b_code_eval"
+    results.mkdir(parents=True)
+    (results / "00_prepare.json").write_text(
+        json.dumps(_compact_identity("first-run")), encoding="utf-8"
+    )
+    (results / "01_generate.json").write_text(
+        json.dumps(_compact_identity("second-run")), encoding="utf-8"
+    )
+    archive = tmp_path / "internal-conflict.tar.gz"
+    pack_qwen_code_eval_results(incoming, archive)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    with pytest.raises(ValueError, match="conflicting identities"):
+        extract_qwen_code_eval_archive(archive, destination)
+    assert not (destination / "results/qwen25_coder_7b_code_eval").exists()
+
+
 def test_code_eval_fetch_rolls_back_partial_same_identity_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

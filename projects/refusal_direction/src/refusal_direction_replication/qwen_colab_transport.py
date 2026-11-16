@@ -1257,9 +1257,9 @@ def _code_eval_destination_exists(project: Path) -> bool:
 
 
 def _validate_code_eval_fetch_identity(staging: Path, project: Path) -> None:
+    incoming = _code_eval_tree_identity(staging)
     if not _code_eval_destination_exists(project):
         return
-    incoming = _code_eval_tree_identity(staging)
     existing = _code_eval_tree_identity(project)
     if incoming is None or existing is None:
         raise ValueError("code-eval identity conflict: identity is unavailable")
