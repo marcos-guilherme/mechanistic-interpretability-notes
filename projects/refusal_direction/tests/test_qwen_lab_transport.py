@@ -624,12 +624,28 @@ def test_colab_start_lab_does_not_put_secret_in_command_or_status(
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
     url = module.start_lab_and_return_url()
     assert url == "https://started.gradio.live"
+    assert popped[0][1] == "-u"
     assert popped[0][-2:] == ["--auth-file", str(auth)]
     assert "hidden-pass" not in " ".join(popped[0])
     status = json.loads(status_path.read_text(encoding="utf-8"))
     assert "password" not in status
     assert "hidden-pass" not in json.dumps(status)
     assert status["public_url"] == url
+
+
+def test_wait_for_public_url_fails_when_server_exits(
+    tmp_path: Path,
+) -> None:
+    module = _load_script(START_SCRIPT, "colab_start_lab_early_exit")
+    log_path = tmp_path / "server.log"
+    log_path.write_text("startup failed safely\n", encoding="utf-8")
+
+    class ExitedProc:
+        def poll(self):
+            return 1
+
+    with pytest.raises(RuntimeError, match="exited before publishing"):
+        module.wait_for_public_url(log_path, process=ExitedProc(), timeout=1.0)
 
 
 def test_existing_orchestrator_actions_remain_intact() -> None:

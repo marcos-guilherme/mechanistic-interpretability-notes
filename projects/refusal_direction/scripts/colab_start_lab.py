@@ -23,7 +23,7 @@ RUN_SCRIPT = REMOTE_ROOT / "scripts" / "qwen_run_lab.py"
 REMOTE_AUTH_FILE = Path(REMOTE_LAB_AUTH_FILE)
 SERVER_LOG = Path("/content/qwen_lab_server.log")
 STATUS_PATH = REMOTE_ROOT / "artifacts" / "qwen25_coder_7b_lab" / "status.json"
-URL_WAIT_SECONDS = 900
+URL_WAIT_SECONDS = 1800
 
 
 def write_operational_status(payload: dict) -> None:
@@ -33,7 +33,12 @@ def write_operational_status(payload: dict) -> None:
     STATUS_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def wait_for_public_url(log_path: Path, *, timeout: float = URL_WAIT_SECONDS) -> str:
+def wait_for_public_url(
+    log_path: Path,
+    *,
+    process=None,
+    timeout: float = URL_WAIT_SECONDS,
+) -> str:
     deadline = time.time() + timeout
     while time.time() <= deadline:
         if log_path.is_file():
@@ -41,6 +46,8 @@ def wait_for_public_url(log_path: Path, *, timeout: float = URL_WAIT_SECONDS) ->
             url = extract_lab_public_url(text)
             if url:
                 return url
+        if process is not None and process.poll() is not None:
+            raise RuntimeError("lab server exited before publishing a public URL")
         time.sleep(0.05)
     raise TimeoutError("lab public URL was not published")
 
@@ -50,6 +57,7 @@ def start_lab_and_return_url() -> str:
     log_handle = SERVER_LOG.open("w", encoding="utf-8")
     command = [
         sys.executable,
+        "-u",
         str(RUN_SCRIPT),
         "--auth-file",
         str(REMOTE_AUTH_FILE),
@@ -65,7 +73,7 @@ def start_lab_and_return_url() -> str:
     finally:
         log_handle.close()
     try:
-        url = wait_for_public_url(SERVER_LOG)
+        url = wait_for_public_url(SERVER_LOG, process=proc)
     except Exception:
         write_operational_status(
             {
