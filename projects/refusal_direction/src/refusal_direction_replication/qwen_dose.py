@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -15,10 +16,19 @@ from .data import (
     load_local_prompt_corpus,
     prompt_content_hash,
 )
+from .gates import (
+    STATUS_CAUSAL_GATE_FAILED,
+    STATUS_OPERATIONAL_ERROR,
+    STATUS_PASS,
+    GateResult,
+)
 
 
 DOSE_SELECTION_SIZE = 32
 DOSE_CONFIRMATION_SIZE = 32
+STATUS_NO_DOSE_QUALIFIED = "no_dose_qualified"
+EXPECTED_SOURCE_LAYER = 18
+EXPECTED_SOURCE_OFFSET = -1
 DEFAULT_MIN_HARMFUL_ABLATION_DROP = 0.20
 DEFAULT_MAX_HARMLESS_ABLATION_KL = 0.10
 DEFAULT_MIN_HARMLESS_ADDITION_INCREASE = 0.20
@@ -55,6 +65,30 @@ METADATA_LEAK_KEYS = frozenset(
         "completions",
     }
 )
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def coefficient_checkpoint_name(coefficient: float) -> str:
+    return f"checkpoint_coeff_{format(float(coefficient), 'g')}.json"
+
+
+def source_artifact_hashes(root: Path, config: Mapping[str, Any]) -> dict[str, str]:
+    evidence = config["source_evidence"]
+    return {
+        "selected_direction": sha256_file(root / config["source_direction"]),
+        "baseline": sha256_file(root / evidence["baseline"]),
+        "interventions": sha256_file(root / evidence["interventions"]),
+    }
 
 
 @dataclass(frozen=True)
@@ -424,3 +458,52 @@ def select_dose_coefficients(
             for point in addition_curve
         ],
     }
+
+
+def build_dose_evaluation(
+    *,
+    status: str,
+    operational_success: bool,
+    run_id: str,
+    implementation_commit: str | None,
+    source_pilot_run_id: str,
+    source_pilot_implementation_commit: str,
+    source_artifact_hashes: Mapping[str, str],
+    model_revision: str,
+    causal_gate: GateResult | None = None,
+    selected_pair: Mapping[str, float] | None = None,
+    stage: str | None = None,
+    exception_category: str | None = None,
+    error_code: str | None = None,
+    message: str | None = None,
+) -> dict[str, Any]:
+    allowed = {
+        STATUS_PASS,
+        STATUS_CAUSAL_GATE_FAILED,
+        STATUS_OPERATIONAL_ERROR,
+        STATUS_NO_DOSE_QUALIFIED,
+    }
+    if status not in allowed:
+        raise ValueError(f"unknown dose status: {status}")
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "status": status,
+        "operational_success": operational_success,
+        "run_id": run_id,
+        "implementation_commit": implementation_commit,
+        "model_revision": model_revision,
+        "source_pilot_run_id": source_pilot_run_id,
+        "source_pilot_implementation_commit": source_pilot_implementation_commit,
+        "source_artifact_hashes": dict(source_artifact_hashes),
+        "causal_gate": causal_gate.to_dict() if causal_gate is not None else None,
+        "selected_pair": dict(selected_pair) if selected_pair is not None else None,
+    }
+    if stage is not None:
+        payload["stage"] = stage
+    if exception_category is not None:
+        payload["exception_category"] = exception_category
+    if error_code is not None:
+        payload["error_code"] = error_code
+    if message is not None:
+        payload["message"] = message
+    return payload

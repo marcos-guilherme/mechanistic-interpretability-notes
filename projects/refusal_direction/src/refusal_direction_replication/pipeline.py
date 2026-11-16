@@ -676,7 +676,7 @@ def _split_specs(config: dict) -> dict[str, tuple[str, int, int]]:
 
 
 def _sampled_splits(root: Path, config: dict) -> dict[str, list[PromptExample]]:
-    if "dose_grid" in config:
+    if "dose_grid" in config or "source_direction" in config:
         raise ValueError(
             "dose profiles cannot use pipeline._sampled_splits; "
             "use refusal_direction_replication.qwen_dose.build_dose_splits"

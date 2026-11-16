@@ -7,6 +7,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -25,8 +26,25 @@ QWEN_FETCH_ALLOWLIST = frozenset(
     }
 )
 
+DOSE_RESULTS_DIR = "results/qwen25_coder_7b_dose"
+DOSE_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b_dose"
+DOSE_REMOTE_ARCHIVE = Path("/content/qwen_dose_results.tar.gz")
+
+DOSE_FETCH_ALLOWLIST = frozenset(
+    {
+        f"{DOSE_ARTIFACTS_DIR}/status.json",
+        f"{DOSE_ARTIFACTS_DIR}/events.jsonl",
+    }
+)
+
 RESULT_JSON_PATTERN = re.compile(
     r"^results/qwen25_coder_7b/[^/]+\.json$"
+)
+DOSE_RESULT_JSON_PATTERN = re.compile(
+    r"^results/qwen25_coder_7b_dose/[^/]+\.json$"
+)
+DOSE_CHECKPOINT_TENSOR_PATTERN = re.compile(
+    r"^artifacts/qwen25_coder_7b_dose/[^/]+\.pt$"
 )
 
 MAX_MEMBER_BYTES = 2 * 1024**3
@@ -68,6 +86,30 @@ def is_allowed_fetch_member(name: str) -> bool:
     return bool(RESULT_JSON_PATTERN.fullmatch(normalized))
 
 
+def is_dose_unsafe_member_name(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return True
+    if not normalized.startswith((f"{DOSE_RESULTS_DIR}/", f"{DOSE_ARTIFACTS_DIR}/")):
+        return True
+    return False
+
+
+def is_allowed_dose_fetch_member(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return False
+    if is_dose_unsafe_member_name(normalized):
+        return False
+    if normalized in DOSE_FETCH_ALLOWLIST:
+        return True
+    if DOSE_RESULT_JSON_PATTERN.fullmatch(normalized):
+        return True
+    return bool(DOSE_CHECKPOINT_TENSOR_PATTERN.fullmatch(normalized))
+
+
 def collect_qwen_pack_entries(root: Path) -> list[Path]:
     entries: list[Path] = []
     results_dir = root / "results" / "qwen25_coder_7b"
@@ -85,9 +127,46 @@ def collect_qwen_pack_entries(root: Path) -> list[Path]:
 
 
 def pack_qwen_results(root: Path, archive: Path) -> None:
-    entries = collect_qwen_pack_entries(root)
+    _pack_entries(collect_qwen_pack_entries(root), root, archive, kind="Qwen")
+
+
+def collect_qwen_dose_pack_entries(root: Path) -> list[Path]:
+    entries: list[Path] = []
+    results_dir = root / "results" / "qwen25_coder_7b_dose"
+    if results_dir.is_dir():
+        for path in sorted(results_dir.glob("*.json")):
+            if path.is_file() and not path.is_symlink():
+                entries.append(path)
+    artifacts_dir = root / "artifacts" / "qwen25_coder_7b_dose"
+    if artifacts_dir.is_dir():
+        for name in ("status.json", "events.jsonl"):
+            path = artifacts_dir / name
+            if path.is_file() and not path.is_symlink():
+                entries.append(path)
+        for path in sorted(artifacts_dir.glob("*.pt")):
+            if path.is_file() and not path.is_symlink():
+                entries.append(path)
+    return entries
+
+
+def pack_qwen_dose_results(root: Path, archive: Path) -> None:
+    _pack_entries(
+        collect_qwen_dose_pack_entries(root),
+        root,
+        archive,
+        kind="Qwen dose",
+    )
+
+
+def _pack_entries(
+    entries: list[Path],
+    root: Path,
+    archive: Path,
+    *,
+    kind: str,
+) -> None:
     if not entries:
-        raise FileNotFoundError("no Qwen artifacts available to pack")
+        raise FileNotFoundError(f"no {kind} artifacts available to pack")
     archive.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "w:gz") as handle:
         for path in entries:
@@ -97,7 +176,12 @@ def pack_qwen_results(root: Path, archive: Path) -> None:
             handle.add(path, arcname=arcname)
 
 
-def _validate_tar_member(member: tarfile.TarInfo) -> None:
+def _validate_tar_member(
+    member: tarfile.TarInfo,
+    *,
+    is_unsafe: Callable[[str], bool],
+    is_allowed: Callable[[str], bool],
+) -> None:
     if member.issym() or member.islnk():
         raise ValueError(f"archive member is a link: {member.name}")
     if member.isdir():
@@ -105,20 +189,25 @@ def _validate_tar_member(member: tarfile.TarInfo) -> None:
     if not member.isreg():
         raise ValueError(f"archive member is not a regular file: {member.name}")
     normalized = normalize_member_name(member.name)
-    if is_unsafe_member_name(normalized):
+    if is_unsafe(normalized):
         raise ValueError(f"unsafe archive path: {member.name}")
-    if not is_allowed_fetch_member(normalized):
+    if not is_allowed(normalized):
         raise ValueError(f"archive member outside allowlist: {member.name}")
     if member.size > MAX_MEMBER_BYTES:
         raise ValueError(f"archive member exceeds size limit: {member.name}")
 
 
-def validate_qwen_archive(members: list[tarfile.TarInfo]) -> list[tarfile.TarInfo]:
+def _validate_archive(
+    members: list[tarfile.TarInfo],
+    *,
+    is_unsafe: Callable[[str], bool],
+    is_allowed: Callable[[str], bool],
+) -> list[tarfile.TarInfo]:
     seen: set[str] = set()
     total_size = 0
     file_members: list[tarfile.TarInfo] = []
     for member in members:
-        _validate_tar_member(member)
+        _validate_tar_member(member, is_unsafe=is_unsafe, is_allowed=is_allowed)
         normalized = normalize_member_name(member.name)
         if normalized in seen:
             raise ValueError(f"duplicate archive member: {member.name}")
@@ -128,6 +217,22 @@ def validate_qwen_archive(members: list[tarfile.TarInfo]) -> list[tarfile.TarInf
     if total_size > MAX_TOTAL_UNCOMPRESSED_BYTES:
         raise ValueError("archive exceeds total uncompressed size limit")
     return file_members
+
+
+def validate_qwen_archive(members: list[tarfile.TarInfo]) -> list[tarfile.TarInfo]:
+    return _validate_archive(
+        members,
+        is_unsafe=is_unsafe_member_name,
+        is_allowed=is_allowed_fetch_member,
+    )
+
+
+def validate_qwen_dose_archive(members: list[tarfile.TarInfo]) -> list[tarfile.TarInfo]:
+    return _validate_archive(
+        members,
+        is_unsafe=is_dose_unsafe_member_name,
+        is_allowed=is_allowed_dose_fetch_member,
+    )
 
 
 @dataclass
@@ -150,10 +255,34 @@ def _rollback_install_records(records: list[InstallRecord]) -> None:
 
 
 def extract_qwen_archive(archive: Path, project: Path) -> None:
+    _extract_allowlisted_archive(
+        archive,
+        project,
+        validator=validate_qwen_archive,
+        prefix="qwen-fetch-",
+    )
+
+
+def extract_qwen_dose_archive(archive: Path, project: Path) -> None:
+    _extract_allowlisted_archive(
+        archive,
+        project,
+        validator=validate_qwen_dose_archive,
+        prefix="qwen-dose-fetch-",
+    )
+
+
+def _extract_allowlisted_archive(
+    archive: Path,
+    project: Path,
+    *,
+    validator: Callable[[list[tarfile.TarInfo]], list[tarfile.TarInfo]],
+    prefix: str,
+) -> None:
     with tarfile.open(archive, "r:gz") as handle:
         members = handle.getmembers()
-        file_members = validate_qwen_archive(members)
-        staging = Path(tempfile.mkdtemp(prefix="qwen-fetch-", dir=project.parent))
+        file_members = validator(members)
+        staging = Path(tempfile.mkdtemp(prefix=prefix, dir=project.parent))
         records: list[InstallRecord] = []
         try:
             for member in file_members:

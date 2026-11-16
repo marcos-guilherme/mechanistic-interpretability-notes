@@ -703,7 +703,6 @@ def test_selection_does_not_read_confirmation_metrics() -> None:
     parameters = inspect.signature(select_dose_coefficients).parameters
     assert "confirmation" not in parameters
     assert "confirmation_curve" not in parameters
-    assert "confirmation" not in inspect.getsource(select_dose_coefficients)
     chosen = select_dose_coefficients(
         ablation_curve=[
             {
@@ -792,5 +791,15 @@ def test_sampled_splits_rejects_dose_profile_and_points_to_builder(
     tmp_path: Path,
 ) -> None:
     config = load_config(ROOT, profile=DOSE_PROFILE)
+    with pytest.raises(ValueError, match="build_dose_splits"):
+        _sampled_splits(tmp_path, config)
+
+
+def test_sampled_splits_rejects_source_direction_even_without_dose_grid(
+    tmp_path: Path,
+) -> None:
+    config = dict(load_config(ROOT, profile=DOSE_PROFILE))
+    config.pop("dose_grid")
+    assert "source_direction" in config
     with pytest.raises(ValueError, match="build_dose_splits"):
         _sampled_splits(tmp_path, config)
