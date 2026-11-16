@@ -332,6 +332,7 @@ def test_colab_profile_routes_sync_bootstrap_run_status_and_fetch(
     module = _orchestrator()
     assert module.resolve_session("qwen25-coder-code-eval", None) == "refusal-qwen"
     assert module.fetch_pack_script("qwen25-coder-code-eval") == PACK_SCRIPT
+    assert module.fetch_pack_timeout("qwen25-coder-code-eval") == 1800
     assert module.code_eval_command("refusal-qwen", timeout=14400)[-2:] == [
         "--timeout",
         "14400",

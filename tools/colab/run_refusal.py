@@ -125,6 +125,12 @@ def fetch_pack_script(profile: str) -> Path:
     return PROJECT / "scripts" / "colab_pack_results.py"
 
 
+def fetch_pack_timeout(profile: str) -> int:
+    if profile == "qwen25-coder-code-eval":
+        return 1800
+    return 300
+
+
 def stamps_implementation_commit(profile: str) -> bool:
     return profile.startswith("qwen25-coder")
 
@@ -479,7 +485,7 @@ def main() -> int:
             exec_command(
                 session,
                 fetch_pack_script(args.profile),
-                timeout=300,
+                timeout=fetch_pack_timeout(args.profile),
             )
         )
         local = ROOT / ".colab-staging" / local_name
