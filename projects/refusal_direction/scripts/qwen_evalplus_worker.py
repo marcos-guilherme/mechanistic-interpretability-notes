@@ -18,6 +18,34 @@ from typing import Any
 ONE_GIB = 1024**3
 
 
+def task_ids_sha256(task_ids: list[str]) -> str:
+    encoded = json.dumps(sorted(task_ids), separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_identity(
+    identity: dict[str, Any],
+    observed_task_ids: set[str],
+) -> dict[str, Any]:
+    required = {
+        "run_id",
+        "implementation_commit",
+        "config_sha256",
+        "source_artifact_hashes",
+        "condition",
+        "expected_task_ids",
+        "expected_task_ids_sha256",
+    }
+    if not required.issubset(identity):
+        raise ValueError("EvalPlus identity is incomplete")
+    expected = [str(item) for item in identity["expected_task_ids"]]
+    if len(expected) != len(set(expected)) or set(expected) != observed_task_ids:
+        raise ValueError("EvalPlus identity task IDs do not match selected problems")
+    if identity["expected_task_ids_sha256"] != task_ids_sha256(expected):
+        raise ValueError("EvalPlus identity task IDs hash mismatch")
+    return identity
+
+
 def read_unique_jsonl(path: Path) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -64,6 +92,7 @@ def evaluate_selected(
     problems_path: Path,
     samples_path: Path,
     output_path: Path,
+    identity_path: Path,
     timeout_seconds: int,
 ) -> dict[str, Any]:
     from evalplus.evaluate import check_correctness, get_groundtruth
@@ -74,6 +103,10 @@ def evaluate_selected(
     if not callable(reliability_guard):
         raise RuntimeError("EvalPlus reliability_guard is unavailable")
     problems, samples = load_aligned(problems_path, samples_path)
+    identity = validate_identity(
+        json.loads(identity_path.read_text(encoding="utf-8")),
+        set(problems),
+    )
     corpus_hash = hashlib.sha256(problems_path.read_bytes()).hexdigest()
     expected = get_groundtruth(problems, corpus_hash, [])
     records = []
@@ -107,6 +140,7 @@ def evaluate_selected(
     payload = {
         "schema_version": 1,
         "dataset": "humaneval_plus",
+        "identity": identity,
         "records": records,
         "n": len(records),
         "pass_count": sum(record["plus_pass"] for record in records),
@@ -131,6 +165,7 @@ def main() -> int:
     parser.add_argument("--problems", type=Path, required=True)
     parser.add_argument("--samples", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--identity", type=Path, required=True)
     parser.add_argument("--memory-bytes", type=int, required=True)
     parser.add_argument("--timeout-seconds", type=int, required=True)
     args = parser.parse_args()
@@ -139,6 +174,7 @@ def main() -> int:
         problems_path=args.problems,
         samples_path=args.samples,
         output_path=args.output,
+        identity_path=args.identity,
         timeout_seconds=args.timeout_seconds,
     )
     return 0

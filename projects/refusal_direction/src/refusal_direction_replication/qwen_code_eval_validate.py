@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from .gates import STATUS_OPERATIONAL_ERROR, STATUS_PASS
+from .metrics import kl_divergence
 from .pipeline import load_config
 from .qwen_code_eval import (
     CONDITIONS,
@@ -75,6 +79,7 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
         "required_files_present": False,
         "complete_32x3x4_matrix": False,
         "metrics_recomputed": False,
+        "kl_recomputed": False,
         "jlens_ranks_recomputed": False,
         "pinned_revisions": False,
         "source_dose_and_jlens_pass": False,
@@ -109,6 +114,7 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
         for name in (
             "complete_32x3x4_matrix",
             "metrics_recomputed",
+            "kl_recomputed",
             "jlens_ranks_recomputed",
             "humaneval_only_execution",
             "evalplus_limits_and_warning",
@@ -185,6 +191,7 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
         }
 
     raw_records: list[dict[str, Any]] = []
+    raw_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
     matrix_ok = True
     for dataset in DATASETS:
         for condition in CONDITIONS:
@@ -201,31 +208,143 @@ def validate_qwen_code_eval(root: Path) -> dict[str, bool]:
                 or any(record.get("condition") != condition for record in records)
             ):
                 matrix_ok = False
+            raw_by_pair[(dataset, condition)] = records
             raw_records.extend(records)
     checks["complete_32x3x4_matrix"] = matrix_ok
 
-    evalplus: dict[str, list[dict[str, Any]]] = {}
+    generate_envelope = _load(generate_path) if generate_path.is_file() else {}
+    expected_config_hash = (generate_envelope.get("provenance") or {}).get(
+        "config_sha256"
+    )
+    kl_ok = matrix_ok
+    if matrix_ok:
+        for dataset in DATASETS:
+            logits_by_condition: dict[str, dict[str, Any]] = {}
+            for condition in CONDITIONS:
+                path = artifacts_dir / "logits" / f"{dataset}__{condition}.pt"
+                if not path.is_file():
+                    kl_ok = False
+                    continue
+                try:
+                    payload = torch.load(path, map_location="cpu", weights_only=True)
+                except Exception:
+                    kl_ok = False
+                    continue
+                ids = [str(item) for item in payload.get("example_ids") or []]
+                expected_ids = [
+                    str(record["example_id"])
+                    for record in raw_by_pair[(dataset, condition)]
+                ]
+                logits = payload.get("logits")
+                if (
+                    payload.get("run_id") != evaluation.get("run_id")
+                    or payload.get("implementation_commit")
+                    != evaluation.get("implementation_commit")
+                    or payload.get("config_sha256") != expected_config_hash
+                    or payload.get("source_artifact_hashes") != current_hashes
+                    or payload.get("dataset") != dataset
+                    or payload.get("condition") != condition
+                    or len(ids) != len(set(ids))
+                    or set(ids) != set(expected_ids)
+                    or not isinstance(logits, torch.Tensor)
+                    or logits.ndim != 2
+                    or logits.shape[0] != len(ids)
+                ):
+                    kl_ok = False
+                    continue
+                logits_by_condition[condition] = {
+                    "by_id": {example_id: index for index, example_id in enumerate(ids)},
+                    "logits": logits,
+                }
+            if set(logits_by_condition) != set(CONDITIONS):
+                kl_ok = False
+                continue
+            baseline = logits_by_condition["baseline"]
+            for condition in CONDITIONS:
+                records = raw_by_pair[(dataset, condition)]
+                if condition == "baseline":
+                    if any(record.get("kl_from_baseline") is not None for record in records):
+                        kl_ok = False
+                    continue
+                current = logits_by_condition[condition]
+                ids = [str(record["example_id"]) for record in records]
+                baseline_rows = torch.stack(
+                    [
+                        baseline["logits"][baseline["by_id"][example_id]]
+                        for example_id in ids
+                    ]
+                )
+                current_rows = torch.stack(
+                    [
+                        current["logits"][current["by_id"][example_id]]
+                        for example_id in ids
+                    ]
+                )
+                recomputed_kl = kl_divergence(baseline_rows, current_rows).tolist()
+                if any(
+                    record.get("kl_from_baseline") is None
+                    or not math.isclose(
+                        float(record["kl_from_baseline"]),
+                        float(value),
+                        rel_tol=1e-7,
+                        abs_tol=1e-9,
+                    )
+                    for record, value in zip(records, recomputed_kl)
+                ):
+                    kl_ok = False
+    checks["kl_recomputed"] = kl_ok
+
+    selected_path = artifacts_dir / "datasets" / "humaneval_plus.jsonl"
+    task_by_example: dict[str, str] = {}
+    if selected_path.is_file():
+        selected = _jsonl(selected_path)
+        for record in selected:
+            task_id = record.get("task_id") or (record.get("problem") or {}).get(
+                "task_id"
+            )
+            if task_id is not None:
+                task_by_example[str(record["example_id"])] = str(task_id)
+    expected_task_ids = sorted(task_by_example.values())
+    expected_task_hash = hashlib.sha256(
+        json.dumps(expected_task_ids, separators=(",", ":")).encode()
+    ).hexdigest()
+    evalplus: dict[str, dict[str, bool]] = {}
     evalplus_ok = True
     for condition in CONDITIONS:
         path = artifacts_dir / "evalplus" / f"results__{condition}.json"
         if not path.is_file():
             evalplus_ok = False
             continue
-        records = (_load(path).get("records") or [])
-        if len(records) != DATASET_SIZE:
+        payload = _load(path)
+        records = payload.get("records") or []
+        identity = payload.get("identity") or {}
+        ids = [str(record.get("task_id")) for record in records]
+        if (
+            len(records) != DATASET_SIZE
+            or len(ids) != len(set(ids))
+            or set(ids) != set(expected_task_ids)
+            or identity.get("run_id") != evaluation.get("run_id")
+            or identity.get("implementation_commit")
+            != evaluation.get("implementation_commit")
+            or identity.get("config_sha256") != expected_config_hash
+            or identity.get("source_artifact_hashes") != current_hashes
+            or identity.get("condition") != condition
+            or identity.get("expected_task_ids") != expected_task_ids
+            or identity.get("expected_task_ids_sha256") != expected_task_hash
+        ):
             evalplus_ok = False
-        evalplus[condition] = list(records)
+        evalplus[condition] = {
+            str(record["task_id"]): bool(record["plus_pass"]) for record in records
+        }
 
-    if matrix_ok and evalplus_ok:
+    if matrix_ok and evalplus_ok and kl_ok:
         compact_records = []
-        humaneval_offsets = {condition: 0 for condition in CONDITIONS}
         for record in raw_records:
             passed = None
             if record["dataset"] == "humaneval_plus":
                 condition = str(record["condition"])
-                offset = humaneval_offsets[condition]
-                passed = bool(evalplus[condition][offset]["plus_pass"])
-                humaneval_offsets[condition] += 1
+                task_id = task_by_example[str(record["example_id"])]
+                passed = evalplus[condition][task_id]
             compact_records.append(
                 {
                     "dataset": record["dataset"],

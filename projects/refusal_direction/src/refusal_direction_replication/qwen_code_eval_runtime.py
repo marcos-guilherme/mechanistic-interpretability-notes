@@ -356,6 +356,7 @@ def build_evalplus_subprocess(
     problems: Path,
     samples: Path,
     output: Path,
+    identity: Path,
     tempdir: Path,
     memory_bytes: int,
     timeout_seconds: int,
@@ -370,6 +371,8 @@ def build_evalplus_subprocess(
         str(samples),
         "--output",
         str(output),
+        "--identity",
+        str(identity),
         "--memory-bytes",
         str(memory_bytes),
         "--timeout-seconds",
@@ -386,6 +389,25 @@ def build_evalplus_subprocess(
         "env": environment,
         "timeout": timeout_seconds * DATASET_SIZE + 60,
     }
+
+
+def _task_ids_sha256(task_ids: Sequence[str]) -> str:
+    encoded = json.dumps(sorted(task_ids), separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def evalplus_output_matches_identity(
+    payload: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+) -> bool:
+    if payload.get("identity") != dict(expected_identity):
+        return False
+    records = payload.get("records")
+    if not isinstance(records, list):
+        return False
+    task_ids = [str(record.get("task_id")) for record in records]
+    expected_ids = [str(item) for item in expected_identity["expected_task_ids"]]
+    return len(task_ids) == len(set(task_ids)) and set(task_ids) == set(expected_ids)
 
 
 def _dataset_source_root() -> Path:
@@ -591,6 +613,41 @@ def _generation_checkpoint_valid(
     )
 
 
+def _load_logits_checkpoint(
+    path: Path,
+    *,
+    run_id: str,
+    implementation_commit: str,
+    config_sha256: str,
+    source_hashes: Mapping[str, str],
+    dataset: str,
+    condition: str,
+    expected_example_ids: Sequence[str],
+) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        return None
+    logits = payload.get("logits")
+    expected = list(expected_example_ids)
+    if (
+        payload.get("run_id") != run_id
+        or payload.get("implementation_commit") != implementation_commit
+        or payload.get("config_sha256") != config_sha256
+        or payload.get("source_artifact_hashes") != dict(source_hashes)
+        or payload.get("dataset") != dataset
+        or payload.get("condition") != condition
+        or payload.get("example_ids") != expected
+        or not isinstance(logits, torch.Tensor)
+        or logits.ndim != 2
+        or logits.shape[0] != len(expected)
+    ):
+        return None
+    return payload
+
+
 def _load_eval_examples(artifacts_dir: Path, dataset: str) -> tuple[list[PromptExample], list[dict[str, Any]]]:
     records = _read_jsonl(_selected_dataset_path(artifacts_dir, dataset))
     label = "harmful" if dataset == "mitre" else "harmless"
@@ -644,12 +701,24 @@ def run_generate_stage(
         )
         for dataset in DATASETS:
             examples, _selected = _load_eval_examples(artifacts_dir, dataset)
-            baseline_logits_path = artifacts_dir / "logits" / f"{dataset}__baseline.pt"
+            example_ids = [example.id for example in examples]
+            config_sha256 = _config_hash(config)
             for condition in CONDITIONS:
                 output_path = (
                     artifacts_dir / "generations" / f"{dataset}__{condition}.jsonl"
                 )
-                if _generation_checkpoint_valid(
+                logits_path = artifacts_dir / "logits" / f"{dataset}__{condition}.pt"
+                logits_payload = _load_logits_checkpoint(
+                    logits_path,
+                    run_id=run_id,
+                    implementation_commit=implementation_commit,
+                    config_sha256=config_sha256,
+                    source_hashes=source["source_artifact_hashes"],
+                    dataset=dataset,
+                    condition=condition,
+                    expected_example_ids=example_ids,
+                )
+                if logits_payload is not None and _generation_checkpoint_valid(
                     output_path,
                     run_id=run_id,
                     implementation_commit=implementation_commit,
@@ -675,25 +744,36 @@ def run_generate_stage(
                     pre_hooks=pre_hooks,
                     forward_hooks=forward_hooks,
                 )
+                _atomic_torch_save(
+                    {
+                        "run_id": run_id,
+                        "implementation_commit": implementation_commit,
+                        "config_sha256": config_sha256,
+                        "source_artifact_hashes": dict(
+                            source["source_artifact_hashes"]
+                        ),
+                        "dataset": dataset,
+                        "condition": condition,
+                        "example_ids": example_ids,
+                        "logits": logits.detach().cpu(),
+                    },
+                    logits_path,
+                )
                 if condition == "baseline":
-                    _atomic_torch_save(
-                        {
-                            "run_id": run_id,
-                            "implementation_commit": implementation_commit,
-                            "source_artifact_hashes": dict(
-                                source["source_artifact_hashes"]
-                            ),
-                            "logits": logits,
-                        },
-                        baseline_logits_path,
-                    )
                     kl_values: list[float | None] = [None] * len(examples)
                 else:
-                    baseline_payload = torch.load(
-                        baseline_logits_path, map_location="cpu", weights_only=True
+                    baseline_payload = _load_logits_checkpoint(
+                        artifacts_dir / "logits" / f"{dataset}__baseline.pt",
+                        run_id=run_id,
+                        implementation_commit=implementation_commit,
+                        config_sha256=config_sha256,
+                        source_hashes=source["source_artifact_hashes"],
+                        dataset=dataset,
+                        condition="baseline",
+                        expected_example_ids=example_ids,
                     )
-                    if baseline_payload.get("run_id") != run_id:
-                        raise ValueError("stale baseline logits run_id")
+                    if baseline_payload is None:
+                        raise ValueError("valid baseline logits checkpoint is unavailable")
                     kl_values = [
                         float(item)
                         for item in kl_divergence(
@@ -760,9 +840,17 @@ def run_evaluate_stage(
     config: Mapping[str, Any],
     artifacts_dir: Path,
     store: RunProgressStore,
+    source: Mapping[str, Any],
+    run_id: str,
+    implementation_commit: str,
     **_kwargs: Any,
 ) -> dict[str, Any]:
     selected = _read_jsonl(_selected_dataset_path(artifacts_dir, "humaneval_plus"))
+    expected_task_ids = sorted(
+        str(record["problem"]["task_id"]) for record in selected
+    )
+    if len(expected_task_ids) != DATASET_SIZE or len(set(expected_task_ids)) != DATASET_SIZE:
+        raise ValueError("selected HumanEval+ task IDs must contain exactly 32 tasks")
     problem_path = artifacts_dir / "evalplus" / "selected_problems.jsonl"
     _write_jsonl(problem_path, [record["problem"] for record in selected])
     worker = root / "scripts" / "qwen_evalplus_worker.py"
@@ -774,6 +862,21 @@ def run_evaluate_stage(
         )
         samples_path = artifacts_dir / "evalplus" / f"samples__{condition}.jsonl"
         output_path = artifacts_dir / "evalplus" / f"results__{condition}.json"
+        identity = {
+            "run_id": run_id,
+            "implementation_commit": implementation_commit,
+            "config_sha256": _config_hash(config),
+            "source_artifact_hashes": dict(source["source_artifact_hashes"]),
+            "condition": condition,
+            "expected_task_ids": expected_task_ids,
+            "expected_task_ids_sha256": _task_ids_sha256(expected_task_ids),
+        }
+        identity_path = artifacts_dir / "evalplus" / f"identity__{condition}.json"
+        atomic_write_json(identity_path, identity)
+        if output_path.is_file() and not evalplus_output_matches_identity(
+            _read_json(output_path), identity
+        ):
+            output_path.unlink()
         if not output_path.is_file():
             by_id = {record["example_id"]: record for record in selected}
             samples = []
@@ -794,6 +897,7 @@ def run_evaluate_stage(
                 problems=problem_path,
                 samples=samples_path,
                 output=output_path,
+                identity=identity_path,
                 tempdir=sandbox,
                 memory_bytes=int(config["evalplus_memory_bytes"]),
                 timeout_seconds=int(config["evalplus_timeout_seconds"]),
@@ -806,6 +910,8 @@ def run_evaluate_stage(
                 check=True,
             )
         payload = _read_json(output_path)
+        if not evalplus_output_matches_identity(payload, identity):
+            raise ValueError(f"EvalPlus {condition} output identity mismatch")
         records = payload.get("records") or []
         if len(records) != DATASET_SIZE:
             raise ValueError(f"EvalPlus {condition} did not evaluate 32 tasks")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from refusal_direction_replication.qwen_code_eval import (
     aggregate_records,
     summarize_refusal_ranks,
 )
+from refusal_direction_replication.metrics import kl_divergence
 from refusal_direction_replication.qwen_code_eval_runtime import (
     CODE_EVAL_STAGES,
     EVALUATION_FILENAME,
@@ -89,10 +91,67 @@ def _fixture(root: Path) -> None:
     config = json.loads(
         (root / "configs/qwen25_coder_7b_code_eval.json").read_text(encoding="utf-8")
     )
+    for dataset in DATASETS:
+        _write_jsonl(
+            artifacts / "datasets" / f"{dataset}.jsonl",
+            [
+                {
+                    "example_id": f"{dataset}:{index}",
+                    "task_id": (
+                        f"HumanEval/{index}"
+                        if dataset == "humaneval_plus"
+                        else None
+                    ),
+                    "problem": (
+                        {
+                            "task_id": f"HumanEval/{index}",
+                            "prompt": f"def f_{index}():\n",
+                        }
+                        if dataset == "humaneval_plus"
+                        else None
+                    ),
+                }
+                for index in range(32)
+            ],
+        )
     compact_records = []
     all_readout = []
     for dataset in DATASETS:
+        baseline_logits = torch.tensor(
+            [[index / 10, 0.0, 0.5] for index in range(32)],
+            dtype=torch.float64,
+        )
         for condition in CONDITIONS:
+            offset = {
+                "baseline": 0.0,
+                "ablation": 0.1,
+                "addition": 0.2,
+                "random_control": -0.1,
+            }[condition]
+            logits = baseline_logits.clone()
+            logits[:, 1] += offset
+            kl_values = (
+                [None] * 32
+                if condition == "baseline"
+                else kl_divergence(baseline_logits, logits).tolist()
+            )
+            logits_path = artifacts / "logits" / f"{dataset}__{condition}.pt"
+            logits_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "run_id": "code-eval-run",
+                    "implementation_commit": "a" * 40,
+                    "config_sha256": "b" * 64,
+                    "source_artifact_hashes": source_hashes,
+                    "dataset": dataset,
+                    "condition": condition,
+                    "example_ids": [
+                        f"{dataset}:{index}" for index in range(32)
+                    ],
+                    "logits": logits,
+                },
+                logits_path,
+            )
             raw = []
             for index in range(32):
                 example_id = f"{dataset}:{index}"
@@ -113,7 +172,7 @@ def _fixture(root: Path) -> None:
                     "response": f"raw-answer-{index}",
                     "valid": True,
                     "refusal": index % 4 == 0,
-                    "kl_from_baseline": None if condition == "baseline" else index / 100,
+                    "kl_from_baseline": kl_values[index],
                     "first_response_token_id": 1,
                 }
                 raw.append(record)
@@ -153,9 +212,23 @@ def _fixture(root: Path) -> None:
             )
             all_readout.extend(readout)
     for condition in CONDITIONS:
+        expected_task_ids = sorted(f"HumanEval/{index}" for index in range(32))
         atomic_write_json(
             artifacts / "evalplus" / f"results__{condition}.json",
             {
+                "identity": {
+                    "run_id": "code-eval-run",
+                    "implementation_commit": "a" * 40,
+                    "config_sha256": "b" * 64,
+                    "source_artifact_hashes": source_hashes,
+                    "condition": condition,
+                    "expected_task_ids": expected_task_ids,
+                    "expected_task_ids_sha256": hashlib.sha256(
+                        json.dumps(
+                            sorted(expected_task_ids), separators=(",", ":")
+                        ).encode()
+                    ).hexdigest(),
+                },
                 "records": [
                     {
                         "task_id": f"HumanEval/{index}",
@@ -319,4 +392,48 @@ def test_validator_detects_compact_leak_and_incomplete_matrix(tmp_path: Path) ->
     checks = validate_qwen_code_eval(tmp_path)
     assert checks["no_compact_text_leakage"] is False
     assert checks["complete_32x3x4_matrix"] is False
+    assert checks["metrics_recomputed"] is False
+
+
+def test_validator_joins_evalplus_by_task_id_despite_record_order(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_code_eval_validate import (
+        validate_qwen_code_eval,
+    )
+
+    _fixture(tmp_path)
+    for condition in CONDITIONS:
+        path = (
+            tmp_path
+            / f"artifacts/qwen25_coder_7b_code_eval/evalplus/results__{condition}.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["records"].reverse()
+        atomic_write_json(path, payload)
+    checks = validate_qwen_code_eval(tmp_path)
+    assert checks["metrics_recomputed"] is True
+    assert checks["kl_recomputed"] is True
+
+
+def test_validator_detects_tampered_per_example_kl(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_code_eval_validate import (
+        validate_qwen_code_eval,
+    )
+
+    _fixture(tmp_path)
+    path = (
+        tmp_path
+        / "artifacts/qwen25_coder_7b_code_eval/generations/"
+        "humaneval_plus__addition.jsonl"
+    )
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    records[7]["kl_from_baseline"] = 99.0
+    _write_jsonl(path, records)
+    checks = validate_qwen_code_eval(tmp_path)
+    assert checks["kl_recomputed"] is False
     assert checks["metrics_recomputed"] is False

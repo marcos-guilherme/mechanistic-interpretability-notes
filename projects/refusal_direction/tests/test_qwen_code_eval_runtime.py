@@ -172,6 +172,7 @@ def test_evalplus_subprocess_contract_limits_memory_timeout_and_tempdir(
         problems=tmp_path / "problems.jsonl",
         samples=tmp_path / "samples.jsonl",
         output=tmp_path / "output.json",
+        identity=tmp_path / "identity.json",
         tempdir=tmp_path / "sandbox",
         memory_bytes=1024**3,
         timeout_seconds=60,
@@ -179,12 +180,42 @@ def test_evalplus_subprocess_contract_limits_memory_timeout_and_tempdir(
     )
     assert spec["command"][0] == "python"
     assert "--memory-bytes" in spec["command"]
+    assert "--identity" in spec["command"]
     assert spec["env"]["EVALPLUS_MAX_MEMORY_BYTES"] == str(1024**3)
     # The pinned EvalPlus revision passes this environment value directly to
     # min(), so defining it as an environment string causes a TypeError.
     assert "EVALPLUS_TIMEOUT_PER_TASK" not in spec["env"]
     assert spec["cwd"] == tmp_path / "sandbox"
     assert spec["timeout"] == 60 * 32 + 60
+
+
+def test_evalplus_checkpoint_requires_exact_identity_and_task_set() -> None:
+    from refusal_direction_replication.qwen_code_eval_runtime import (
+        evalplus_output_matches_identity,
+    )
+
+    identity = {
+        "run_id": "run",
+        "implementation_commit": "a" * 40,
+        "config_sha256": "b" * 64,
+        "source_artifact_hashes": {"direction": "c" * 64},
+        "condition": "baseline",
+        "expected_task_ids": ["HumanEval/0", "HumanEval/1"],
+        "expected_task_ids_sha256": "d" * 64,
+    }
+    payload = {
+        "identity": identity,
+        "records": [
+            {"task_id": "HumanEval/1", "plus_pass": True},
+            {"task_id": "HumanEval/0", "plus_pass": False},
+        ],
+    }
+    assert evalplus_output_matches_identity(payload, identity)
+    payload["identity"] = {**identity, "run_id": "stale"}
+    assert not evalplus_output_matches_identity(payload, identity)
+    payload["identity"] = identity
+    payload["records"][0]["task_id"] = "HumanEval/2"
+    assert not evalplus_output_matches_identity(payload, identity)
 
 
 def test_orchestrator_resumes_completed_stages_and_finalizes_pending_review(

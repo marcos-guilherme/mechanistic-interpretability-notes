@@ -75,3 +75,20 @@ def test_worker_uses_evalplus_sanitize_check_and_reliability_guard() -> None:
     assert "check_correctness" in source
     assert "reliability_guard" in source
     assert "EvalPlus is not a complete security sandbox" in source
+
+
+def test_worker_identity_requires_exact_task_ids() -> None:
+    worker = _load_worker()
+    task_ids = ["HumanEval/0", "HumanEval/1"]
+    identity = {
+        "run_id": "run",
+        "implementation_commit": "a" * 40,
+        "config_sha256": "b" * 64,
+        "source_artifact_hashes": {"direction": "c" * 64},
+        "condition": "addition",
+        "expected_task_ids": task_ids,
+        "expected_task_ids_sha256": worker.task_ids_sha256(task_ids),
+    }
+    assert worker.validate_identity(identity, set(task_ids)) == identity
+    with pytest.raises(ValueError, match="task IDs"):
+        worker.validate_identity(identity, {"HumanEval/0", "HumanEval/2"})
