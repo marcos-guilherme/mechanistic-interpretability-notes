@@ -144,4 +144,4 @@ Fontes canônicas (somente métricas agregadas e proveniência, sem textos bruto
 - [`results/qwen25_coder_7b/final_evaluation.json`](results/qwen25_coder_7b/final_evaluation.json)
 - [`results/qwen25_coder_7b/execution_manifest.json`](results/qwen25_coder_7b/execution_manifest.json)
 
-A narrativa completa do congelamento está em [`PROCESSO.md`](PROCESSO.md#piloto-qwen25coder7b-congelado).
+A narrativa completa do congelamento está na seção piloto Qwen em [`PROCESSO.md`](PROCESSO.md).

@@ -430,11 +430,11 @@ Direção selecionada na validação: camada 18, offset `-1`.
 | Condição | Recusa nociva | Recusa inofensiva |
 | --- | --- | --- |
 | Baseline | 0,875 | 0,03125 |
-| Ablação | 0,0 | (não é métrica final de adição) |
-| Adição | (não é métrica nociva final) | 1,0 |
-| Controle aleatório (nocivos) | 0,875 | — |
+| Ablação | 0,0 | n/d |
+| Adição | n/d | 1,0 |
+| Controle aleatório (nocivos) | 0,875 | n/d |
 
-KL inofensiva após ablação: `0,2638247609138489` (limite do gate: `0,10`).
+KL inofensiva após ablação: `0,263825` (limite do gate: `0,10`; valor integral no JSON compacto).
 
 ### Operação versus ciência
 

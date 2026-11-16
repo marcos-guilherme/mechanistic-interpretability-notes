@@ -265,8 +265,29 @@ def test_render_status_names_operational_and_scientific_meanings() -> None:
     assert "0,344086 / 0,548387 / 0,596774" in rendered
     assert "Qwen2.5-Coder-7B-Instruct" in rendered
     assert "causal_gate_failed" in rendered
-    assert "falha no gate causal" in rendered
-    assert "0,263825" in rendered or "0,263824" in rendered
+    assert "selectividade insuficiente" in rendered
+    assert "0,263825" in rendered
+
+
+def test_render_status_puts_blank_line_between_gemma_and_qwen_blocks() -> None:
+    rendered = tracking.render_status(tracking.collect_snapshot(REPO_ROOT))
+
+    separator = (
+        "../projects/refusal_direction/results/final_evaluation.json).\n\n"
+        "**Direção de Recusa (piloto Qwen).**"
+    )
+    assert separator in rendered
+
+
+def test_render_status_derives_qwen_conclusion_from_scientific_status() -> None:
+    snapshot = tracking.collect_snapshot(REPO_ROOT)
+    snapshot["qwen_refusal_pilot"]["scientific_status"] = "causal_gate_failed"
+
+    rendered = tracking.render_status(snapshot)
+
+    assert "`causal_gate_failed`" in rendered
+    assert "selectividade insuficiente" in rendered
+    assert "falha no gate causal" not in rendered
 
 
 def test_render_status_does_not_keep_causal_label_when_metrics_change() -> None:
