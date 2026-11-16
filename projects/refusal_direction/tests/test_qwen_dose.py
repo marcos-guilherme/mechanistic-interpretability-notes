@@ -15,12 +15,17 @@ from refusal_direction_replication.interventions import (
     add_direction,
     directional_ablation_hook_specs,
 )
-from refusal_direction_replication.pipeline import load_config
+from refusal_direction_replication.pipeline import _sampled_splits, load_config
 from refusal_direction_replication.qwen_dose import (
+    ADDITION_METRIC_FIELDS,
+    ABLATION_METRIC_FIELDS,
+    DoseSplits,
+    _assert_disjoint_splits,
     build_dose_splits,
     collect_original_usage,
     compact_split_metadata,
     eligible_examples,
+    metadata_contains_leak,
     sample_dose_halves,
     select_dose_coefficients,
 )
@@ -147,21 +152,49 @@ def _original_artifact(
     }
 
 
+REQUIRED_SPLIT_KEYS = (
+    "harmful_train",
+    "harmless_train",
+    "harmful_val",
+    "harmless_val",
+    "harmful_test",
+    "harmless_test",
+)
+
+
+def _complete_usage(
+    extra_ids: dict[str, list[str]] | None = None,
+    extra_hashes: dict[str, list[str]] | None = None,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    example_ids = {
+        key: [f"{key}-0001"]
+        for key in REQUIRED_SPLIT_KEYS
+    }
+    content_hashes = {
+        key: [prompt_content_hash(f"{key} prompt")]
+        for key in REQUIRED_SPLIT_KEYS
+    }
+    if extra_ids:
+        for key, values in extra_ids.items():
+            example_ids.setdefault(key, []).extend(values)
+    if extra_hashes:
+        for key, values in extra_hashes.items():
+            content_hashes.setdefault(key, []).extend(values)
+    return example_ids, content_hashes
+
+
 def test_collect_original_usage_unions_ids_and_hashes(tmp_path: Path) -> None:
     results_dir = tmp_path / "results"
     used_text = "already used prompt"
+    baseline_ids, baseline_hashes = _complete_usage()
+    baseline_ids["harmless_val"].append("harmless_val-0002")
+    baseline_hashes["harmless_val"].append(prompt_content_hash("val prompt"))
     _write_json(
         results_dir / "01_baseline.json",
         _original_artifact(
             experiment="baseline",
-            example_ids={
-                "harmful_train": ["harmful_train-0001"],
-                "harmless_val": ["harmless_val-0002"],
-            },
-            content_hashes={
-                "harmful_train": [prompt_content_hash("train prompt")],
-                "harmless_val": [prompt_content_hash("val prompt")],
-            },
+            example_ids=baseline_ids,
+            content_hashes=baseline_hashes,
         ),
     )
     _write_json(
@@ -173,14 +206,76 @@ def test_collect_original_usage_unions_ids_and_hashes(tmp_path: Path) -> None:
         ),
     )
     used_ids, used_hashes = collect_original_usage(results_dir)
-    assert used_ids == {
-        "harmful_train-0001",
-        "harmless_val-0002",
-        "harmful_test-0003",
-    }
-    assert prompt_content_hash("train prompt") in used_hashes
+    assert "harmful_train-0001" in used_ids
+    assert "harmless_val-0002" in used_ids
+    assert "harmful_test-0003" in used_ids
+    assert prompt_content_hash("harmful_train prompt") in used_hashes
     assert prompt_content_hash("val prompt") in used_hashes
     assert prompt_content_hash(used_text) in used_hashes
+
+
+def test_collect_original_usage_fails_on_preflight_only_directory(
+    tmp_path: Path,
+) -> None:
+    results_dir = tmp_path / "results"
+    _write_json(
+        results_dir / "00_preflight.json",
+        {
+            "experiment": "preflight",
+            "provenance": {"upstream_commit": "upstream-rev"},
+            "results": {},
+        },
+    )
+    with pytest.raises(ValueError, match="required split"):
+        collect_original_usage(results_dir)
+
+
+def test_collect_original_usage_requires_all_six_split_keys(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    example_ids, content_hashes = _complete_usage()
+    example_ids.pop("harmful_val")
+    content_hashes.pop("harmful_val")
+    _write_json(
+        results_dir / "01_baseline.json",
+        _original_artifact(
+            experiment="baseline",
+            example_ids=example_ids,
+            content_hashes=content_hashes,
+        ),
+    )
+    with pytest.raises(ValueError, match="harmful_val"):
+        collect_original_usage(results_dir)
+
+
+def test_collect_original_usage_rejects_empty_or_non_list_groups(
+    tmp_path: Path,
+) -> None:
+    results_dir = tmp_path / "results"
+    example_ids, content_hashes = _complete_usage()
+    example_ids["harmful_train"] = []
+    _write_json(
+        results_dir / "01_baseline.json",
+        _original_artifact(
+            experiment="baseline",
+            example_ids=example_ids,
+            content_hashes=content_hashes,
+        ),
+    )
+    with pytest.raises(ValueError, match="harmful_train"):
+        collect_original_usage(results_dir)
+
+    example_ids, content_hashes = _complete_usage()
+    example_ids["harmless_test"] = "harmless_test-0001"
+    _write_json(
+        results_dir / "01_baseline.json",
+        _original_artifact(
+            experiment="baseline",
+            example_ids=example_ids,
+            content_hashes=content_hashes,
+        ),
+    )
+    with pytest.raises(ValueError, match="list"):
+        collect_original_usage(results_dir)
 
 
 def test_eligible_examples_exclude_original_id_or_content_hash() -> None:
@@ -238,6 +333,99 @@ def test_sampling_fails_when_fewer_than_required_remain() -> None:
         sample_dose_halves(rows, seed=1, selection_size=32, confirmation_size=32)
 
 
+def _tiny_splits(
+    *,
+    harmful_selection: list[PromptExample],
+    harmless_selection: list[PromptExample] | None = None,
+    harmful_confirmation: list[PromptExample] | None = None,
+    harmless_confirmation: list[PromptExample] | None = None,
+) -> DoseSplits:
+    return DoseSplits(
+        harmful_dose_selection=tuple(harmful_selection),
+        harmless_dose_selection=tuple(
+            harmless_selection
+            or [_example("harmless_test-sel", "harmless selection", "harmless")]
+        ),
+        harmful_dose_confirmation=tuple(
+            harmful_confirmation
+            or [_example("harmful_test-conf", "harmful confirmation")]
+        ),
+        harmless_dose_confirmation=tuple(
+            harmless_confirmation
+            or [_example("harmless_test-conf", "harmless confirmation", "harmless")]
+        ),
+    )
+
+
+def test_validate_rejects_original_id_in_a_new_half() -> None:
+    splits = _tiny_splits(
+        harmful_selection=[_example("harmful_train-0001", "fresh leftover wording")],
+    )
+    with pytest.raises(ValueError, match="original example ids"):
+        _assert_disjoint_splits(
+            splits,
+            used_ids={"harmful_train-0001"},
+            used_hashes=set(),
+            selection_size=1,
+            confirmation_size=1,
+        )
+
+
+def test_validate_rejects_hash_overlap_between_selection_and_confirmation() -> None:
+    shared = "same leftover wording for both halves"
+    splits = _tiny_splits(
+        harmful_selection=[_example("harmful_test-0100", shared)],
+        harmful_confirmation=[_example("harmful_test-0101", shared)],
+    )
+    with pytest.raises(ValueError, match="hash"):
+        _assert_disjoint_splits(
+            splits,
+            used_ids=set(),
+            used_hashes=set(),
+            selection_size=1,
+            confirmation_size=1,
+        )
+
+
+def test_validate_rejects_pairwise_hash_overlap_across_selection_halves() -> None:
+    shared = "same leftover wording across classes"
+    splits = _tiny_splits(
+        harmful_selection=[_example("harmful_test-0100", shared)],
+        harmless_selection=[
+            _example("harmless_test-0100", shared, "harmless")
+        ],
+    )
+    with pytest.raises(ValueError, match="hash"):
+        _assert_disjoint_splits(
+            splits,
+            used_ids=set(),
+            used_hashes=set(),
+            selection_size=1,
+            confirmation_size=1,
+        )
+
+
+def test_validate_rejects_duplicate_text_within_the_same_half() -> None:
+    splits = _tiny_splits(
+        harmful_selection=[
+            _example("harmful_test-0100", "duplicated leftover wording"),
+            _example("harmful_test-0101", "duplicated leftover wording"),
+        ],
+        harmless_selection=[
+            _example("harmless_test-sel-a", "harmless selection a", "harmless"),
+            _example("harmless_test-sel-b", "harmless selection b", "harmless"),
+        ],
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        _assert_disjoint_splits(
+            splits,
+            used_ids=set(),
+            used_hashes=set(),
+            selection_size=2,
+            confirmation_size=1,
+        )
+
+
 def test_build_dose_splits_are_disjoint_and_omit_prompt_text(tmp_path: Path) -> None:
     results_dir = tmp_path / "results"
     original_text = "original test prompt"
@@ -256,20 +444,23 @@ def test_build_dose_splits_are_disjoint_and_omit_prompt_text(tmp_path: Path) -> 
         )
         for index in range(10, 80)
     ]
+    example_ids, content_hashes = _complete_usage(
+        extra_ids={
+            "harmful_test": [original_test.id],
+            "harmless_test": ["harmless_test-0001"],
+        },
+        extra_hashes={
+            "harmful_train": [prompt_content_hash(overlap_text)],
+            "harmful_test": [prompt_content_hash(original_text)],
+            "harmless_test": [prompt_content_hash("original harmless")],
+        },
+    )
     _write_json(
         results_dir / "01_baseline.json",
         _original_artifact(
             experiment="baseline",
-            example_ids={
-                "harmful_train": ["harmful_train-0001"],
-                "harmful_test": [original_test.id],
-                "harmless_test": ["harmless_test-0001"],
-            },
-            content_hashes={
-                "harmful_train": [prompt_content_hash(overlap_text)],
-                "harmful_test": [prompt_content_hash(original_text)],
-                "harmless_test": [prompt_content_hash("original harmless")],
-            },
+            example_ids=example_ids,
+            content_hashes=content_hashes,
             source_revision="9d852fae1a9121c78b29142de733cb1340770cc3",
         ),
     )
@@ -356,25 +547,24 @@ def test_build_dose_splits_are_disjoint_and_omit_prompt_text(tmp_path: Path) -> 
         "seed",
         "source_revision",
     }
-    assert metadata["seed"] == 2026
+    assert metadata["seed"] == {"harmful": 2026, "harmless": 2027}
     assert metadata["source_revision"] == (
         "9d852fae1a9121c78b29142de733cb1340770cc3"
     )
-    encoded = json.dumps(metadata)
-    assert "leftover harmful" not in encoded
-    assert "text" not in metadata
+    assert metadata_contains_leak(metadata) is False
 
 
 def test_build_dose_splits_fails_when_a_class_lacks_64_leftovers(
     tmp_path: Path,
 ) -> None:
     results_dir = tmp_path / "results"
+    example_ids, content_hashes = _complete_usage()
     _write_json(
         results_dir / "01_baseline.json",
         _original_artifact(
             experiment="baseline",
-            example_ids={"harmful_test": ["harmful_test-0001"]},
-            content_hashes={"harmful_test": [prompt_content_hash("used")]},
+            example_ids=example_ids,
+            content_hashes=content_hashes,
         ),
     )
     harmful_rows = [
@@ -417,6 +607,20 @@ def test_compact_metadata_helper_omits_prompts() -> None:
     dumped = json.dumps(metadata)
     assert "secret prompt text" not in dumped
     assert "another secret" not in dumped
+    assert metadata["seed"] == {"harmful": 9, "harmless": 10}
+    assert metadata_contains_leak(metadata) is False
+
+
+def test_metadata_leak_check_walks_nested_keys() -> None:
+    nested = {
+        "outer": {
+            "inner": {
+                "text": "a nested leaked prompt string here extra",
+            }
+        }
+    }
+    assert metadata_contains_leak(nested) is True
+    assert metadata_contains_leak({"example_ids": ["harmful_test-0010"]}) is False
 
 
 def test_selects_smallest_qualifying_ablation_and_addition() -> None:
@@ -496,28 +700,68 @@ def test_dose_selection_boundaries_are_inclusive() -> None:
 
 
 def test_selection_does_not_read_confirmation_metrics() -> None:
-    confirmation = [
-        {
-            "coefficient": 0.1,
-            "harmful_refusal_drop": 0.90,
-            "harmless_kl": 0.01,
-        }
-    ]
+    parameters = inspect.signature(select_dose_coefficients).parameters
+    assert "confirmation" not in parameters
+    assert "confirmation_curve" not in parameters
+    assert "confirmation" not in inspect.getsource(select_dose_coefficients)
     chosen = select_dose_coefficients(
         ablation_curve=[
             {
                 "coefficient": 0.75,
                 "harmful_refusal_drop": 0.20,
                 "harmless_kl": 0.10,
+                "confirmation_harmful_refusal_drop": 0.0,
+                "confirmation_harmless_kl": 0.9,
             }
         ],
         addition_curve=[
-            {"coefficient": 0.75, "harmless_refusal_increase": 0.20},
+            {
+                "coefficient": 0.75,
+                "harmless_refusal_increase": 0.20,
+                "confirmation_harmless_refusal_increase": 0.0,
+            },
         ],
     )
     assert chosen["ablation_coefficient"] == 0.75
-    assert "confirmation" not in inspect.signature(select_dose_coefficients).parameters
-    assert confirmation[0]["coefficient"] == 0.1
+    assert chosen["addition_coefficient"] == 0.75
+    dumped = json.dumps(chosen)
+    assert "confirmation" not in dumped
+    assert set(chosen["ablation_curve"][0]) <= set(ABLATION_METRIC_FIELDS)
+    assert set(chosen["addition_curve"][0]) <= set(ADDITION_METRIC_FIELDS)
+
+
+def test_selection_keeps_only_allowlisted_metric_fields() -> None:
+    chosen = select_dose_coefficients(
+        ablation_curve=[
+            {
+                "coefficient": 1.0,
+                "harmful_refusal_drop": 0.5,
+                "harmless_kl": 0.09,
+                "prompt": "please leak this prompt text now extra",
+                "notes": "drop extra keys",
+            }
+        ],
+        addition_curve=[
+            {
+                "coefficient": 1.0,
+                "harmless_refusal_increase": 0.4,
+                "generation": "I cannot help with that request extra",
+            }
+        ],
+    )
+    assert chosen["ablation_curve"] == [
+        {
+            "coefficient": 1.0,
+            "harmful_refusal_drop": 0.5,
+            "harmless_kl": 0.09,
+        }
+    ]
+    assert chosen["addition_curve"] == [
+        {
+            "coefficient": 1.0,
+            "harmless_refusal_increase": 0.4,
+        }
+    ]
 
 
 def test_selection_preserves_full_measured_curves() -> None:
@@ -542,3 +786,11 @@ def test_dose_profile_records_the_new_split_seed() -> None:
     dose = load_config(ROOT, profile=DOSE_PROFILE)
     assert dose["dose_split_seed"] == 2026
     assert dose["dose_split_seed"] != dose["seed"]
+
+
+def test_sampled_splits_rejects_dose_profile_and_points_to_builder(
+    tmp_path: Path,
+) -> None:
+    config = load_config(ROOT, profile=DOSE_PROFILE)
+    with pytest.raises(ValueError, match="build_dose_splits"):
+        _sampled_splits(tmp_path, config)
