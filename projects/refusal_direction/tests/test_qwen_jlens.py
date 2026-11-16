@@ -29,6 +29,8 @@ from refusal_direction_replication.qwen_jlens import (
     compact_corpus_records,
     config_hash,
     corpus_hash,
+    ensure_hf_text_config,
+    installed_jlens_commit,
     is_cuda_oom,
     jlens_metadata_contains_leak,
     load_exclusion_hashes,
@@ -36,11 +38,14 @@ from refusal_direction_replication.qwen_jlens import (
     probe_dim_batch,
     project_fit_duration,
     rank_one_based,
+    require_finite_logits,
     select_dim_batch,
     summarize_holdout_metrics,
     valid_token_positions,
     validate_checkpoint_identity,
+    validate_checkpoint_payload,
     validate_fitted_lens,
+    wrap_hf_model_for_jlens,
     write_fit_checkpoint,
 )
 
@@ -204,12 +209,15 @@ def test_exclusion_hashes_are_recorded_and_never_silently_claimed(
     }
     assert without.exclusions_available is False
     assert without.n_excluded == 0
-    compact = compact_corpus_records(with_file)
+    compact = compact_corpus_records(with_file, exclusion=present)
     assert compact["exclusions_available"] is True
     assert compact["n_excluded"] == with_file.n_excluded
+    assert compact["exclusion_file_sha256"] == present.source_sha256
+    assert compact["exclusion_file_path"] == present.source_path
     silent = compact_corpus_records(without)
     assert silent["exclusions_available"] is False
     assert silent["benchmark_deduplicated"] is False
+    assert silent.get("exclusion_file_sha256") in {None, ""}
 
 
 def test_probe_falls_back_only_on_cuda_oom_and_aborts_at_eight() -> None:
@@ -278,14 +286,23 @@ def test_checkpoint_resumes_only_with_matching_identity(tmp_path: Path) -> None:
     write_fit_checkpoint(
         path,
         jacobian_sum=running,
-        n_done=3,
+        n_done=4,
         next_idx=4,
+        dim_batch=16,
         **identity,
     )
     loaded = load_fit_checkpoint(path)
     validate_checkpoint_identity(loaded, **identity)
-    assert loaded["n_done"] == 3
+    validate_checkpoint_payload(
+        loaded,
+        source_layers=identity["source_layers"],
+        d_model=4,
+        dim_batch=16,
+        fit_count=100,
+    )
+    assert loaded["n_done"] == 4
     assert loaded["next_idx"] == 4
+    assert loaded["dim_batch"] == 16
     assert torch.equal(loaded["jacobian_sum"][0], torch.eye(4))
     stale = dict(identity)
     stale["run_id"] = "other"
@@ -344,6 +361,12 @@ def test_holdout_metrics_and_lens_shape_checks() -> None:
     ]
     summary = summarize_holdout_metrics(records, source_layers=[0, 1])
     assert summary["n_items"] == 2
+    item0 = summary["by_item"]["h0"]["0"]
+    assert item0["n_positions"] == 2
+    assert item0["jlens_rank_sum"] == 6
+    assert item0["jlens_hits@1"] == 1
+    assert item0["jlens_hits@5"] == 2
+    assert item0["jlens_hits@10"] == 2
     layer0 = summary["by_layer"]["0"]["jlens"]
     assert layer0["n_observations"] == 2
     assert layer0["mean_rank"] == pytest.approx(3.0)
@@ -441,3 +464,210 @@ def test_jlens_contract_requires_upstream_adapter_and_no_deps_pin() -> None:
     assert_jlens_contract(module)
     with pytest.raises(ValueError, match="from_hf"):
         assert_jlens_contract(SimpleNamespace(jacobian_for_prompt=object()))
+
+
+def test_probe_clears_oom_frames_and_cuda_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    collected = {"gc": 0, "empty": 0}
+
+    monkeypatch.setattr(
+        "refusal_direction_replication.qwen_jlens.gc.collect",
+        lambda: collected.__setitem__("gc", collected["gc"] + 1) or 0,
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "empty_cache",
+        lambda: collected.__setitem__("empty", collected["empty"] + 1),
+    )
+
+    def oom(_dim_batch: int) -> None:
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    with pytest.raises(RuntimeError, match="dim_batch 8 OOMed") as caught:
+        probe_dim_batch(oom, order=(32, 16, 8))
+    assert caught.value.__cause__ is None
+    assert collected["gc"] >= 3
+    assert collected["empty"] >= 3
+
+
+def test_checkpoint_rejects_inconsistent_counts_shapes_and_nonfinite(
+    tmp_path: Path,
+) -> None:
+    identity = {
+        "source_layers": [0, 1],
+        "target_layer": 2,
+        "skip_first": 16,
+        "corpus_hash": "a" * 64,
+        "config_hash": "b" * 64,
+        "model_revision": QWEN_REVISION,
+        "implementation_commit": "c" * 40,
+        "run_id": "jlens-run-1",
+    }
+    path = tmp_path / "jlens_fit_checkpoint.pt"
+    write_fit_checkpoint(
+        path,
+        jacobian_sum={0: torch.eye(4), 1: torch.eye(4)},
+        n_done=3,
+        next_idx=4,
+        dim_batch=16,
+        **identity,
+    )
+    loaded = load_fit_checkpoint(path)
+    with pytest.raises(ValueError, match="n_done"):
+        validate_checkpoint_payload(
+            loaded,
+            source_layers=[0, 1],
+            d_model=4,
+            dim_batch=16,
+            fit_count=100,
+        )
+    write_fit_checkpoint(
+        path,
+        jacobian_sum={0: torch.eye(4), 1: torch.full((4, 4), float("nan"))},
+        n_done=4,
+        next_idx=4,
+        dim_batch=16,
+        **identity,
+    )
+    with pytest.raises(ValueError, match="finite"):
+        validate_checkpoint_payload(
+            load_fit_checkpoint(path),
+            source_layers=[0, 1],
+            d_model=4,
+            dim_batch=16,
+            fit_count=100,
+        )
+    write_fit_checkpoint(
+        path,
+        jacobian_sum={0: torch.eye(4)},
+        n_done=1,
+        next_idx=1,
+        dim_batch=8,
+        **identity,
+    )
+    with pytest.raises(ValueError, match="layer"):
+        validate_checkpoint_payload(
+            load_fit_checkpoint(path),
+            source_layers=[0, 1],
+            d_model=4,
+            dim_batch=8,
+            fit_count=100,
+        )
+
+
+def test_readout_rejects_nonfinite_logits() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        require_finite_logits(torch.tensor([0.1, float("nan")]), "jlens_logits")
+    require_finite_logits(torch.tensor([0.1, 0.2]), "jlens_logits")
+
+
+def test_exclusion_file_requires_sha256_and_records_provenance(tmp_path: Path) -> None:
+    bad = tmp_path / "exclusions.txt"
+    bad.write_text("not-a-hash\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_exclusion_hashes(bad)
+    digest = "a" * 64
+    good = tmp_path / "good.txt"
+    good.write_text(digest + "\n", encoding="utf-8")
+    loaded = load_exclusion_hashes(good)
+    assert loaded.available is True
+    assert loaded.hashes == frozenset({digest})
+    assert loaded.source_sha256 == hashlib.sha256(good.read_bytes()).hexdigest()
+    assert loaded.source_path.endswith("good.txt")
+
+
+def test_installed_jlens_commit_reads_direct_url_metadata() -> None:
+    class Dist:
+        def __init__(self, payload: dict) -> None:
+            self.payload = payload
+
+        def read_text(self, name: str) -> str | None:
+            if name != "direct_url.json":
+                return None
+            import json as json_lib
+
+            return json_lib.dumps(self.payload)
+
+    matched = Dist(
+        {
+            "url": "https://github.com/anthropics/jacobian-lens",
+            "vcs_info": {"vcs": "git", "commit_id": JLENS_UPSTREAM_COMMIT},
+        }
+    )
+    assert installed_jlens_commit(distribution=matched) == JLENS_UPSTREAM_COMMIT
+    with pytest.raises(ValueError, match="commit"):
+        installed_jlens_commit(
+            distribution=Dist({"vcs_info": {"commit_id": "deadbeef" * 5}})
+        )
+    with pytest.raises(ValueError, match="direct_url"):
+        installed_jlens_commit(distribution=Dist({}))
+
+
+def test_shim_adds_get_text_config_when_missing() -> None:
+    config = SimpleNamespace(num_hidden_layers=2, hidden_size=16)
+    model = SimpleNamespace(config=config)
+    ensure_hf_text_config(model)
+    assert model.config.get_text_config() is config
+    already = SimpleNamespace(
+        config=SimpleNamespace(
+            num_hidden_layers=2,
+            hidden_size=16,
+            get_text_config=lambda decoder=False: "kept",
+        )
+    )
+    ensure_hf_text_config(already)
+    assert already.config.get_text_config() == "kept"
+
+
+def test_real_qwen2_upstream_wrap_on_transformers_4_44() -> None:
+    import transformers
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    from refusal_direction_replication.qwen_jlens_runtime import default_wrap_model
+
+    assert transformers.__version__.startswith(("4.44.", "4.48."))
+    config = Qwen2Config(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        vocab_size=64,
+        max_position_embeddings=64,
+    )
+    model = Qwen2ForCausalLM(config)
+    if transformers.__version__.startswith("4.44."):
+        assert not hasattr(model.config, "get_text_config")
+
+    class _Tok:
+        bos_token_id = None
+
+        def __call__(
+            self,
+            text: str,
+            return_tensors: str = "pt",
+            truncation: bool = True,
+            max_length: int = 128,
+        ):
+            n = min(max_length, 24)
+            return SimpleNamespace(input_ids=torch.arange(n).unsqueeze(0) % 64)
+
+    bound = default_wrap_model(model, _Tok())
+    assert bound.n_layers == 2
+    assert bound.d_model == 16
+    from jlens.fitting import jacobian_for_prompt
+
+    jacobians, seq_len, n_valid = jacobian_for_prompt(
+        bound,
+        "def tiny():\n    return 1\n" * 4,
+        [0],
+        target_layer=1,
+        dim_batch=8,
+        max_seq_len=32,
+        skip_first=0,
+    )
+    assert seq_len > 1
+    assert n_valid > 0
+    assert jacobians[0].shape == (16, 16)
+    assert torch.isfinite(jacobians[0]).all()
+    wrapped = wrap_hf_model_for_jlens(model, _Tok())
+    assert wrapped.n_layers == 2

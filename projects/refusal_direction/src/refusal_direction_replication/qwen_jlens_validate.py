@@ -10,6 +10,7 @@ import torch
 
 from .pipeline import load_config
 from .qwen_dose_validate import validate_qwen_dose
+from .qwen_dose import sha256_file
 from .qwen_jlens import (
     DIM_BATCH_PROBE_ORDER,
     EXPECTED_D_MODEL,
@@ -42,6 +43,7 @@ ABORTED_FILES = (
     "00_jlens_prepare.json",
     "01_jlens_probe.json",
     "jlens_evaluation.json",
+    "execution_manifest.json",
 )
 
 
@@ -87,8 +89,8 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         "holdout_metric_arithmetic": True,
         "run_status_events_manifest": True,
         "source_dose_still_pass": True,
-        "original_pilot_validator": True,
-        "original_dose_validator": True,
+        "original_pilot_validator": False,
+        "original_dose_validator": False,
         "production_layer_contract": True,
     }
     try:
@@ -126,6 +128,17 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             checks["source_dose_still_pass"] = False
     else:
         checks["source_dose_still_pass"] = False
+
+    try:
+        original = validate_qwen_pilot(root)
+        checks["original_pilot_validator"] = all(original.values())
+    except Exception:
+        checks["original_pilot_validator"] = False
+    try:
+        dose = validate_qwen_dose(root)
+        checks["original_dose_validator"] = all(dose.values())
+    except Exception:
+        checks["original_dose_validator"] = False
 
     if not evaluation_path.is_file():
         return checks
@@ -173,9 +186,18 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             checks["fit_holdout_counts"] = False
         if results.get("holdout_count") != HOLDOUT_COUNT or len(holdout_ids) != HOLDOUT_COUNT:
             checks["fit_holdout_counts"] = False
+        all_hashes = list(fit_hashes) + list(holdout_hashes)
         if set(fit_ids) & set(holdout_ids) or set(fit_hashes) & set(holdout_hashes):
             checks["fit_holdout_disjoint"] = False
         if len(set(fit_ids)) != len(fit_ids) or len(set(holdout_ids)) != len(holdout_ids):
+            checks["fit_holdout_disjoint"] = False
+        if len(set(fit_hashes)) != len(fit_hashes) or len(set(holdout_hashes)) != len(
+            holdout_hashes
+        ):
+            checks["fit_holdout_disjoint"] = False
+        if len(all_hashes) != FIT_COUNT + HOLDOUT_COUNT or len(set(all_hashes)) != len(
+            all_hashes
+        ):
             checks["fit_holdout_disjoint"] = False
         if results.get("exclusions_available") is False and results.get(
             "benchmark_deduplicated"
@@ -188,7 +210,11 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         if list(probe.get("probe_order") or []) != list(DIM_BATCH_PROBE_ORDER):
             checks["probe_order_and_projection"] = False
         selected = probe.get("selected_dim_batch")
-        if selected not in DIM_BATCH_PROBE_ORDER:
+        abort_gate = evaluation.get("abort_gate")
+        if status == "aborted" and abort_gate == "dim_batch_oom":
+            if selected not in {None}:
+                checks["probe_order_and_projection"] = False
+        elif selected not in DIM_BATCH_PROBE_ORDER:
             checks["probe_order_and_projection"] = False
         if probe.get("exceeds_limit") and status == "pass":
             checks["probe_order_and_projection"] = False
@@ -198,6 +224,30 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 probe.get("projected_limit_seconds") or 0
             )
         ):
+            checks["probe_order_and_projection"] = False
+        attempts = list(probe.get("attempts") or [])
+        order = list(probe.get("probe_order") or [])
+        if not attempts or len(attempts) > len(order):
+            checks["probe_order_and_projection"] = False
+        else:
+            for index, attempt in enumerate(attempts):
+                if int(attempt.get("dim_batch") or -1) != int(order[index]):
+                    checks["probe_order_and_projection"] = False
+            if status == "pass":
+                if attempts[-1].get("outcome") != "ok":
+                    checks["probe_order_and_projection"] = False
+                if any(item.get("outcome") != "cuda_oom" for item in attempts[:-1]):
+                    checks["probe_order_and_projection"] = False
+                if int(attempts[-1].get("dim_batch") or -1) != int(selected):
+                    checks["probe_order_and_projection"] = False
+            if status == "aborted" and abort_gate == "dim_batch_oom":
+                if [item.get("outcome") for item in attempts] != ["cuda_oom"] * len(
+                    order
+                ):
+                    checks["probe_order_and_projection"] = False
+        wall = float(probe.get("wall_seconds") or 0)
+        projected = float(probe.get("projected_seconds") or 0)
+        if abs(projected - wall * FIT_COUNT) > 1e-6:
             checks["probe_order_and_projection"] = False
 
     holdout_path = results_dir / "03_jlens_holdout.json"
@@ -210,6 +260,14 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         if {int(key) for key in by_layer} != set(source_layers):
             checks["holdout_complete"] = False
         overall = holdout.get("overall") or {}
+        by_item = holdout.get("by_item") or {}
+        if len(by_item) != HOLDOUT_COUNT:
+            checks["holdout_complete"] = False
+        for item_id, layers in by_item.items():
+            if {int(key) for key in layers} != set(source_layers):
+                checks["holdout_complete"] = False
+        if len(holdout.get("holdout_ids") or []) != HOLDOUT_COUNT:
+            checks["holdout_complete"] = False
         for method in ("jlens", "logit_lens"):
             expected_pass1 = _weighted_mean(by_layer, method, "pass@1")
             expected_pass5 = _weighted_mean(by_layer, method, "pass@5")
@@ -224,6 +282,29 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 checks["holdout_metric_arithmetic"] = False
             if abs(float(observed.get("mean_rank") or 0) - expected_rank) > 1e-9:
                 checks["holdout_metric_arithmetic"] = False
+            prefix = "jlens" if method == "jlens" else "logit_lens"
+            n_pos = 0
+            rank_sum = 0
+            hits1 = 0
+            hits5 = 0
+            hits10 = 0
+            for layers in by_item.values():
+                for layer in source_layers:
+                    block = (layers or {}).get(str(int(layer))) or {}
+                    n_pos += int(block.get("n_positions") or 0)
+                    rank_sum += int(block.get(f"{prefix}_rank_sum") or 0)
+                    hits1 += int(block.get(f"{prefix}_hits@1") or 0)
+                    hits5 += int(block.get(f"{prefix}_hits@5") or 0)
+                    hits10 += int(block.get(f"{prefix}_hits@10") or 0)
+            if n_pos:
+                if abs(float(observed.get("mean_rank") or 0) - rank_sum / n_pos) > 1e-9:
+                    checks["holdout_metric_arithmetic"] = False
+                if abs(float(observed.get("pass@1") or 0) - hits1 / n_pos) > 1e-9:
+                    checks["holdout_metric_arithmetic"] = False
+                if abs(float(observed.get("pass@5") or 0) - hits5 / n_pos) > 1e-9:
+                    checks["holdout_metric_arithmetic"] = False
+                if abs(float(observed.get("pass@10") or 0) - hits10 / n_pos) > 1e-9:
+                    checks["holdout_metric_arithmetic"] = False
 
     lens_path = artifacts_dir / "qwen25_coder_7b_jacobian_lens.pt"
     checkpoint_path = artifacts_dir / "jlens_fit_checkpoint.pt"
@@ -239,6 +320,29 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
             )
             if int(payload.get("d_model")) != int(config["d_model"]):
                 checks["checkpoint_and_lens_identity"] = False
+            actual_hash = sha256_file(lens_path)
+            actual_size = lens_path.stat().st_size
+            fit_path = results_dir / "02_jlens_fit.json"
+            fit_results = (
+                _load(fit_path).get("results") if fit_path.is_file() else {}
+            ) or {}
+            if fit_results.get("lens_sha256") != actual_hash:
+                checks["checkpoint_and_lens_identity"] = False
+            if int(fit_results.get("lens_bytes") or -1) != actual_size:
+                checks["checkpoint_and_lens_identity"] = False
+            if evaluation.get("lens_sha256") not in {None, actual_hash}:
+                checks["checkpoint_and_lens_identity"] = False
+            if status == "pass" and evaluation.get("lens_sha256") != actual_hash:
+                checks["checkpoint_and_lens_identity"] = False
+            for field_name in (
+                "corpus_hash",
+                "config_hash",
+                "jlens_upstream_commit",
+                "implementation_commit",
+                "run_id",
+            ):
+                if not fit_results.get(field_name):
+                    checks["checkpoint_and_lens_identity"] = False
         except Exception:
             checks["checkpoint_and_lens_identity"] = False
     elif status == "pass":
@@ -268,9 +372,9 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         if status_payload.get("run_id") != evaluation.get("run_id"):
             checks["run_status_events_manifest"] = False
         if status == "pass":
-            if int(status_payload.get("total_units") or 0) != FIT_COUNT:
-                checks["run_status_events_manifest"] = False
-            if int(status_payload.get("completed_units") or 0) != FIT_COUNT:
+            if int(status_payload.get("completed_units") or -1) != int(
+                status_payload.get("total_units") or -2
+            ):
                 checks["run_status_events_manifest"] = False
         events_path = artifacts_dir / EVENTS_FILENAME
         if events_path.is_file():
@@ -280,8 +384,30 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
                 if line.strip()
             ]
             names = {item.get("event") for item in events}
-            if status == "pass" and not {"probe_choice", "checkpoint"} <= names:
+            if status == "pass" and not {"probe_choice", "checkpoint", "stage_completed"} <= names:
                 checks["run_status_events_manifest"] = False
+            checkpoint_events = [
+                item for item in events if item.get("event") == "checkpoint"
+            ]
+            if status == "pass" and len(checkpoint_events) != FIT_COUNT:
+                checks["run_status_events_manifest"] = False
+            initialized_stages = [
+                item.get("stage")
+                for item in events
+                if item.get("event") == "initialized"
+            ]
+            if status == "pass" and initialized_stages != [
+                "prepare",
+                "probe",
+                "fit",
+                "holdout",
+            ]:
+                checks["run_status_events_manifest"] = False
+            if status == "pass":
+                if status_payload.get("current_stage") != "holdout":
+                    checks["run_status_events_manifest"] = False
+                if status_payload.get("state") != "completed":
+                    checks["run_status_events_manifest"] = False
             if any(jlens_metadata_contains_leak(item) for item in events):
                 checks["no_raw_text_leakage"] = False
         else:
@@ -294,22 +420,14 @@ def validate_qwen_jlens(root: Path) -> dict[str, bool]:
         manifest = _load(manifest_path)
         if (manifest.get("results") or {}).get("status") != status:
             checks["run_status_events_manifest"] = False
+        listed = list((manifest.get("results") or {}).get("result_files") or [])
+        expected_files = list(ABORTED_FILES if status == "aborted" else PASS_FILES)
+        if listed and set(listed) != set(expected_files):
+            checks["run_status_events_manifest"] = False
+        actual = {path.name for path in results_dir.glob("*.json") if path.is_file()}
+        if expected_files and not set(expected_files).issubset(actual):
+            checks["run_status_events_manifest"] = False
         if len(run_ids - {None}) > 1:
             checks["run_status_events_manifest"] = False
-
-    original_preflight = root / "results" / "qwen25_coder_7b" / "00_preflight.json"
-    if original_preflight.is_file():
-        try:
-            original = validate_qwen_pilot(root)
-            checks["original_pilot_validator"] = all(original.values())
-        except Exception:
-            checks["original_pilot_validator"] = False
-    dose_prepare = root / "results" / "qwen25_coder_7b_dose" / "00_dose_prepare.json"
-    if dose_prepare.is_file():
-        try:
-            dose = validate_qwen_dose(root)
-            checks["original_dose_validator"] = all(dose.values())
-        except Exception:
-            checks["original_dose_validator"] = False
 
     return checks

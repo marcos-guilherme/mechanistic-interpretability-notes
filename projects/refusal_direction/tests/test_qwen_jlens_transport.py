@@ -10,11 +10,16 @@ from pathlib import Path
 import pytest
 
 from refusal_direction_replication.qwen_colab_transport import (
+    MAX_JLENS_JSON_BYTES,
     MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES,
     MAX_MEMBER_BYTES,
+    REMOTE_JLENS_CHECKPOINT_STAGING,
+    atomic_install_jlens_checkpoint,
     collect_qwen_jlens_pack_entries,
     extract_qwen_jlens_archive,
     is_allowed_jlens_fetch_member,
+    jlens_member_byte_limit,
+    optional_local_jlens_checkpoint,
     pack_qwen_jlens_results,
 )
 
@@ -25,6 +30,7 @@ JLENS_STATUS = ROOT / "scripts" / "qwen_run_jlens_status.py"
 JLENS_RUN = ROOT / "scripts" / "qwen_run_jlens.py"
 JLENS_PACK = ROOT / "scripts" / "colab_pack_qwen_jlens_results.py"
 JLENS_INSTALL = ROOT / "scripts" / "colab_install_jlens.py"
+JLENS_CHECKPOINT_INSTALL = ROOT / "scripts" / "colab_install_jlens_checkpoint.py"
 
 
 def load_run_refusal():
@@ -185,8 +191,9 @@ def test_profile_session_action_and_bootstrap_pin() -> None:
     status = RUN_REFUSAL.status_command("refusal-qwen", profile="qwen25-coder-jlens")
     assert status[status.index("-f") + 1] == str(JLENS_STATUS)
     scripts = RUN_REFUSAL.bootstrap_scripts("qwen25-coder-jlens")
-    assert scripts[-1] == JLENS_INSTALL
     assert scripts[0] == ROOT / "scripts" / "colab_bootstrap.py"
+    assert JLENS_INSTALL in scripts
+    assert any(path.name == "colab_install_jlens_checkpoint.py" for path in scripts)
 
 
 def test_jlens_action_is_profile_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,7 +229,7 @@ def test_gemma_and_dose_routing_unchanged(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_remote_scripts_prepend_src_and_bootstrap_pins_no_deps() -> None:
-    for path in (JLENS_RUN, JLENS_STATUS, JLENS_PACK, JLENS_INSTALL):
+    for path in (JLENS_RUN, JLENS_STATUS, JLENS_PACK, JLENS_INSTALL, JLENS_CHECKPOINT_INSTALL):
         source = path.read_text(encoding="utf-8")
         assert "/content/refusal_direction/src" in source
         assert source.index("sys.path.insert") < source.index(
@@ -257,3 +264,102 @@ def test_jlens_sync_does_not_require_dose_direction(
     uploaded = [item for command in commands for item in command]
     assert "/content/refusal_direction.tar.gz" in uploaded
     assert "/content/dose_source_direction.pt" not in uploaded
+    assert REMOTE_JLENS_CHECKPOINT_STAGING not in uploaded
+
+
+def test_jlens_member_limits_are_stricter_for_json() -> None:
+    assert jlens_member_byte_limit("results/qwen25_coder_7b_jlens/00_jlens_prepare.json") == MAX_JLENS_JSON_BYTES
+    assert MAX_JLENS_JSON_BYTES < MAX_MEMBER_BYTES
+    assert jlens_member_byte_limit(
+        "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
+    ) == MAX_MEMBER_BYTES
+
+
+def test_extract_revalidates_json_and_rejects_oversized_json(tmp_path: Path) -> None:
+    leaky = json.dumps(_compact(results={"fit_text": "def secret(): pass"})).encode()
+    archive = tmp_path / "leaky.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        info = tarfile.TarInfo("results/qwen25_coder_7b_jlens/00_jlens_prepare.json")
+        info.size = len(leaky)
+        handle.addfile(info, io.BytesIO(leaky))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(ValueError, match="leak"):
+        extract_qwen_jlens_archive(archive, dest)
+
+    payload = json.dumps(_compact()).encode()
+    huge = tmp_path / "huge.tar.gz"
+    with tarfile.open(huge, "w:gz") as handle:
+        info = tarfile.TarInfo("results/qwen25_coder_7b_jlens/00_jlens_prepare.json")
+        info.size = MAX_JLENS_JSON_BYTES + 1
+        handle.addfile(info, io.BytesIO(payload + b" " * (MAX_JLENS_JSON_BYTES + 1 - len(payload))))
+    with pytest.raises(ValueError, match="size"):
+        extract_qwen_jlens_archive(huge, dest)
+
+
+def test_optional_checkpoint_upload_and_validated_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    project = tmp_path / "refusal_direction"
+    artifacts = project / "artifacts" / "qwen25_coder_7b_jlens"
+    artifacts.mkdir(parents=True)
+    checkpoint = artifacts / "jlens_fit_checkpoint.pt"
+    torch.save(
+        {
+            "jacobian_sum": {0: torch.eye(4), 1: torch.eye(4), 2: torch.eye(4)},
+            "n_done": 8,
+            "next_idx": 8,
+            "source_layers": [0, 1, 2],
+            "target_layer": 3,
+            "skip_first": 16,
+            "corpus_hash": "c" * 64,
+            "config_hash": "d" * 64,
+            "model_revision": "c" * 40,
+            "implementation_commit": "a" * 40,
+            "run_id": "jlens-run-1",
+            "dim_batch": 16,
+        },
+        checkpoint,
+    )
+    (project / "hello.py").write_text("print('ok')\n", encoding="utf-8")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(RUN_REFUSAL, "PROJECT", project)
+    monkeypatch.setattr(RUN_REFUSAL, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        RUN_REFUSAL, "current_implementation_commit", lambda cwd=None: "a" * 40
+    )
+    monkeypatch.setattr(RUN_REFUSAL, "run", lambda command: commands.append(list(command)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_refusal.py", "sync", "--profile", "qwen25-coder-jlens"],
+    )
+    RUN_REFUSAL.main()
+    uploaded = [item for command in commands for item in command]
+    assert REMOTE_JLENS_CHECKPOINT_STAGING in uploaded
+    assert str(checkpoint) in uploaded
+    archive = tmp_path / ".colab-staging" / "refusal_direction.tar.gz"
+    with tarfile.open(archive, "r:gz") as handle:
+        names = [name.replace("\\", "/") for name in handle.getnames()]
+    assert not any("jlens_fit_checkpoint.pt" in name for name in names)
+
+    fresh = tmp_path / "fresh"
+    staged = tmp_path / "staged.pt"
+    staged.write_bytes(checkpoint.read_bytes())
+    installed = atomic_install_jlens_checkpoint(staged=staged, project=fresh)
+    assert installed == fresh / "artifacts" / "qwen25_coder_7b_jlens" / "jlens_fit_checkpoint.pt"
+    assert installed.is_file()
+    assert optional_local_jlens_checkpoint(fresh) == installed
+
+    scripts = RUN_REFUSAL.bootstrap_scripts("qwen25-coder-jlens")
+    assert any(path.name == "colab_install_jlens_checkpoint.py" for path in scripts)
+
+
+def test_checkpoint_install_rejects_corrupt_payload(tmp_path: Path) -> None:
+    staged = tmp_path / "bad.pt"
+    staged.write_bytes(b"not-a-checkpoint")
+    with pytest.raises(ValueError, match="checkpoint"):
+        atomic_install_jlens_checkpoint(staged=staged, project=tmp_path / "proj")

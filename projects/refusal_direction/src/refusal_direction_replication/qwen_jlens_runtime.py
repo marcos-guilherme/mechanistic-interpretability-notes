@@ -22,6 +22,7 @@ from .pipeline import (
     project_paths,
     release_compute_resources,
 )
+from .qwen_dose import sha256_file
 from .qwen_jlens import (
     CHECKPOINT_FILENAME,
     DATASET_CONFIG,
@@ -39,6 +40,7 @@ from .qwen_jlens import (
     QWEN_REVISION,
     SKIP_FIRST,
     SOURCE_DOSE_RUN_ID,
+    DimBatchOOMError,
     assert_jlens_contract,
     build_codesearchnet_corpus,
     compact_corpus_records,
@@ -49,10 +51,13 @@ from .qwen_jlens import (
     probe_dim_batch,
     project_fit_duration,
     rank_one_based,
+    require_finite_logits,
     summarize_holdout_metrics,
     valid_token_positions,
     validate_checkpoint_identity,
+    validate_checkpoint_payload,
     validate_fitted_lens,
+    wrap_hf_model_for_jlens,
     write_fit_checkpoint,
 )
 from .qwen_pilot import resolve_run_id
@@ -147,9 +152,7 @@ def default_load_model(config: Mapping[str, Any]) -> tuple[Any, Any]:
 
 
 def default_wrap_model(model: Any, tokenizer: Any) -> Any:
-    import jlens
-
-    return jlens.from_hf(model, tokenizer)
+    return wrap_hf_model_for_jlens(model, tokenizer)
 
 
 def default_jacobian_for_prompt(*args: Any, **kwargs: Any) -> tuple[dict[int, torch.Tensor], int, int]:
@@ -235,6 +238,10 @@ def build_jlens_evaluation(
     exception_category: str | None = None,
     error_code: str | None = None,
     stage: str | None = None,
+    lens_sha256: str | None = None,
+    lens_bytes: int | None = None,
+    corpus_hash: str | None = None,
+    config_hash: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -264,6 +271,14 @@ def build_jlens_evaluation(
         payload["error_code"] = error_code
     if stage is not None:
         payload["stage"] = stage
+    if lens_sha256 is not None:
+        payload["lens_sha256"] = lens_sha256
+    if lens_bytes is not None:
+        payload["lens_bytes"] = int(lens_bytes)
+    if corpus_hash is not None:
+        payload["corpus_hash"] = corpus_hash
+    if config_hash is not None:
+        payload["config_hash"] = config_hash
     return payload
 
 
@@ -299,6 +314,14 @@ def run_holdout_readout(
             max_seq_len=max_seq_len,
             use_jacobian=False,
         )
+        require_finite_logits(model_logits, "model_logits")
+        for layer in source_layers:
+            require_finite_logits(
+                jlens_logits[int(layer)], f"jlens_logits[{int(layer)}]"
+            )
+            require_finite_logits(
+                logit_logits[int(layer)], f"logit_logits[{int(layer)}]"
+            )
         targets = torch.argmax(model_logits.float(), dim=-1)
         for position_index, position in enumerate(positions):
             target_id = int(targets[position_index].item())
@@ -306,6 +329,7 @@ def run_holdout_readout(
                 records.append(
                     {
                         "example_id": item.example_id,
+                        "content_hash": item.content_hash,
                         "position": int(position),
                         "layer": int(layer),
                         "target_token_id": target_id,
@@ -365,12 +389,16 @@ def run_qwen_jlens(
 
     def release_loaded() -> None:
         nonlocal model, tokenizer, bound
-        model = None
-        tokenizer = None
-        bound = None
-        if release_resources is not None:
-            release_resources()
-        release_compute_resources(None, None)
+        try:
+            if release_resources is not None:
+                release_resources()
+        finally:
+            try:
+                release_compute_resources(None, None)
+            finally:
+                model = None
+                tokenizer = None
+                bound = None
 
     def ensure_model() -> tuple[Any, Any]:
         nonlocal model, tokenizer
@@ -378,6 +406,16 @@ def run_qwen_jlens(
             loader = load_model or default_load_model
             model, tokenizer = loader(config) if load_model is None else loader()
         return model, tokenizer
+
+    def enter_stage(stage: str, total_units: int) -> None:
+        store.initialize(stage=stage, total_units=total_units)
+        store.begin_running()
+
+    def resolved_revision() -> str:
+        observed = getattr(getattr(model, "config", None), "_commit_hash", None)
+        if not observed:
+            raise ValueError("resolved model revision is missing")
+        return str(observed)
 
     rows_fn = load_rows or (lambda **_kwargs: default_load_rows(config))
     wrap = wrap_model or default_wrap_model
@@ -387,9 +425,9 @@ def run_qwen_jlens(
 
     try:
         contract()
-        store.initialize(stage="prepare", total_units=FIT_COUNT)
-        store.begin_running()
+        enter_stage("prepare", FIT_COUNT)
         _, tokenizer = ensure_model()
+        provenance["resolved_model_revision"] = resolved_revision()
         exclusion = load_exclusion_hashes(
             root / config["exclusion_hashes_path"]
             if config.get("exclusion_hashes_path")
@@ -408,7 +446,7 @@ def run_qwen_jlens(
             exclusions_available=exclusion.available,
         )
         _write_raw_corpus(artifacts_dir / "corpus.jsonl", corpus)
-        compact = compact_corpus_records(corpus)
+        compact = compact_corpus_records(corpus, exclusion=exclusion)
         _write_compact(
             results_dir / "00_jlens_prepare.json",
             experiment="jlens_prepare",
@@ -423,7 +461,7 @@ def run_qwen_jlens(
             "skip_first": skip_first,
             "corpus_hash": digest,
             "config_hash": hashed_config,
-            "model_revision": str(config["model_revision"]),
+            "model_revision": provenance["resolved_model_revision"],
             "implementation_commit": commit,
             "run_id": resolved_run_id,
         }
@@ -435,17 +473,23 @@ def run_qwen_jlens(
         if checkpoint_path.is_file():
             loaded = load_fit_checkpoint(checkpoint_path)
             validate_checkpoint_identity(loaded, **identity)
+            validate_checkpoint_payload(
+                loaded,
+                source_layers=source_layers,
+                d_model=d_model,
+                dim_batch=int(loaded["dim_batch"]),
+                fit_count=len(corpus.fit),
+            )
             jacobian_sum = {
                 int(layer): tensor for layer, tensor in loaded["jacobian_sum"].items()
             }
             n_done = int(loaded["n_done"])
             next_idx = int(loaded["next_idx"])
-            selected_dim_batch = (
-                int(loaded["dim_batch"]) if "dim_batch" in loaded else None
-            )
+            selected_dim_batch = int(loaded["dim_batch"])
             resumed = True
 
         if not resumed:
+            enter_stage("probe", FIT_COUNT)
             store.update_progress(completed_units=0, total_units=FIT_COUNT)
             hf_model, tokenizer = ensure_model()
             bound = wrap(hf_model, tokenizer)
@@ -470,22 +514,57 @@ def run_qwen_jlens(
                     ),
                     clock=probe_clock or clock,
                 )
-            except RuntimeError as exc:
-                if "dim_batch 8 OOMed" not in str(exc):
-                    raise
+            except DimBatchOOMError as exc:
+                attempts = list(exc.attempts)
+                wall_seconds = sum(float(item.get("wall_seconds") or 0) for item in attempts)
+                projection = project_fit_duration(
+                    probe_seconds=wall_seconds,
+                    n_prompts=len(corpus.fit),
+                )
+                _write_compact(
+                    results_dir / "01_jlens_probe.json",
+                    experiment="jlens_probe",
+                    config=config,
+                    results={
+                        "probe_order": list(
+                            config.get("dim_batch_probe_order", DIM_BATCH_PROBE_ORDER)
+                        ),
+                        "attempts": attempts,
+                        "selected_dim_batch": None,
+                        "wall_seconds": wall_seconds,
+                        "projected_seconds": projection.projected_seconds,
+                        "projected_limit_seconds": projection.limit_seconds,
+                        "exceeds_limit": projection.exceeds_limit,
+                    },
+                    provenance=provenance,
+                )
                 evaluation = build_jlens_evaluation(
                     status=STATUS_ABORTED,
                     operational_success=True,
                     run_id=resolved_run_id,
                     implementation_commit=commit,
-                    model_revision=str(config["model_revision"]),
+                    model_revision=provenance["resolved_model_revision"],
                     source_dose_run_id=source_dose["run_id"],
                     source_dose_status=STATUS_PASS,
                     abort_gate="dim_batch_oom",
                     abort_reason="dim_batch 8 OOMed",
                     stage="probe",
+                    corpus_hash=digest,
+                    config_hash=hashed_config,
                 )
                 _write_evaluation(results_dir, evaluation)
+                _write_manifest(
+                    results_dir,
+                    config=config,
+                    provenance=provenance,
+                    status=STATUS_ABORTED,
+                    files=[
+                        "00_jlens_prepare.json",
+                        "01_jlens_probe.json",
+                        "jlens_evaluation.json",
+                        "execution_manifest.json",
+                    ],
+                )
                 store.abort(gate="dim_batch_oom", reason="dim_batch 8 OOMed")
                 return evaluation
             selected_dim_batch = probe.selected
@@ -526,7 +605,7 @@ def run_qwen_jlens(
                     operational_success=True,
                     run_id=resolved_run_id,
                     implementation_commit=commit,
-                    model_revision=str(config["model_revision"]),
+                    model_revision=provenance["resolved_model_revision"],
                     source_dose_run_id=source_dose["run_id"],
                     source_dose_status=STATUS_PASS,
                     selected_dim_batch=selected_dim_batch,
@@ -543,7 +622,12 @@ def run_qwen_jlens(
                     config=config,
                     provenance=provenance,
                     status=STATUS_ABORTED,
-                    files=["00_jlens_prepare.json", "01_jlens_probe.json", "jlens_evaluation.json"],
+                    files=[
+                        "00_jlens_prepare.json",
+                        "01_jlens_probe.json",
+                        "jlens_evaluation.json",
+                        "execution_manifest.json",
+                    ],
                 )
                 store.abort(
                     gate="projected_runtime",
@@ -558,8 +642,7 @@ def run_qwen_jlens(
         if bound is None:
             hf_model, tokenizer = ensure_model()
             bound = wrap(hf_model, tokenizer)
-        store.initialize(stage="fit", total_units=FIT_COUNT)
-        store.begin_running()
+        enter_stage("fit", FIT_COUNT)
         if n_done:
             store.update_progress(completed_units=n_done, total_units=FIT_COUNT)
         for prompt_idx, item in enumerate(corpus.fit):
@@ -615,6 +698,8 @@ def run_qwen_jlens(
         tmp_lens = lens_path.with_name(lens_path.name + ".tmp")
         lens.save(str(tmp_lens), dtype=torch.float16)
         tmp_lens.replace(lens_path)
+        lens_digest = sha256_file(lens_path)
+        lens_bytes = lens_path.stat().st_size
         _write_compact(
             results_dir / "02_jlens_fit.json",
             experiment="jlens_fit",
@@ -629,6 +714,12 @@ def run_qwen_jlens(
                 "skip_first": skip_first,
                 "corpus_hash": digest,
                 "config_hash": hashed_config,
+                "lens_sha256": lens_digest,
+                "lens_bytes": lens_bytes,
+                "resolved_model_revision": provenance["resolved_model_revision"],
+                "jlens_upstream_commit": provenance["jlens_upstream_commit"],
+                "implementation_commit": commit,
+                "run_id": resolved_run_id,
             },
             provenance=provenance,
         )
@@ -639,6 +730,7 @@ def run_qwen_jlens(
             d_model=d_model,
             n_prompts=n_done,
         )
+        enter_stage("holdout", HOLDOUT_COUNT)
         records = run_holdout_readout(
             lens=loaded_lens,
             model=bound,
@@ -661,10 +753,14 @@ def run_qwen_jlens(
             operational_success=True,
             run_id=resolved_run_id,
             implementation_commit=commit,
-            model_revision=str(config["model_revision"]),
+            model_revision=provenance["resolved_model_revision"],
             source_dose_run_id=source_dose["run_id"],
             source_dose_status=STATUS_PASS,
             selected_dim_batch=selected_dim_batch,
+            lens_sha256=lens_digest,
+            lens_bytes=lens_bytes,
+            corpus_hash=digest,
+            config_hash=hashed_config,
         )
         _write_evaluation(results_dir, evaluation)
         _write_manifest(
@@ -694,7 +790,10 @@ def run_qwen_jlens(
             operational_success=False,
             run_id=resolved_run_id,
             implementation_commit=commit,
-            model_revision=str(config.get("model_revision", QWEN_REVISION)),
+            model_revision=str(
+                provenance.get("resolved_model_revision")
+                or config.get("model_revision", QWEN_REVISION)
+            ),
             source_dose_run_id=str(source_dose.get("run_id", SOURCE_DOSE_RUN_ID))
             if "source_dose" in locals()
             else SOURCE_DOSE_RUN_ID,

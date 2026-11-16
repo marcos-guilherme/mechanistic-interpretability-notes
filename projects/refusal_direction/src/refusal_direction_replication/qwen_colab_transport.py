@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .qwen_dose import metadata_contains_leak
-from .qwen_jlens import jlens_metadata_contains_leak
+from .qwen_jlens import (
+    jlens_metadata_contains_leak,
+    load_fit_checkpoint,
+    validate_checkpoint_structure,
+)
 
 QWEN_RESULTS_DIR = "results/qwen25_coder_7b"
 QWEN_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b"
@@ -62,6 +66,11 @@ DOSE_CHECKPOINT_JSON_PATTERN = re.compile(
 MAX_MEMBER_BYTES = 2 * 1024**3
 MAX_TOTAL_UNCOMPRESSED_BYTES = 4 * 1024**3
 MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES = 5 * 1024**3
+MAX_JLENS_JSON_BYTES = 16 * 1024 * 1024
+MAX_JLENS_JSONL_BYTES = 32 * 1024 * 1024
+JLENS_CHECKPOINT_RELATIVE = Path("artifacts") / "qwen25_coder_7b_jlens" / "jlens_fit_checkpoint.pt"
+REMOTE_JLENS_CHECKPOINT_STAGING = "/content/jlens_fit_checkpoint.pt"
+MAX_JLENS_CHECKPOINT_BYTES = MAX_MEMBER_BYTES
 COMPACT_SCHEMA_FIELDS = (
     "schema_version",
     "experiment",
@@ -248,6 +257,106 @@ def atomic_install_dose_source_direction(
     return _assert_confined_direction_destination(project, destination)
 
 
+def jlens_checkpoint_path(project: Path) -> Path:
+    return project / JLENS_CHECKPOINT_RELATIVE
+
+
+def _validate_regular_jlens_checkpoint(path: Path, *, origin: str) -> None:
+    if not os.path.lexists(path):
+        raise FileNotFoundError(
+            f"jlens checkpoint missing ({origin}: {path})"
+        )
+    if path_is_link_or_junction(path) or not path.is_file():
+        raise ValueError(
+            f"jlens checkpoint must be a regular file ({origin}: {path})"
+        )
+    size = path.stat().st_size
+    if size <= 0 or size > MAX_JLENS_CHECKPOINT_BYTES:
+        raise ValueError(
+            f"jlens checkpoint size {size} exceeds "
+            f"{MAX_JLENS_CHECKPOINT_BYTES} bytes ({origin}: {path})"
+        )
+
+
+def _assert_confined_jlens_checkpoint(project: Path, destination: Path) -> Path:
+    project_root = project.resolve()
+    expected = (project_root / JLENS_CHECKPOINT_RELATIVE).resolve()
+    current = destination
+    for _ in range(len(destination.parts) + 1):
+        if path_is_link_or_junction(current):
+            raise ValueError(
+                "jlens checkpoint destination escaped "
+                "artifacts/qwen25_coder_7b_jlens/jlens_fit_checkpoint.pt"
+            )
+        if current == project or current.parent == current:
+            break
+        current = current.parent
+    resolved = destination.resolve()
+    if resolved != expected or resolved.name != "jlens_fit_checkpoint.pt":
+        raise ValueError(
+            "jlens checkpoint destination must remain "
+            "artifacts/qwen25_coder_7b_jlens/jlens_fit_checkpoint.pt"
+        )
+    try:
+        resolved.relative_to(project_root / "artifacts" / "qwen25_coder_7b_jlens")
+    except ValueError as error:
+        raise ValueError(
+            "jlens checkpoint destination escaped "
+            "artifacts/qwen25_coder_7b_jlens/jlens_fit_checkpoint.pt"
+        ) from error
+    return destination
+
+
+def optional_local_jlens_checkpoint(project: Path) -> Path | None:
+    path = jlens_checkpoint_path(project)
+    if not os.path.lexists(path):
+        return None
+    _validate_regular_jlens_checkpoint(path, origin="local")
+    payload = load_fit_checkpoint(path)
+    validate_checkpoint_structure(payload)
+    return _assert_confined_jlens_checkpoint(project, path)
+
+
+def atomic_install_jlens_checkpoint(
+    *,
+    staged: Path,
+    project: Path,
+    missing_ok: bool = False,
+) -> Path | None:
+    if not os.path.lexists(staged):
+        if missing_ok:
+            return None
+        raise FileNotFoundError(f"jlens checkpoint missing (staging: {staged})")
+    _validate_regular_jlens_checkpoint(staged, origin="staging")
+    payload = load_fit_checkpoint(staged)
+    validate_checkpoint_structure(payload)
+    destination = project / JLENS_CHECKPOINT_RELATIVE
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _assert_confined_jlens_checkpoint(project, destination)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".jlens_fit_checkpoint.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(staged.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        if tmp_path.stat().st_size > MAX_JLENS_CHECKPOINT_BYTES:
+            raise ValueError("jlens checkpoint size exceeds limit after copy")
+        os.replace(tmp_path, destination)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    _validate_regular_jlens_checkpoint(destination, origin="destination")
+    installed = load_fit_checkpoint(destination)
+    validate_checkpoint_structure(installed)
+    return _assert_confined_jlens_checkpoint(project, destination)
+
+
 def is_allowed_dose_fetch_member(name: str) -> bool:
     try:
         normalized = normalize_member_name(name)
@@ -371,12 +480,22 @@ def _pack_entries(
             handle.add(path, arcname=arcname)
 
 
+def jlens_member_byte_limit(name: str) -> int:
+    normalized = name.replace("\\", "/")
+    if normalized.endswith(".pt"):
+        return MAX_MEMBER_BYTES
+    if normalized.endswith(".jsonl"):
+        return MAX_JLENS_JSONL_BYTES
+    return MAX_JLENS_JSON_BYTES
+
+
 def _validate_tar_member(
     member: tarfile.TarInfo,
     *,
     is_unsafe: Callable[[str], bool],
     is_allowed: Callable[[str], bool],
     max_member: int | None = None,
+    member_limit_for: Callable[[str], int] | None = None,
 ) -> None:
     if member.issym() or member.islnk():
         raise ValueError(f"archive member is a link: {member.name}")
@@ -389,7 +508,10 @@ def _validate_tar_member(
         raise ValueError(f"unsafe archive path: {member.name}")
     if not is_allowed(normalized):
         raise ValueError(f"archive member outside allowlist: {member.name}")
-    limit = MAX_MEMBER_BYTES if max_member is None else max_member
+    if member_limit_for is not None:
+        limit = member_limit_for(normalized)
+    else:
+        limit = MAX_MEMBER_BYTES if max_member is None else max_member
     if member.size > limit:
         raise ValueError(f"archive member exceeds size limit: {member.name}")
 
@@ -401,6 +523,7 @@ def _validate_archive(
     is_allowed: Callable[[str], bool],
     max_total: int | None = None,
     max_member: int | None = None,
+    member_limit_for: Callable[[str], int] | None = None,
 ) -> list[tarfile.TarInfo]:
     seen: set[str] = set()
     total_size = 0
@@ -415,6 +538,7 @@ def _validate_archive(
             is_unsafe=is_unsafe,
             is_allowed=is_allowed,
             max_member=member_limit,
+            member_limit_for=member_limit_for,
         )
         normalized = normalize_member_name(member.name)
         if normalized in seen:
@@ -572,8 +696,21 @@ def validate_qwen_jlens_archive(members: list[tarfile.TarInfo]) -> list[tarfile.
         is_unsafe=is_jlens_unsafe_member_name,
         is_allowed=is_allowed_jlens_fetch_member,
         max_total=MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES,
-        max_member=MAX_MEMBER_BYTES,
+        member_limit_for=jlens_member_byte_limit,
     )
+
+
+def _revalidate_staged_jlens_members(
+    staging: Path,
+    members: list[tarfile.TarInfo],
+) -> None:
+    for member in members:
+        relative = normalize_member_name(member.name)
+        path = staging / relative
+        if path.stat().st_size > jlens_member_byte_limit(relative):
+            raise ValueError(f"archive member exceeds size limit: {member.name}")
+        if relative.endswith((".json", ".jsonl")):
+            validate_jlens_pack_json(path, relative)
 
 
 def extract_qwen_jlens_archive(archive: Path, project: Path) -> None:
@@ -582,6 +719,7 @@ def extract_qwen_jlens_archive(archive: Path, project: Path) -> None:
         project,
         validator=validate_qwen_jlens_archive,
         prefix="qwen-jlens-fetch-",
+        post_stage_validate=_revalidate_staged_jlens_members,
     )
 
 
@@ -591,6 +729,7 @@ def _extract_allowlisted_archive(
     *,
     validator: Callable[[list[tarfile.TarInfo]], list[tarfile.TarInfo]],
     prefix: str,
+    post_stage_validate: Callable[[Path, list[tarfile.TarInfo]], None] | None = None,
 ) -> None:
     with tarfile.open(archive, "r:gz") as handle:
         members = handle.getmembers()
@@ -606,6 +745,8 @@ def _extract_allowlisted_archive(
                     raise ValueError(f"unable to extract member: {member.name}")
                 with destination.open("wb") as out:
                     shutil.copyfileobj(extracted, out)
+            if post_stage_validate is not None:
+                post_stage_validate(staging, file_members)
 
             backup_root = staging / ".backups"
             for member in file_members:

@@ -10,6 +10,7 @@ import torch
 
 from refusal_direction_replication.gates import STATUS_PASS
 from refusal_direction_replication.pipeline import load_config
+from refusal_direction_replication.qwen_dose import sha256_file
 from refusal_direction_replication.qwen_jlens import (
     FINAL_LENS_FILENAME,
     JLENS_PROFILE,
@@ -240,8 +241,9 @@ def test_runtime_fits_tiny_corpus_and_writes_compact_results(
     assert "jlens" in holdout["results"]["overall"]
     assert "logit_lens" in holdout["results"]["overall"]
     status = json.loads((artifacts / STATUS_FILENAME).read_text(encoding="utf-8"))
-    assert status["total_units"] == 100
-    assert status["completed_units"] == 100
+    assert status["current_stage"] == "holdout"
+    assert status["total_units"] == 20
+    assert status["completed_units"] == 20
     assert status["state"] == "completed"
     events = [
         json.loads(line)
@@ -356,6 +358,7 @@ def test_runtime_resumes_matching_checkpoint_and_rejects_stale(
         jacobian_sum={layer: torch.eye(8) for layer in (0, 1, 2)},
         n_done=40,
         next_idx=40,
+        dim_batch=32,
         **identity,
     )
     jacobian_calls: list[int] = []
@@ -393,6 +396,7 @@ def test_runtime_resumes_matching_checkpoint_and_rejects_stale(
         jacobian_sum={layer: torch.eye(8) for layer in (0, 1, 2)},
         n_done=40,
         next_idx=40,
+        dim_batch=32,
         **stale_identity,
     )
     with pytest.raises(ValueError, match="run_id"):
@@ -439,6 +443,14 @@ def test_runtime_aborts_when_dim_batch_eight_ooms(
     )
     assert payload["status"] == "aborted"
     assert payload["abort_gate"] == "dim_batch_oom"
+    results = tmp_path / "results" / "qwen25_coder_7b_jlens"
+    probe = json.loads((results / "01_jlens_probe.json").read_text(encoding="utf-8"))
+    assert [item["dim_batch"] for item in probe["results"]["attempts"]] == [32, 16, 8]
+    assert all(item["outcome"] == "cuda_oom" for item in probe["results"]["attempts"])
+    assert (results / "execution_manifest.json").is_file()
+    assert (results / "jlens_evaluation.json").is_file()
+    manifest = json.loads((results / "execution_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["results"]["status"] == "aborted"
 
 
 def test_default_load_model_drops_pipeline_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -473,4 +485,138 @@ def test_runtime_requires_passing_source_dose(
             jacobian_for_prompt_fn=fake_jacobian,
             lens_cls=FakeLens,
             assert_contract=lambda: None,
+        )
+
+
+def test_runtime_records_resolved_revision_lens_hash_and_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_dose(tmp_path)
+    from refusal_direction_replication import qwen_jlens_runtime as runtime
+
+    install_runtime_fakes(monkeypatch)
+    observed = "b" * 40
+    model = SimpleNamespace(
+        n_layers=4,
+        d_model=8,
+        config=SimpleNamespace(_commit_hash=observed),
+    )
+    payload = run_qwen_jlens(
+        tmp_path,
+        run_id="jlens-run-rev",
+        load_rows=lambda **_kwargs: [_row(index) for index in range(130)],
+        load_model=lambda **_kwargs: (model, CountingTokenizer()),
+        wrap_model=lambda hf_model, tok: hf_model,
+        jacobian_for_prompt_fn=fake_jacobian,
+        lens_cls=FakeLens,
+        release_resources=lambda: None,
+        clock=lambda: 0.0,
+        assert_contract=lambda: None,
+    )
+    assert payload["status"] == "pass"
+    results = tmp_path / "results" / "qwen25_coder_7b_jlens"
+    artifacts = tmp_path / "artifacts" / "qwen25_coder_7b_jlens"
+    prepare = json.loads((results / "00_jlens_prepare.json").read_text(encoding="utf-8"))
+    assert prepare["provenance"]["resolved_model_revision"] == observed
+    assert prepare["provenance"]["requested_model_revision"] == QWEN_REVISION
+    fit = json.loads((results / "02_jlens_fit.json").read_text(encoding="utf-8"))
+    lens_path = artifacts / FINAL_LENS_FILENAME
+    assert fit["results"]["lens_sha256"] == sha256_file(lens_path)
+    assert fit["results"]["lens_bytes"] == lens_path.stat().st_size
+    assert fit["results"]["corpus_hash"]
+    assert fit["results"]["config_hash"]
+    assert fit["results"]["jlens_upstream_commit"]
+    assert fit["results"]["implementation_commit"]
+    assert fit["results"]["run_id"] == "jlens-run-rev"
+    evaluation = json.loads((results / "jlens_evaluation.json").read_text(encoding="utf-8"))
+    assert evaluation["lens_sha256"] == fit["results"]["lens_sha256"]
+    assert evaluation["model_revision"] == observed
+    holdout = json.loads((results / "03_jlens_holdout.json").read_text(encoding="utf-8"))
+    assert "by_item" in holdout["results"]
+    assert len(holdout["results"]["holdout_ids"]) == 20
+    events = [
+        json.loads(line)
+        for line in (artifacts / EVENTS_FILENAME).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    stages = [item.get("stage") for item in events if item.get("event") == "initialized"]
+    assert stages == ["prepare", "probe", "fit", "holdout"]
+    assert any(item.get("event") == "stage_completed" for item in events)
+    status = json.loads((artifacts / STATUS_FILENAME).read_text(encoding="utf-8"))
+    assert status["current_stage"] == "holdout"
+    assert status["state"] == "completed"
+
+
+def test_release_compute_runs_if_release_resources_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_dose(tmp_path)
+    from refusal_direction_replication import qwen_jlens_runtime as runtime
+
+    install_runtime_fakes(monkeypatch)
+    compute = {"n": 0}
+    monkeypatch.setattr(
+        runtime,
+        "release_compute_resources",
+        lambda *args, **kwargs: compute.__setitem__("n", compute["n"] + 1),
+    )
+
+    def boom() -> None:
+        raise RuntimeError("release boom")
+
+    with pytest.raises(RuntimeError, match="release boom"):
+        run_qwen_jlens(
+            tmp_path,
+            run_id="jlens-run-release",
+            load_rows=lambda **_kwargs: [_row(index) for index in range(130)],
+            load_model=lambda **_kwargs: (
+                SimpleNamespace(
+                    n_layers=4,
+                    d_model=8,
+                    config=SimpleNamespace(_commit_hash=QWEN_REVISION),
+                ),
+                CountingTokenizer(),
+            ),
+            wrap_model=lambda hf_model, tok: hf_model,
+            jacobian_for_prompt_fn=fake_jacobian,
+            lens_cls=FakeLens,
+            release_resources=boom,
+            clock=lambda: 0.0,
+            assert_contract=lambda: None,
+        )
+    assert compute["n"] == 1
+
+
+def test_readout_rejects_nonfinite_model_logits() -> None:
+    from refusal_direction_replication.qwen_jlens import CorpusItem
+    from refusal_direction_replication.qwen_jlens_runtime import run_holdout_readout
+
+    class BadLens:
+        source_layers = [0]
+
+        def apply(self, model, prompt, *, layers=None, positions=None, **kwargs):
+            n_pos = len(list(positions))
+            logits = torch.zeros(n_pos, 4)
+            model_logits = torch.zeros(n_pos, 4)
+            model_logits[0, 0] = float("nan")
+            return {0: logits}, model_logits, torch.arange(n_pos + 1).unsqueeze(0)
+
+    item = CorpusItem(
+        example_id="h0",
+        content_hash="a" * 64,
+        token_count=24,
+        fit_text="x" * 40,
+        source_index=0,
+    )
+    with pytest.raises(ValueError, match="finite"):
+        run_holdout_readout(
+            lens=BadLens(),
+            model=SimpleNamespace(encode=lambda text, max_length=128: torch.arange(24).unsqueeze(0)),
+            tokenizer=CountingTokenizer(),
+            items=[item],
+            source_layers=[0],
+            skip_first=16,
+            max_seq_len=128,
         )

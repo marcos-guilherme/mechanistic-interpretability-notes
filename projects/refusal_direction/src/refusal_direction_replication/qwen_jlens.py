@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+import gc
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from typing import Any
 import torch
 
 from .data import normalize_prompt_text
-from .qwen_dose import METADATA_LEAK_KEYS
+from .qwen_dose import METADATA_LEAK_KEYS, sha256_file
 
 
 JLENS_PROFILE = "qwen25_coder_7b_jlens.json"
@@ -73,12 +75,21 @@ REQUIRED_JLENS_SYMBOLS = (
     "jacobian_for_prompt",
     "JacobianLens",
 )
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class DimBatchOOMError(RuntimeError):
+    def __init__(self, attempts: Sequence[Mapping[str, Any]]) -> None:
+        super().__init__("dim_batch 8 OOMed")
+        self.attempts = tuple(attempts)
 
 
 @dataclass(frozen=True)
 class ExclusionHashes:
     available: bool
     hashes: frozenset[str]
+    source_path: str | None = None
+    source_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,9 +181,17 @@ def load_exclusion_hashes(path: Path | None) -> ExclusionHashes:
     hashes: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            hashes.add(stripped)
-    return ExclusionHashes(available=True, hashes=frozenset(hashes))
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not SHA256_RE.fullmatch(stripped):
+            raise ValueError(f"exclusion hash is not a valid SHA-256: {stripped}")
+        hashes.add(stripped)
+    return ExclusionHashes(
+        available=True,
+        hashes=frozenset(hashes),
+        source_path=str(path),
+        source_sha256=sha256_file(path),
+    )
 
 
 def _nonempty(value: object) -> bool:
@@ -276,7 +295,11 @@ def build_codesearchnet_corpus(
     )
 
 
-def compact_corpus_records(corpus: JLensCorpus) -> dict[str, Any]:
+def compact_corpus_records(
+    corpus: JLensCorpus,
+    *,
+    exclusion: ExclusionHashes | None = None,
+) -> dict[str, Any]:
     def _items(items: Sequence[CorpusItem]) -> list[dict[str, Any]]:
         return [
             {
@@ -288,7 +311,7 @@ def compact_corpus_records(corpus: JLensCorpus) -> dict[str, Any]:
             for item in items
         ]
 
-    return {
+    payload = {
         "dataset_repo_id": DATASET_REPO_ID,
         "dataset_config": DATASET_CONFIG,
         "dataset_split": DATASET_SPLIT,
@@ -311,6 +334,10 @@ def compact_corpus_records(corpus: JLensCorpus) -> dict[str, Any]:
         "holdout_hashes": [item.content_hash for item in corpus.holdout],
         "corpus_hash": corpus_hash(corpus),
     }
+    if exclusion is not None and exclusion.available:
+        payload["exclusion_file_sha256"] = exclusion.source_sha256
+        payload["exclusion_file_path"] = exclusion.source_path
+    return payload
 
 
 def jlens_metadata_contains_leak(obj: Any) -> bool:
@@ -334,6 +361,19 @@ def is_cuda_oom(exc: BaseException) -> bool:
     return "out of memory" in message and "cuda" in message
 
 
+def _drop_exception_frames(exc: BaseException) -> None:
+    exc.__traceback__ = None
+    exc.__cause__ = None
+    exc.__context__ = None
+
+
+def _release_cuda_after_oom() -> None:
+    gc.collect()
+    empty_cache = getattr(torch.cuda, "empty_cache", None)
+    if callable(empty_cache):
+        empty_cache()
+
+
 def probe_dim_batch(
     runner: Callable[[int], Any],
     *,
@@ -344,7 +384,6 @@ def probe_dim_batch(
 
     now = clock or time.perf_counter
     attempts: list[dict[str, Any]] = []
-    last_oom: BaseException | None = None
     for dim_batch in order:
         started = now()
         try:
@@ -357,9 +396,12 @@ def probe_dim_batch(
                         "dim_batch": int(dim_batch),
                         "outcome": "cuda_oom",
                         "wall_seconds": elapsed,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
                     }
                 )
-                last_oom = exc
+                _drop_exception_frames(exc)
+                _release_cuda_after_oom()
                 continue
             raise
         elapsed = now() - started
@@ -375,7 +417,7 @@ def probe_dim_batch(
             attempts=tuple(attempts),
             wall_seconds=elapsed,
         )
-    raise RuntimeError("dim_batch 8 OOMed") from last_oom
+    raise DimBatchOOMError(attempts)
 
 
 def select_dim_batch(result: ProbeResult) -> int:
@@ -430,7 +472,7 @@ def write_fit_checkpoint(
     model_revision: str,
     implementation_commit: str,
     run_id: str,
-    dim_batch: int | None = None,
+    dim_batch: int,
 ) -> None:
     payload = {
         "jacobian_sum": {int(layer): tensor for layer, tensor in jacobian_sum.items()},
@@ -444,9 +486,8 @@ def write_fit_checkpoint(
         "model_revision": model_revision,
         "implementation_commit": implementation_commit,
         "run_id": run_id,
+        "dim_batch": int(dim_batch),
     }
-    if dim_batch is not None:
-        payload["dim_batch"] = int(dim_batch)
     _atomic_torch_save(payload, path)
 
 
@@ -495,6 +536,89 @@ def validate_checkpoint_identity(
             )
 
 
+def _checkpoint_tensor(payload: Mapping[str, Any], layer: int) -> torch.Tensor:
+    sums = payload["jacobian_sum"]
+    if layer in sums:
+        return sums[layer]
+    if str(layer) in sums:
+        return sums[str(layer)]
+    raise ValueError(f"checkpoint missing layer {layer}")
+
+
+def validate_checkpoint_structure(
+    payload: Mapping[str, Any],
+    *,
+    fit_count: int = FIT_COUNT,
+) -> None:
+    if "n_done" not in payload or "next_idx" not in payload:
+        raise ValueError("checkpoint is missing n_done/next_idx")
+    n_done = int(payload["n_done"])
+    next_idx = int(payload["next_idx"])
+    if n_done != next_idx:
+        raise ValueError(f"checkpoint n_done {n_done} != next_idx {next_idx}")
+    if not 0 <= n_done <= int(fit_count):
+        raise ValueError(f"checkpoint n_done {n_done} outside 0..{fit_count}")
+    if "dim_batch" not in payload:
+        raise ValueError("checkpoint is missing dim_batch")
+    if int(payload["dim_batch"]) not in DIM_BATCH_PROBE_ORDER:
+        raise ValueError(f"checkpoint dim_batch {payload['dim_batch']!r} is invalid")
+    sums = payload.get("jacobian_sum")
+    if not isinstance(sums, dict) or not sums:
+        raise ValueError("checkpoint jacobian_sum is missing")
+    for layer, tensor in sums.items():
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"checkpoint layer {layer} is not a tensor")
+        if tensor.ndim != 2 or tensor.shape[0] != tensor.shape[1]:
+            raise ValueError(
+                f"checkpoint Jacobian at layer {layer} has shape {tuple(tensor.shape)}"
+            )
+        if tensor.dtype != torch.float32:
+            raise ValueError(
+                f"checkpoint Jacobian at layer {layer} has dtype {tensor.dtype}"
+            )
+        if not torch.isfinite(tensor.float()).all().item():
+            raise ValueError(f"checkpoint Jacobian at layer {layer} is not finite")
+
+
+def validate_checkpoint_payload(
+    payload: Mapping[str, Any],
+    *,
+    source_layers: Sequence[int],
+    d_model: int,
+    dim_batch: int,
+    fit_count: int = FIT_COUNT,
+) -> None:
+    validate_checkpoint_structure(payload, fit_count=fit_count)
+    if int(payload["dim_batch"]) != int(dim_batch):
+        raise ValueError(
+            f"stale checkpoint dim_batch: {payload['dim_batch']!r} != {dim_batch!r}"
+        )
+    expected_layers = [int(layer) for layer in source_layers]
+    sums = payload["jacobian_sum"]
+    actual_layers = sorted(int(layer) for layer in sums)
+    if actual_layers != sorted(expected_layers):
+        raise ValueError(
+            f"checkpoint layer keys {actual_layers!r} != {expected_layers!r}"
+        )
+    for layer in expected_layers:
+        tensor = _checkpoint_tensor(payload, layer)
+        if tuple(tensor.shape) != (int(d_model), int(d_model)):
+            raise ValueError(
+                f"checkpoint Jacobian at layer {layer} has shape {tuple(tensor.shape)}"
+            )
+        if tensor.dtype != torch.float32:
+            raise ValueError(
+                f"checkpoint Jacobian at layer {layer} has dtype {tensor.dtype}"
+            )
+        if not torch.isfinite(tensor.float()).all().item():
+            raise ValueError(f"checkpoint Jacobian at layer {layer} is not finite")
+
+
+def require_finite_logits(tensor: torch.Tensor, name: str) -> None:
+    if not torch.isfinite(tensor.float()).all().item():
+        raise ValueError(f"{name} must be finite")
+
+
 def valid_token_positions(seq_len: int, *, skip_first: int = SKIP_FIRST) -> list[int]:
     if skip_first < 0:
         raise ValueError(f"skip_first must be >= 0, got {skip_first}")
@@ -523,6 +647,20 @@ def _metric_block(ranks: Sequence[int]) -> dict[str, float | int]:
     }
 
 
+def _empty_item_layer_stats() -> dict[str, int]:
+    return {
+        "n_positions": 0,
+        "jlens_rank_sum": 0,
+        "jlens_hits@1": 0,
+        "jlens_hits@5": 0,
+        "jlens_hits@10": 0,
+        "logit_lens_rank_sum": 0,
+        "logit_lens_hits@1": 0,
+        "logit_lens_hits@5": 0,
+        "logit_lens_hits@10": 0,
+    }
+
+
 def summarize_holdout_metrics(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -531,7 +669,10 @@ def summarize_holdout_metrics(
     by_layer: dict[str, dict[str, dict[str, float | int]]] = {}
     overall_jlens: list[int] = []
     overall_logit: list[int] = []
-    item_ids: set[str] = set()
+    by_item: dict[str, dict[str, dict[str, int]]] = {}
+    holdout_ids: list[str] = []
+    holdout_hashes: list[str] = []
+    seen_ids: set[str] = set()
     for layer in source_layers:
         jlens_ranks = [
             int(record["jlens_rank"])
@@ -548,12 +689,34 @@ def summarize_holdout_metrics(
             "logit_lens": _metric_block(logit_ranks),
         }
     for record in records:
-        item_ids.add(str(record["example_id"]))
-        overall_jlens.append(int(record["jlens_rank"]))
-        overall_logit.append(int(record["logit_lens_rank"]))
+        example_id = str(record["example_id"])
+        layer_key = str(int(record["layer"]))
+        if example_id not in seen_ids:
+            seen_ids.add(example_id)
+            holdout_ids.append(example_id)
+            if "content_hash" in record:
+                holdout_hashes.append(str(record["content_hash"]))
+        item_layers = by_item.setdefault(example_id, {})
+        block = item_layers.setdefault(layer_key, _empty_item_layer_stats())
+        jlens_rank = int(record["jlens_rank"])
+        logit_rank = int(record["logit_lens_rank"])
+        block["n_positions"] += 1
+        block["jlens_rank_sum"] += jlens_rank
+        block["jlens_hits@1"] += int(jlens_rank <= 1)
+        block["jlens_hits@5"] += int(jlens_rank <= 5)
+        block["jlens_hits@10"] += int(jlens_rank <= 10)
+        block["logit_lens_rank_sum"] += logit_rank
+        block["logit_lens_hits@1"] += int(logit_rank <= 1)
+        block["logit_lens_hits@5"] += int(logit_rank <= 5)
+        block["logit_lens_hits@10"] += int(logit_rank <= 10)
+        overall_jlens.append(jlens_rank)
+        overall_logit.append(logit_rank)
     return {
-        "n_items": len(item_ids),
+        "n_items": len(holdout_ids),
         "n_records": len(records),
+        "holdout_ids": holdout_ids,
+        "holdout_hashes": holdout_hashes,
+        "by_item": by_item,
         "by_layer": by_layer,
         "overall": {
             "jlens": _metric_block(overall_jlens),
@@ -590,10 +753,55 @@ def validate_fitted_lens(
             raise ValueError(f"lens Jacobian at layer {layer} is not finite")
 
 
-def assert_jlens_contract(module: Any | None = None) -> None:
+def ensure_hf_text_config(hf_model: Any) -> Any:
+    config = getattr(hf_model, "config", None)
+    if config is None:
+        raise ValueError("HuggingFace model is missing config")
+    if not hasattr(config, "get_text_config"):
+        def get_text_config(_decoder: bool = False, **_kwargs: Any) -> Any:
+            return config
+
+        config.get_text_config = get_text_config
+    return hf_model
+
+
+def wrap_hf_model_for_jlens(hf_model: Any, tokenizer: Any, **kwargs: Any) -> Any:
+    import jlens
+
+    ensure_hf_text_config(hf_model)
+    return jlens.from_hf(hf_model, tokenizer, **kwargs)
+
+
+def installed_jlens_commit(*, distribution: Any | None = None) -> str:
+    if distribution is None:
+        import importlib.metadata
+
+        distribution = importlib.metadata.distribution("jlens")
+    raw = distribution.read_text("direct_url.json")
+    if not raw:
+        raise ValueError("jlens direct_url metadata is missing")
+    payload = json.loads(raw)
+    commit = (payload.get("vcs_info") or {}).get("commit_id")
+    if not commit:
+        raise ValueError("jlens direct_url metadata is missing commit_id")
+    if commit != JLENS_UPSTREAM_COMMIT:
+        raise ValueError(
+            f"installed jlens commit {commit!r} != {JLENS_UPSTREAM_COMMIT}"
+        )
+    return str(commit)
+
+
+def assert_jlens_contract(
+    module: Any | None = None,
+    *,
+    require_installed_commit: bool | None = None,
+) -> None:
     target = module
+    check_install = require_installed_commit
     if target is None:
         import jlens as target  # type: ignore[import-not-found]
+        if check_install is None:
+            check_install = True
     missing = [
         name for name in REQUIRED_JLENS_SYMBOLS if not hasattr(target, name)
     ]
@@ -612,6 +820,8 @@ def assert_jlens_contract(module: Any | None = None) -> None:
     lens_cls = target.JacobianLens
     if not hasattr(lens_cls, "save") or not hasattr(lens_cls, "load"):
         raise ValueError("JacobianLens.save/load missing")
+    if check_install:
+        installed_jlens_commit()
 
 
 def jlens_install_command(python: str = "python") -> list[str]:

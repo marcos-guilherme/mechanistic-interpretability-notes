@@ -178,12 +178,22 @@ def require_dose_source_direction(project: Path) -> Path:
     return require_local_dose_source_direction(project)
 
 
+def optional_jlens_checkpoint(project: Path) -> Path | None:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        optional_local_jlens_checkpoint,
+    )
+
+    return optional_local_jlens_checkpoint(project)
+
+
 def bootstrap_scripts(profile: str) -> list[Path]:
     scripts = [PROJECT / "scripts" / "colab_bootstrap.py"]
     if profile == "qwen25-coder-dose":
         scripts.append(PROJECT / "scripts" / "colab_install_dose_source_direction.py")
     if profile == "qwen25-coder-jlens":
         scripts.append(PROJECT / "scripts" / "colab_install_jlens.py")
+        scripts.append(PROJECT / "scripts" / "colab_install_jlens_checkpoint.py")
     return scripts
 
 
@@ -310,6 +320,16 @@ def main() -> int:
                     "/content/dose_source_direction.pt",
                 )
             )
+        if args.profile == "qwen25-coder-jlens":
+            checkpoint = optional_jlens_checkpoint(PROJECT)
+            if checkpoint is not None:
+                run(
+                    upload_command(
+                        session,
+                        checkpoint,
+                        "/content/jlens_fit_checkpoint.pt",
+                    )
+                )
     elif args.action == "bootstrap":
         for script in bootstrap_scripts(args.profile):
             run(

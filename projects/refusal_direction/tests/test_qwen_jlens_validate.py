@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -146,6 +147,7 @@ def write_jlens_tree(root: Path, *, tiny: bool = True) -> Path:
             records.append(
                 {
                     "example_id": item["example_id"],
+                    "content_hash": item["content_hash"],
                     "position": 16,
                     "layer": layer,
                     "jlens_rank": 2,
@@ -199,32 +201,46 @@ def write_jlens_tree(root: Path, *, tiny: bool = True) -> Path:
             "run_id": RUN_ID,
             "current_stage": "holdout",
             "state": "completed",
-            "completed_units": 100,
-            "total_units": 100,
+            "completed_units": 20,
+            "total_units": 20,
             "updated_at_utc": "2026-01-01T00:00:00+00:00",
         },
     )
+    events = [
+        {"event": "initialized", "run_id": RUN_ID, "stage": "prepare", "state": "pending"},
+        {"event": "initialized", "run_id": RUN_ID, "stage": "probe", "state": "pending"},
+        {
+            "event": "probe_choice",
+            "run_id": RUN_ID,
+            "dim_batch": 32,
+            "state": "running",
+            "stage": "probe",
+        },
+        {"event": "initialized", "run_id": RUN_ID, "stage": "fit", "state": "pending"},
+    ]
+    events.extend(
+        {
+            "event": "checkpoint",
+            "run_id": RUN_ID,
+            "n_done": index,
+            "state": "running",
+            "stage": "fit",
+        }
+        for index in range(1, 101)
+    )
+    events.append(
+        {"event": "initialized", "run_id": RUN_ID, "stage": "holdout", "state": "pending"}
+    )
+    events.append(
+        {
+            "event": "stage_completed",
+            "run_id": RUN_ID,
+            "stage": "holdout",
+            "state": "completed",
+        }
+    )
     (artifacts / "events.jsonl").write_text(
-        json.dumps(
-            {
-                "event": "probe_choice",
-                "run_id": RUN_ID,
-                "dim_batch": 32,
-                "state": "running",
-                "stage": "probe",
-            }
-        )
-        + "\n"
-        + json.dumps(
-            {
-                "event": "checkpoint",
-                "run_id": RUN_ID,
-                "n_done": 100,
-                "state": "running",
-                "stage": "fit",
-            }
-        )
-        + "\n",
+        "".join(json.dumps(item) + "\n" for item in events),
         encoding="utf-8",
     )
     layers = config["source_layers"]
@@ -255,6 +271,31 @@ def write_jlens_tree(root: Path, *, tiny: bool = True) -> Path:
         },
         artifacts / "jlens_fit_checkpoint.pt",
     )
+    lens_path = artifacts / "qwen25_coder_7b_jacobian_lens.pt"
+    lens_digest = hashlib.sha256(lens_path.read_bytes()).hexdigest()
+    lens_bytes = lens_path.stat().st_size
+    fit_path = results / "02_jlens_fit.json"
+    fit_payload = json.loads(fit_path.read_text(encoding="utf-8"))
+    fit_payload["results"].update(
+        {
+            "lens_sha256": lens_digest,
+            "lens_bytes": lens_bytes,
+            "jlens_upstream_commit": JLENS_UPSTREAM_COMMIT,
+            "implementation_commit": COMMIT,
+            "run_id": RUN_ID,
+            "resolved_model_revision": QWEN_REVISION,
+        }
+    )
+    fit_path.write_text(json.dumps(fit_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    evaluation_path = results / "jlens_evaluation.json"
+    evaluation_payload = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    evaluation_payload["lens_sha256"] = lens_digest
+    evaluation_payload["lens_bytes"] = lens_bytes
+    evaluation_payload["corpus_hash"] = "c" * 64
+    evaluation_payload["config_hash"] = "d" * 64
+    evaluation_path.write_text(
+        json.dumps(evaluation_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     dose = root / "results" / "qwen25_coder_7b_dose"
     dose.mkdir(parents=True)
     _write_json(
@@ -273,7 +314,7 @@ def test_validator_accepts_complete_tiny_tree(tmp_path: Path) -> None:
     root = write_jlens_tree(tmp_path)
     checks = validate_qwen_jlens(root)
     failed = [name for name, passed in checks.items() if not passed]
-    assert failed == []
+    assert failed == ["original_pilot_validator", "original_dose_validator"]
 
 
 def test_validator_rejects_overlapping_hashes_and_leakage(tmp_path: Path) -> None:
@@ -311,3 +352,78 @@ def test_production_config_keeps_qwen_dimensions() -> None:
     assert config["source_layers"] == list(range(27))
     assert config["target_layer"] == 27
     assert config["jlens_upstream_commit"] == JLENS_UPSTREAM_COMMIT
+
+
+def test_validator_rejects_duplicate_internal_hashes(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    prepare_path = root / "results" / "qwen25_coder_7b_jlens" / "00_jlens_prepare.json"
+    payload = json.loads(prepare_path.read_text(encoding="utf-8"))
+    payload["results"]["fit_hashes"][1] = payload["results"]["fit_hashes"][0]
+    prepare_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["fit_holdout_disjoint"] is False
+
+
+def test_validator_rejects_probe_math_mismatch(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    probe_path = root / "results" / "qwen25_coder_7b_jlens" / "01_jlens_probe.json"
+    probe = json.loads(probe_path.read_text(encoding="utf-8"))
+    probe["results"]["wall_seconds"] = 2.0
+    probe["results"]["projected_seconds"] = 100.0
+    probe_path.write_text(json.dumps(probe, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["probe_order_and_projection"] is False
+
+
+def test_validator_requires_one_hundred_checkpoint_events(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    events_path = root / "artifacts" / "qwen25_coder_7b_jlens" / "events.jsonl"
+    events_path.write_text(
+        json.dumps(
+            {
+                "event": "probe_choice",
+                "run_id": RUN_ID,
+                "dim_batch": 32,
+                "state": "running",
+                "stage": "probe",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "event": "checkpoint",
+                "run_id": RUN_ID,
+                "n_done": 1,
+                "state": "running",
+                "stage": "fit",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    checks = validate_qwen_jlens(root)
+    assert checks["run_status_events_manifest"] is False
+
+
+def test_validator_does_not_skip_original_validators_on_tiny_tree(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    checks = validate_qwen_jlens(root)
+    assert checks["original_pilot_validator"] is False
+    assert checks["original_dose_validator"] is False
+
+
+def test_validator_runs_original_validators_on_project_root() -> None:
+    checks = validate_qwen_jlens(ROOT)
+    assert checks["original_pilot_validator"] is True
+    assert checks["original_dose_validator"] is True
+
+
+def test_validator_recomputes_lens_hash_and_holdout_item_stats(tmp_path: Path) -> None:
+    root = write_jlens_tree(tmp_path)
+    fit_path = root / "results" / "qwen25_coder_7b_jlens" / "02_jlens_fit.json"
+    payload = json.loads(fit_path.read_text(encoding="utf-8"))
+    payload["results"]["lens_sha256"] = "0" * 64
+    payload["results"]["lens_bytes"] = 1
+    fit_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    checks = validate_qwen_jlens(root)
+    assert checks["checkpoint_and_lens_identity"] is False
