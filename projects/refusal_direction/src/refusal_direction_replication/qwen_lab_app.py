@@ -7,8 +7,11 @@ from dataclasses import dataclass, field
 import json
 import os
 import re
+import secrets
+import shutil
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -38,11 +41,13 @@ from .qwen_lab_readout import (
     verify_frozen_lens_hash,
 )
 from .qwen_lab_runtime import (
+    LabOOMError,
     build_random_control_direction,
     operational_status_log,
     wrap_lab_model_for_jlens,
     InterventionEngine,
 )
+from .gates import OPERATIONAL_ERROR_MESSAGES
 
 FROZEN_DIRECTION_SHA256 = (
     "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086"
@@ -52,6 +57,29 @@ DEFAULT_LENS_RELATIVE = Path(
     "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
 )
 EXPORT_SCHEMA_VERSION = 1
+# Task 4 Colab bootstrap should install this exact Gradio release.
+GRADIO_PIN_VERSION = "5.49.1"
+GENERATION_OUTPUT_COUNT = 15
+GENERATION_CONTROL_COMPONENTS: tuple[str, ...] = (
+    "condition_dropdown",
+    "layer_slider",
+    "preset_radio",
+    "manual_mode",
+    "manual_coefficient",
+    "top_k",
+    "temperature",
+    "top_p",
+    "seed",
+    "max_new_tokens",
+    "generate_button",
+)
+SESSION_EXPORT_ROOT = Path(tempfile.gettempdir()) / "qwen_lab_sessions"
+SESSION_TTL_SECONDS = 24 * 60 * 60
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_LOCAL_PATH_RE = re.compile(
+    r"(?:^[A-Za-z]:[\\/]|^/content/|^artifacts[\\/]|selected_direction\.pt|jacobian_lens\.pt)"
+)
+_CREDENTIAL_RE = re.compile(r"(?:\bhf[_-]?token\b|\bauth[_-]?token\b)\s*[:=]", re.I)
 
 LAB_DISCLAIMER = (
     "Previsões da J-lens: estes tokens são os maiores scores da leitura incremental "
@@ -108,7 +136,7 @@ _PREDICTION_HEADERS = (
     "Previsão",
     "Score",
     "Barra rel.",
-    "Δ rank",
+    "Var. rank",
 )
 
 
@@ -159,6 +187,74 @@ class LabRuntimeBundle:
     preflight_summary: dict[str, Any]
 
 
+@dataclass
+class LabClientSession:
+    session_hash: str
+    view_state: LabViewState = field(default_factory=LabViewState)
+    generation: GenerationSession = field(default_factory=GenerationSession)
+    export_dir: Path = field(default_factory=Path)
+    created_at: float = field(default_factory=time.time)
+
+
+class LabSessionRegistry:
+    """Thread-safe per-tab session state; the inference engine stays global."""
+
+    def __init__(self, *, export_root: Path | None = None) -> None:
+        self._lock = threading.Lock()
+        self._sessions: dict[str, LabClientSession] = {}
+        self._export_root = export_root or SESSION_EXPORT_ROOT
+        self._export_root.mkdir(parents=True, exist_ok=True)
+
+    def _purge_stale(self) -> None:
+        cutoff = time.time() - SESSION_TTL_SECONDS
+        stale = [
+            key
+            for key, client in self._sessions.items()
+            if client.created_at < cutoff
+        ]
+        for key in stale:
+            self._drop(key)
+
+    def _drop(self, session_hash: str) -> None:
+        client = self._sessions.pop(session_hash, None)
+        if client is None:
+            return
+        remove_secure_temp_file(client.view_state.export_path)
+        if client.export_dir.is_dir():
+            shutil.rmtree(client.export_dir, ignore_errors=True)
+
+    def get_or_create(self, session_hash: str) -> LabClientSession:
+        cleaned = str(session_hash or "").strip()
+        if not cleaned:
+            raise ValueError("session_hash is required")
+        with self._lock:
+            self._purge_stale()
+            client = self._sessions.get(cleaned)
+            if client is None:
+                export_dir = self._export_root / cleaned
+                export_dir.mkdir(parents=True, exist_ok=True)
+                client = LabClientSession(session_hash=cleaned, export_dir=export_dir)
+                self._sessions[cleaned] = client
+            return client
+
+    def get_required(self, session_hash: str) -> LabClientSession:
+        with self._lock:
+            client = self._sessions.get(str(session_hash).strip())
+            if client is None:
+                raise KeyError("unknown lab session")
+            return client
+
+    def clear(self, session_hash: str, *, controller: LabUIController) -> LabClientSession:
+        client = self.get_or_create(session_hash)
+        controller.clear_session(client.view_state)
+        client.generation.reset_cancel()
+        return client
+
+    def release(self, session_hash: str) -> None:
+        with self._lock:
+            self._drop(str(session_hash).strip())
+
+
 def lab_operational_log(**fields: Any) -> dict[str, Any]:
     return operational_status_log(**fields)
 
@@ -204,12 +300,72 @@ def verify_direction_artifact(
 
 
 def _assert_model_revision(resolved_revision: str | None) -> str:
-    observed = str(resolved_revision or "").strip()
+    if resolved_revision is None or not str(resolved_revision).strip():
+        raise ValueError("resolved model revision is missing")
+    observed = str(resolved_revision).strip()
     if observed != LAB_MODEL_REVISION:
         raise ValueError(
             f"resolved revision {observed!r} != expected {LAB_MODEL_REVISION!r}"
         )
     return observed
+
+
+def _assert_tokenizer_revision(tokenizer: Any, expected_revision: str) -> None:
+    for attribute in ("revision", "_commit_hash"):
+        observed = getattr(tokenizer, attribute, None)
+        if observed is None:
+            continue
+        text = str(observed).strip()
+        if not text:
+            raise ValueError("tokenizer revision is missing")
+        if text != expected_revision:
+            raise ValueError(
+                f"tokenizer revision {text!r} != expected {expected_revision!r}"
+            )
+        return
+
+
+def resolve_auth_credentials(
+    *,
+    user: str | None = None,
+    password: str | None = None,
+) -> tuple[str, str] | None:
+    resolved_user = (user if user is not None else os.environ.get("QWEN_LAB_AUTH_USER", "")).strip()
+    resolved_password = (
+        password if password is not None else os.environ.get("QWEN_LAB_AUTH_PASSWORD", "")
+    ).strip()
+    if resolved_user and resolved_password:
+        return resolved_user, resolved_password
+    if resolved_user or resolved_password:
+        raise ValueError("auth requires both username and password")
+    return None
+
+
+def require_launch_authentication(
+    *,
+    share: bool,
+    server_name: str,
+    auth: tuple[str, str] | None,
+) -> tuple[str, str]:
+    host = str(server_name).strip().lower()
+    exposed = bool(share) or host not in _LOOPBACK_HOSTS
+    if not exposed:
+        if auth is None:
+            return ("", "")
+        return auth
+    if auth is None or not auth[0].strip() or not auth[1].strip():
+        raise ValueError("public lab launch requires complete authentication")
+    return auth
+
+
+def sanitize_error_message(exc: BaseException) -> str:
+    if isinstance(exc, LabOOMError):
+        return OPERATIONAL_ERROR_MESSAGES["memory"]
+    if isinstance(exc, ValueError):
+        message = str(exc).strip()
+        if message and len(message) < 160 and "\n" not in message:
+            return message
+    return "Falha na geração. Consulte o status operacional do servidor."
 
 
 def assert_ui_strings_safe(text: str) -> None:
@@ -222,29 +378,44 @@ def assert_ui_strings_safe(text: str) -> None:
         raise ValueError("ui strings must not include colab paths")
 
 
-def _walk_values(payload: Any) -> Iterator[Any]:
-    if isinstance(payload, Mapping):
-        for key, value in payload.items():
-            yield key
-            yield from _walk_values(value)
-    elif isinstance(payload, (list, tuple)):
-        for item in payload:
-            yield from _walk_values(item)
+def _string_is_local_path(value: str) -> bool:
+    return bool(_LOCAL_PATH_RE.search(value.strip()))
+
+
+def _string_is_credential_leak(value: str) -> bool:
+    return bool(_CREDENTIAL_RE.search(value))
 
 
 def assert_export_document_safe(document: Mapping[str, Any]) -> None:
-    for key in document:
-        if str(key).casefold() in EXPORT_FORBIDDEN_KEYS:
-            raise ValueError(f"export must not include forbidden key {key!r}")
-    for value in _walk_values(document):
-        if isinstance(value, str):
-            lowered = value.casefold()
-            if any(marker in lowered for marker in ("selected_direction", "jacobian_lens")):
-                raise ValueError("export must not include artifact file names")
-            if "hf_token" in lowered or "password" in lowered:
-                raise ValueError("export must not include credentials")
-            if re.search(r"^[A-Za-z]:\\\\", value) or value.startswith("/content/"):
-                raise ValueError("export must not include local paths")
+    def visit(node: Any, *, metadata: bool) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                lowered = str(key).casefold()
+                if metadata and lowered in EXPORT_FORBIDDEN_KEYS:
+                    raise ValueError(f"export must not include forbidden key {key!r}")
+                child_meta = metadata or lowered in {
+                    "parameters",
+                    "provenance",
+                    "artifacts",
+                    "paths",
+                }
+                if lowered == "request":
+                    visit(value, metadata=False)
+                elif lowered == "events":
+                    for item in value:
+                        visit(item, metadata=False)
+                else:
+                    visit(value, metadata=child_meta)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item, metadata=metadata)
+        elif isinstance(node, str) and metadata:
+            if _string_is_local_path(node):
+                raise ValueError("export metadata must not include local paths")
+            if _string_is_credential_leak(node):
+                raise ValueError("export metadata must not include credentials")
+
+    visit(document, metadata=True)
 
 
 def remove_secure_temp_file(path: str | None) -> None:
@@ -360,8 +531,9 @@ def bootstrap_intervention_lab(
         model_name=QWEN_MODEL,
         revision=LAB_MODEL_REVISION,
     )
-    resolved = getattr(model.config, "_commit_hash", None) or LAB_MODEL_REVISION
+    resolved = getattr(model.config, "_commit_hash", None)
     revision = _assert_model_revision(resolved)
+    _assert_tokenizer_revision(tokenizer, LAB_MODEL_REVISION)
     engine, _readout = build_production_stack(
         model=model,
         tokenizer=tokenizer,
@@ -506,7 +678,7 @@ class LabUIController:
         rows: list[list[Any]] = []
         for prediction in predictions:
             delta = (
-                "—"
+                "n/d"
                 if prediction.previous_rank_delta is None
                 else str(prediction.previous_rank_delta)
             )
@@ -526,7 +698,7 @@ class LabUIController:
         state.response_text = event.accumulated_text
         state.prediction_rows = self.predictions_to_rows(event.predictions)
         state.prediction_caption = (
-            f"Camada {event.j_lens_layer} · passo {event.step} · "
+            f"Camada {event.j_lens_layer} | passo {event.step} | "
             f"token produzido: {event.generated_token_text} (id {event.generated_token_id})"
         )
         state.events.append(event)
@@ -574,7 +746,7 @@ class LabUIController:
                     break
         finally:
             iterator.close()
-            terminal = engine.terminal_status or state.terminal_status
+            terminal = getattr(engine, "terminal_status", None) or state.terminal_status
             state.terminal_status = terminal
             if terminal:
                 state.status_message = f"Estado: {terminal}"
@@ -631,52 +803,186 @@ class LabUIController:
         return path
 
 
+def sync_preset_updates(
+    controller: LabUIController,
+    condition: LabCondition,
+) -> tuple[Any, Any]:
+    """Return exactly two Gradio updates for condition + manual coefficient."""
+    import gradio as gr
+
+    resolved = controller.resolve_preset(condition)
+    manual = controller.manual_coefficient_update(
+        condition=resolved.condition,
+        manual_mode=False,
+        coefficient=resolved.coefficient,
+    )
+    return (
+        gr.update(value=resolved.condition),
+        gr.update(value=manual.value, interactive=manual.interactive),
+    )
+
+
+def pack_generation_outputs(
+    state: LabViewState,
+    controller: LabUIController,
+    *,
+    condition: LabCondition,
+    manual_mode: bool,
+    lock: Sequence[ComponentUpdate] = (),
+    unlock: Sequence[ComponentUpdate] = (),
+) -> tuple[Any, ...]:
+    """Pack one yield row for the generate callback (fixed cardinality)."""
+    import gradio as gr
+
+    lock_map = {item.component: item for item in lock}
+    unlock_map = {item.component: item for item in unlock}
+
+    def control(name: str) -> Any:
+        if name in lock_map:
+            item = lock_map[name]
+            kwargs: dict[str, Any] = {"interactive": False}
+            if item.value is not None:
+                kwargs["value"] = item.value
+            return gr.update(**kwargs)
+        if name in unlock_map:
+            item = unlock_map[name]
+            kwargs = {}
+            if item.value is not None:
+                kwargs["value"] = item.value
+            if item.interactive is not None:
+                kwargs["interactive"] = item.interactive
+            return gr.update(**kwargs) if kwargs else gr.update()
+        if unlock:
+            resolved = (
+                controller.manual_coefficient_update(
+                    condition=condition,
+                    manual_mode=manual_mode,
+                    coefficient=0.0,
+                )
+                if name == "manual_coefficient"
+                else None
+            )
+            if resolved is not None and name == "manual_coefficient":
+                return gr.update(value=resolved.value, interactive=resolved.interactive)
+        return gr.update()
+
+    return (
+        control("condition_dropdown"),
+        control("layer_slider"),
+        control("preset_radio"),
+        control("manual_mode"),
+        control("manual_coefficient"),
+        control("top_k"),
+        control("temperature"),
+        control("top_p"),
+        control("seed"),
+        control("max_new_tokens"),
+        control("generate_button"),
+        state.response_text,
+        state.status_message or "",
+        state.prediction_caption,
+        state.prediction_rows,
+    )
+
+
+def create_run_generation_handler(
+    engine: InterventionEngine,
+    registry: LabSessionRegistry,
+    controller: LabUIController | None = None,
+) -> Callable[..., Iterator[tuple[Any, ...]]]:
+    controller = controller or LabUIController()
+
+    def run_generation(
+        session_hash: str,
+        prompt_text: str,
+        condition: str,
+        manual_enabled: bool,
+        coefficient: float,
+        layer: float,
+        top_k_value: float,
+        temp: float,
+        nucleus: float,
+        seed_value: float,
+        max_tokens: float,
+    ) -> Iterator[tuple[Any, ...]]:
+        client = registry.get_or_create(session_hash)
+        condition_name = condition  # type: ignore[assignment]
+        generator_exit = False
+        try:
+            request = controller.build_generation_request(
+                prompt=prompt_text,
+                condition=condition_name,
+                manual_mode=manual_enabled,
+                coefficient=coefficient,
+                j_lens_layer=int(layer),
+                top_k=int(top_k_value),
+                temperature=float(temp),
+                top_p=float(nucleus),
+                seed=int(seed_value),
+                max_new_tokens=int(max_tokens),
+            )
+            for tick in controller.stream_generation(
+                engine,
+                request,
+                state=client.view_state,
+                session=client.generation,
+            ):
+                yield pack_generation_outputs(
+                    client.view_state,
+                    controller,
+                    condition=condition_name,
+                    manual_mode=manual_enabled,
+                    lock=tick.lock,
+                )
+        except GeneratorExit:
+            generator_exit = True
+            raise
+        except Exception as exc:
+            client.view_state.status_message = sanitize_error_message(exc)
+        finally:
+            if not generator_exit:
+                unlock = controller.generation_unlock_updates(
+                    condition=condition_name,
+                    manual_mode=manual_enabled,
+                )
+                yield pack_generation_outputs(
+                    client.view_state,
+                    controller,
+                    condition=condition_name,
+                    manual_mode=manual_enabled,
+                    unlock=unlock,
+                )
+
+    return run_generation
+
+
 def build_gradio_app(
     engine: InterventionEngine,
     *,
     preflight_summary: Mapping[str, Any],
     auth: tuple[str, str] | None = None,
-    export_dir: Path | None = None,
+    session_registry: LabSessionRegistry | None = None,
 ) -> Any:
     import gradio as gr
 
     controller = LabUIController()
-    session = GenerationSession()
-    view_state = LabViewState()
-    export_holder = export_dir or Path(tempfile.gettempdir()) / "qwen_lab_exports"
-    export_holder.mkdir(parents=True, exist_ok=True)
+    registry = session_registry or LabSessionRegistry()
+    run_generation = create_run_generation_handler(engine, registry, controller)
 
     preflight_line = (
-        f"GPU: {preflight_summary.get('device_name', '—')} · "
-        f"revisão {preflight_summary.get('model_revision', '—')} · "
-        f"direção {preflight_summary.get('direction_sha256', '—')} · "
-        f"lente {preflight_summary.get('lens_sha256', '—')}"
+        f"GPU: {preflight_summary.get('device_name', 'n/d')} | "
+        f"revisão {preflight_summary.get('model_revision', 'n/d')} | "
+        f"direção {preflight_summary.get('direction_sha256', 'n/d')} | "
+        f"lente {preflight_summary.get('lens_sha256', 'n/d')}"
     )
 
-    def _apply_updates(updates: Sequence[ComponentUpdate], components: dict[str, Any]) -> list[Any]:
-        ordered: list[Any] = []
-        for update in updates:
-            component = components.get(update.component)
-            if component is None:
-                continue
-            values: list[Any] = [component]
-            if update.value is not None:
-                values.append(gr.update(value=update.value))
-            elif update.interactive is not None:
-                values.append(gr.update(interactive=update.interactive))
-            else:
-                values.append(gr.update())
-            ordered.extend(values)
-        return ordered
-
     with gr.Blocks(css=LAB_CSS, title="Laboratório de intervenção Qwen") as demo:
+        session_hash = gr.State(secrets.token_hex(16))
         gr.Markdown(
             '<div class="lab-header"><h1>Laboratório de intervenção</h1></div>',
         )
         gr.Markdown(f'<div class="lab-disclaimer">{LAB_DISCLAIMER}</div>')
         gr.Markdown(f'<div class="lab-preflight">{preflight_line}</div>')
-
-        components: dict[str, Any] = {}
 
         with gr.Row(elem_classes=["lab-root"]):
             with gr.Column(scale=4):
@@ -738,46 +1044,19 @@ def build_gradio_app(
                 )
                 export_file = gr.File(label="Exportação JSON", interactive=False)
 
-        components.update(
-            {
-                "condition_dropdown": condition_dropdown,
-                "layer_slider": layer_slider,
-                "preset_radio": preset_radio,
-                "manual_mode": manual_mode,
-                "manual_coefficient": manual_coefficient,
-                "top_k": top_k,
-                "temperature": temperature,
-                "top_p": top_p,
-                "seed": seed,
-                "max_new_tokens": max_new_tokens,
-                "generate_button": generate_button,
-            }
-        )
-
-        def sync_preset(condition: str) -> list[Any]:
-            resolved = controller.resolve_preset(condition)  # type: ignore[arg-type]
-            manual = controller.manual_coefficient_update(
-                condition=resolved.condition,
-                manual_mode=False,
-                coefficient=resolved.coefficient,
-            )
-            return [
-                condition_dropdown,
-                gr.update(value=resolved.condition),
-                manual_coefficient,
-                gr.update(value=manual.value, interactive=manual.interactive),
-            ]
+        def sync_preset(condition: str) -> tuple[Any, Any]:
+            return sync_preset_updates(controller, condition)  # type: ignore[arg-type]
 
         preset_radio.change(
             sync_preset,
             inputs=[preset_radio],
-            outputs=[condition_dropdown, condition_dropdown, manual_coefficient, manual_coefficient],
+            outputs=[condition_dropdown, manual_coefficient],
         )
 
         condition_dropdown.change(
             sync_preset,
             inputs=[condition_dropdown],
-            outputs=[condition_dropdown, condition_dropdown, manual_coefficient, manual_coefficient],
+            outputs=[condition_dropdown, manual_coefficient],
         )
 
         def on_manual_mode(condition: str, enabled: bool, coefficient: float) -> Any:
@@ -794,68 +1073,10 @@ def build_gradio_app(
             outputs=[manual_coefficient],
         )
 
-        def run_generation(
-            prompt_text: str,
-            condition: str,
-            manual_enabled: bool,
-            coefficient: float,
-            layer: float,
-            top_k_value: float,
-            temp: float,
-            nucleus: float,
-            seed_value: float,
-            max_tokens: float,
-        ) -> Iterator[list[Any]]:
-            request = controller.build_generation_request(
-                prompt=prompt_text,
-                condition=condition,  # type: ignore[arg-type]
-                manual_mode=manual_enabled,
-                coefficient=coefficient,
-                j_lens_layer=int(layer),
-                top_k=int(top_k_value),
-                temperature=float(temp),
-                top_p=float(nucleus),
-                seed=int(seed_value),
-                max_new_tokens=int(max_tokens),
-            )
-            outputs_map = {
-                **components,
-                "response": response,
-                "status_message": status_message,
-                "prediction_caption": prediction_caption,
-                "predictions": predictions,
-            }
-            for tick in controller.stream_generation(
-                engine,
-                request,
-                state=view_state,
-                session=session,
-            ):
-                payload: list[Any] = []
-                if tick.lock:
-                    payload.extend(_apply_updates(tick.lock, outputs_map))
-                payload.extend(
-                    [
-                        response,
-                        view_state.response_text,
-                        status_message,
-                        view_state.status_message or "",
-                        prediction_caption,
-                        view_state.prediction_caption,
-                        predictions,
-                        view_state.prediction_rows,
-                    ]
-                )
-                yield payload
-            unlock = controller.generation_unlock_updates(
-                condition=condition,  # type: ignore[arg-type]
-                manual_mode=manual_enabled,
-            )
-            yield _apply_updates(unlock, outputs_map)
-
         generate_button.click(
             run_generation,
             inputs=[
+                session_hash,
                 prompt,
                 condition_dropdown,
                 manual_mode,
@@ -887,33 +1108,42 @@ def build_gradio_app(
             concurrency_limit=1,
         )
 
-        stop_button.click(lambda: session.cancel_event.set(), outputs=[])
+        def on_stop(hash_value: str) -> None:
+            client = registry.get_or_create(hash_value)
+            client.generation.cancel_event.set()
 
-        def on_clear() -> tuple[str, list[list[Any]], str, str, None]:
-            controller.clear_session(view_state)
-            return "", [], "", "", None
+        stop_button.click(on_stop, inputs=[session_hash], outputs=[])
+
+        def on_clear(hash_value: str) -> tuple[str, list[list[Any]], str, str, Any]:
+            client = registry.clear(hash_value, controller=controller)
+            return "", [], "", client.view_state.status_message, gr.update(value=None)
 
         clear_button.click(
             on_clear,
+            inputs=[session_hash],
             outputs=[response, predictions, prediction_caption, status_message, export_file],
         )
 
-        def on_export() -> Any:
+        def on_export(hash_value: str) -> tuple[Any, str]:
+            client = registry.get_or_create(hash_value)
             try:
                 path = controller.export_session(
-                    view_state,
+                    client.view_state,
                     explicit=True,
-                    holder=export_holder,
+                    holder=client.export_dir,
                 )
             except ValueError as exc:
-                return gr.update(value=None), gr.update(value=str(exc))
-            return gr.update(value=str(path)), gr.update(value="Exportação pronta para download.")
+                return gr.update(value=None), sanitize_error_message(exc)
+            return gr.update(value=str(path)), "Exportação pronta para download."
 
         export_button.click(
             on_export,
+            inputs=[session_hash],
             outputs=[export_file, status_message],
         )
 
     demo.engine = engine  # type: ignore[attr-defined]
     demo.auth = auth  # type: ignore[attr-defined]
+    demo.session_registry = registry  # type: ignore[attr-defined]
+    demo.gradio_pin_version = GRADIO_PIN_VERSION  # type: ignore[attr-defined]
     return demo

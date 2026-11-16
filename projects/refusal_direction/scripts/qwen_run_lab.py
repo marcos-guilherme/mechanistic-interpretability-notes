@@ -14,9 +14,12 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from refusal_direction_replication.qwen_lab_app import (  # noqa: E402
+    GRADIO_PIN_VERSION,
     build_gradio_app,
     bootstrap_intervention_lab,
     lab_operational_log,
+    require_launch_authentication,
+    resolve_auth_credentials,
 )
 
 
@@ -46,36 +49,33 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _auth_from_env() -> tuple[str, str] | None:
-    user = os.environ.get("QWEN_LAB_AUTH_USER", "").strip()
-    password = os.environ.get("QWEN_LAB_AUTH_PASSWORD", "").strip()
-    if user and password:
-        return user, password
-    return None
-
-
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    auth = resolve_auth_credentials()
+    launch_auth = require_launch_authentication(
+        share=bool(args.share),
+        server_name=args.server_name,
+        auth=auth,
+    )
     bundle = bootstrap_intervention_lab(
         args.root,
         direction_path=args.direction_path,
         lens_path=args.lens_path,
     )
-    auth = _auth_from_env()
     demo = build_gradio_app(
         bundle.engine,
         preflight_summary=bundle.preflight_summary,
-        auth=auth,
-        export_dir=args.root / ".lab_exports",
+        auth=launch_auth if launch_auth != ("", "") else None,
     )
-    lab_operational_log(status="launching", share=bool(args.share))
-    launch_auth = getattr(demo, "auth", None) or auth
+    lab_operational_log(status="launching", share=bool(args.share), gradio=GRADIO_PIN_VERSION)
+    loopback = str(args.server_name).strip().lower() in {"127.0.0.1", "localhost", "::1"}
+    show_error = loopback and not bool(args.share)
     demo.launch(
         server_name=args.server_name,
         server_port=args.server_port,
         share=bool(args.share),
-        auth=launch_auth,
-        show_error=True,
+        auth=launch_auth if launch_auth != ("", "") else None,
+        show_error=show_error,
     )
     return 0
 

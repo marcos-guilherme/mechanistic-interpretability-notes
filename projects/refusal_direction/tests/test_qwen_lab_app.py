@@ -467,6 +467,215 @@ def test_gradio_html_excludes_secret_markers() -> None:
     assert_ui_strings_safe(LAB_DISCLAIMER)
 
 
+def test_gradio_pin_version_is_documented() -> None:
+    from refusal_direction_replication.qwen_lab_app import GRADIO_PIN_VERSION
+
+    assert GRADIO_PIN_VERSION == "5.49.1"
+
+
+def test_pack_generation_outputs_has_fixed_cardinality() -> None:
+    pytest.importorskip("gradio")
+    from refusal_direction_replication.qwen_lab_app import (
+        GENERATION_OUTPUT_COUNT,
+        LabUIController,
+        LabViewState,
+        pack_generation_outputs,
+    )
+
+    state = LabViewState(response_text="ok", status_message="Estado: ok")
+    row = pack_generation_outputs(
+        state,
+        LabUIController(),
+        condition="baseline",
+        manual_mode=False,
+        lock=LabUIController().generation_lock_updates(),
+    )
+    assert len(row) == GENERATION_OUTPUT_COUNT == 15
+
+
+def test_run_generation_handler_yield_shape_matches_gradio_outputs(tmp_path: Path) -> None:
+    pytest.importorskip("gradio")
+    from refusal_direction_replication.qwen_lab_app import (
+        GENERATION_OUTPUT_COUNT,
+        LabSessionRegistry,
+        LabUIController,
+        create_run_generation_handler,
+    )
+
+    registry = LabSessionRegistry(export_root=tmp_path / "sessions")
+    handler = create_run_generation_handler(
+        FakeEngine([_event(1, text="ab"), _event(2, text="ab", status="completed")]),
+        registry,
+        LabUIController(),
+    )
+    rows = list(
+        handler(
+            "sess-a",
+            "pergunta",
+            "baseline",
+            False,
+            0.0,
+            10.0,
+            float(DEFAULT_TOP_K),
+            0.0,
+            1.0,
+            0.0,
+            4.0,
+        )
+    )
+    assert len(rows) >= 2
+    assert all(len(row) == GENERATION_OUTPUT_COUNT for row in rows)
+    assert all(not hasattr(item, "elem_id") for row in rows for item in row)
+
+
+def test_sync_preset_updates_return_two_gradio_values() -> None:
+    pytest.importorskip("gradio")
+    import gradio as gr
+
+    from refusal_direction_replication.qwen_lab_app import (
+        LabUIController,
+        sync_preset_updates,
+    )
+
+    pair = sync_preset_updates(LabUIController(), "ablation")
+    assert len(pair) == 2
+    assert all(isinstance(item, dict) and item.get("__type__") == "update" for item in pair)
+
+
+def test_session_registry_isolates_state_and_cancel(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        LabSessionRegistry,
+        LabUIController,
+    )
+
+    registry = LabSessionRegistry(export_root=tmp_path / "reg")
+    first = registry.get_or_create("one")
+    second = registry.get_or_create("two")
+    first.view_state.response_text = "alpha"
+    second.generation.cancel_event.set()
+    assert second.view_state.response_text == ""
+    assert not first.generation.cancel_event.is_set()
+    assert first.export_dir != second.export_dir
+
+
+def test_partial_auth_credentials_fail_closed() -> None:
+    from refusal_direction_replication.qwen_lab_app import resolve_auth_credentials
+
+    with pytest.raises(ValueError, match="both"):
+        resolve_auth_credentials(user="only-user", password="")
+    with pytest.raises(ValueError, match="both"):
+        resolve_auth_credentials(user="", password="secret")
+
+
+def test_public_launch_requires_complete_auth() -> None:
+    from refusal_direction_replication.qwen_lab_app import require_launch_authentication
+
+    with pytest.raises(ValueError, match="authentication"):
+        require_launch_authentication(share=True, server_name="0.0.0.0", auth=None)
+    with pytest.raises(ValueError, match="authentication"):
+        require_launch_authentication(
+            share=False,
+            server_name="0.0.0.0",
+            auth=None,
+        )
+    auth = require_launch_authentication(
+        share=False,
+        server_name="127.0.0.1",
+        auth=None,
+    )
+    assert auth == ("", "")
+
+
+def test_model_revision_missing_or_mismatch_fails() -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        _assert_model_revision,
+        _assert_tokenizer_revision,
+    )
+
+    with pytest.raises(ValueError, match="missing"):
+        _assert_model_revision(None)
+    with pytest.raises(ValueError, match="!="):
+        _assert_model_revision("deadbeef")
+
+    tokenizer = SimpleNamespace(revision="deadbeef")
+    with pytest.raises(ValueError, match="tokenizer"):
+        _assert_tokenizer_revision(tokenizer, "c03e6d358207e414f1eca0bb1891e29f1db0e242")
+
+
+def test_export_allows_prompt_words_without_blocking(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        LabUIController,
+        LabViewState,
+        assert_export_document_safe,
+    )
+
+    controller = LabUIController()
+    state = LabViewState()
+    state.last_request = controller.build_generation_request(
+        prompt="Explique password managers e token buckets",
+        condition="baseline",
+        manual_mode=False,
+        coefficient=0.0,
+        j_lens_layer=3,
+        top_k=3,
+        temperature=0.0,
+        top_p=1.0,
+        seed=0,
+        max_new_tokens=4,
+    )
+    state.events = [_event(1)]
+    document = controller.build_export_document(state)
+    assert "password" in document["request"]["prompt"]
+    assert_export_document_safe(document)
+
+
+def test_run_generation_unlocks_after_engine_error(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        GENERATION_OUTPUT_COUNT,
+        LabSessionRegistry,
+        LabUIController,
+        create_run_generation_handler,
+    )
+
+    class ErrorEngine:
+        def generate(self, request: GenerationRequest, cancelled: Any = None):
+            del request, cancelled
+            if False:
+                yield _event(1)
+            raise ValueError("campo inválido")
+
+    registry = LabSessionRegistry(export_root=tmp_path / "err")
+    handler = create_run_generation_handler(ErrorEngine(), registry, LabUIController())
+    rows = list(
+        handler(
+            "err",
+            "x",
+            "baseline",
+            False,
+            0.0,
+            1.0,
+            3.0,
+            0.0,
+            1.0,
+            0.0,
+            2.0,
+        )
+    )
+    client = registry.get_or_create("err")
+    assert len(rows) == 2
+    assert len(rows[-1]) == GENERATION_OUTPUT_COUNT
+    assert "campo inválido" in client.view_state.status_message.lower()
+
+
+def test_qwen_run_lab_main_rejects_share_without_auth() -> None:
+    from importlib.machinery import SourceFileLoader
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "qwen_run_lab.py"
+    module = SourceFileLoader("qwen_run_lab", str(script)).load_module()
+    with pytest.raises(ValueError, match="authentication"):
+        module.main(["--share"])
+
+
 def test_qwen_run_lab_main_does_not_print_password(capsys: pytest.CaptureFixture[str]) -> None:
     from importlib.machinery import SourceFileLoader
 
@@ -490,7 +699,7 @@ def test_qwen_run_lab_main_does_not_print_password(capsys: pytest.CaptureFixture
             "QWEN_LAB_AUTH_PASSWORD": "SUPER-SECRET-PASS",
         }
         with patch.dict(os.environ, env, clear=False):
-            module.main(["--no-share"])
+            module.main(["--no-share", "--server-name", "127.0.0.1"])
     captured = capsys.readouterr().out + capsys.readouterr().err
     assert "SUPER-SECRET-PASS" not in captured
     launch.assert_called_once()
