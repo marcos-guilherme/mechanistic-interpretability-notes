@@ -38,6 +38,14 @@ def _orchestrator():
     return module
 
 
+def _installer():
+    spec = importlib.util.spec_from_file_location("install_code_eval", INSTALL_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_code_eval_fetch_allowlist_separates_profile_and_allows_raw_artifacts() -> None:
     allowed = (
         "results/qwen25_coder_7b_code_eval/00_prepare.json",
@@ -309,6 +317,39 @@ def test_code_eval_scripts_exist_and_pin_dependencies() -> None:
     ):
         assert dependency in install
     assert CODE_EVAL_REMOTE_ARCHIVE == Path("/content/qwen_code_eval_results.tar.gz")
+
+
+def test_evalplus_bootstrap_smoke_sanitizes_harmless_code_and_checks_api() -> None:
+    module = _installer()
+    observed: list[tuple[str, str]] = []
+
+    def sanitize(code: str, *, entrypoint: str) -> str:
+        observed.append((code, entrypoint))
+        return code
+
+    def check_correctness(
+        dataset,
+        completion_id,
+        problem,
+        solution,
+        expected_output,
+        **kwargs,
+    ):
+        return {}
+
+    assert module.smoke_evalplus_contract(
+        sanitize=sanitize,
+        check_correctness=check_correctness,
+        reliability_guard=lambda: None,
+    ) == "def add(a, b):\n    return a + b\n"
+    assert observed[0][1] == "add"
+
+    with pytest.raises(RuntimeError, match="sanitize"):
+        module.smoke_evalplus_contract(
+            sanitize=lambda *_args, **_kwargs: "",
+            check_correctness=check_correctness,
+            reliability_guard=lambda: None,
+        )
 
 
 def test_code_eval_start_forces_a100_without_changing_other_profiles(

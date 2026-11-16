@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import inspect
 import json
 import subprocess
 import sys
@@ -116,6 +117,39 @@ def _install_purplellama_source() -> None:
         raise ValueError("PurpleLlama checkout differs from the pinned commit")
 
 
+def smoke_evalplus_contract(
+    *,
+    sanitize=None,
+    check_correctness=None,
+    reliability_guard=None,
+) -> str:
+    """Exercise harmless sanitization and pin the worker-facing EvalPlus API."""
+    if sanitize is None or check_correctness is None or reliability_guard is None:
+        from evalplus.eval.utils import reliability_guard as imported_guard
+        from evalplus.evaluate import check_correctness as imported_check
+        from evalplus.sanitize import sanitize as imported_sanitize
+
+        sanitize = imported_sanitize
+        check_correctness = imported_check
+        reliability_guard = imported_guard
+    if not all(callable(item) for item in (sanitize, check_correctness, reliability_guard)):
+        raise RuntimeError("EvalPlus execution contract is unavailable")
+    required_parameters = {
+        "dataset",
+        "completion_id",
+        "problem",
+        "solution",
+        "expected_output",
+    }
+    if not required_parameters.issubset(inspect.signature(check_correctness).parameters):
+        raise RuntimeError("EvalPlus check_correctness API differs from the worker contract")
+    harmless = "def add(a, b):\n    return a + b\n"
+    sanitized = sanitize(harmless, entrypoint="add")
+    if not isinstance(sanitized, str) or "def add" not in sanitized:
+        raise RuntimeError("EvalPlus sanitize smoke test failed")
+    return sanitized
+
+
 def main() -> int:
     if JLENS_UPSTREAM_SPEC.rsplit("@", 1)[-1] != JLENS_COMMIT:
         raise ValueError("Jacobian-lens install spec differs from the pinned commit")
@@ -126,11 +160,7 @@ def main() -> int:
     assert_jlens_contract()
     if _installed_commit("evalplus") != EVALPLUS_COMMIT:
         raise ValueError("installed EvalPlus commit differs from the pinned commit")
-    from evalplus.eval import untrusted_check
-    from evalplus.sanitize import sanitize
-
-    if not callable(untrusted_check) or not callable(sanitize):
-        raise ValueError("EvalPlus execution contract is unavailable")
+    smoke_evalplus_contract()
     atomic_install_code_eval_sources(
         staged_direction=Path(REMOTE_CODE_EVAL_DIRECTION_STAGING),
         staged_lens=Path(REMOTE_CODE_EVAL_LENS_STAGING),
