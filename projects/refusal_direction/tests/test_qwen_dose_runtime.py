@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import shutil
 from pathlib import Path
@@ -1008,23 +1009,99 @@ def test_existing_evaluation_reconciles_manifest_status_and_event(
     )
 
 
-def test_release_clears_holder_before_gc(monkeypatch: pytest.MonkeyPatch) -> None:
-    from refusal_direction_replication.qwen_dose_runtime import _release_resource_holder
+def test_forget_compute_refs_nulls_holder_and_returns_nones() -> None:
+    from refusal_direction_replication.qwen_dose_runtime import _forget_compute_refs
 
     holder = {"model": object(), "tokenizer": object()}
-    seen: list[object] = []
-
-    def fake_collect() -> None:
-        seen.append(holder.get("model"))
-
-    monkeypatch.setattr(
-        "refusal_direction_replication.pipeline.gc.collect",
-        fake_collect,
-    )
-    _release_resource_holder(holder)
+    model, tokenizer, bound = object(), object(), object()
+    model, tokenizer, bound = _forget_compute_refs(holder, model, tokenizer, bound)
+    assert model is None
+    assert tokenizer is None
+    assert bound is None
     assert holder["model"] is None
     assert holder["tokenizer"] is None
-    assert seen == [None]
+
+
+def test_release_drops_holder_and_owner_refs_before_gc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication.qwen_dose_runtime import (
+        _forget_compute_refs,
+        _release_resource_holder,
+    )
+
+    sentinel = object()
+    holder = {"model": sentinel, "tokenizer": object()}
+    owner = {"model": sentinel, "tokenizer": object(), "bound": object()}
+    observed: list[dict[str, object]] = []
+    callbacks: list[str] = []
+
+    def callback() -> None:
+        callbacks.append("released")
+
+    def fake_collect() -> None:
+        live = False
+        for frame_info in inspect.stack():
+            locals_map = frame_info.frame.f_locals
+            if locals_map.get("model") is sentinel:
+                live = True
+            if locals_map.get("tokenizer") is sentinel:
+                live = True
+            nested = locals_map.get("holder")
+            if isinstance(nested, dict) and nested.get("model") is sentinel:
+                live = True
+        observed.append(
+            {
+                "holder": holder.get("model"),
+                "owner": owner.get("model"),
+                "live": live,
+            }
+        )
+
+    monkeypatch.setattr(
+        "refusal_direction_replication.qwen_dose_runtime.gc.collect",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        "refusal_direction_replication.qwen_dose_runtime.torch.cuda.is_available",
+        lambda: False,
+    )
+    owner["model"], owner["tokenizer"], owner["bound"] = _forget_compute_refs(
+        holder,
+        owner["model"],
+        owner["tokenizer"],
+        owner["bound"],
+    )
+    _release_resource_holder(holder, callback)
+    assert callbacks == ["released"]
+    assert holder["model"] is None
+    assert holder["tokenizer"] is None
+    assert owner["model"] is None
+    assert observed == [{"holder": None, "owner": None, "live": False}]
+
+
+def test_manifest_lists_every_grid_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics())
+    results_dir = tmp_path / "results" / "qwen25_coder_7b_dose"
+    config = load_config(tmp_path, profile=DOSE_PROFILE)
+    manifest = _read(results_dir / "execution_manifest.json")
+    expected = [
+        "00_dose_prepare.json",
+        "01_dose_baseline.json",
+        "02_dose_selection.json",
+        "03_dose_confirmation.json",
+        "dose_followup_evaluation.json",
+        "execution_manifest.json",
+        *[coefficient_checkpoint_name(item) for item in config["dose_grid"]],
+    ]
+    assert manifest["results"]["result_files"] == expected
+    assert manifest["results"]["completed_stages"] == ["prepare", "sweep", "confirm"]
 
 
 def test_ablation_hooks_apply_to_block_attention_and_mlp_numerically() -> None:

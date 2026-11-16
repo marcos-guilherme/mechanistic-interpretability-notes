@@ -7,10 +7,13 @@ splits, and confirms one frozen coefficient pair.
 
 from __future__ import annotations
 
+import gc
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+import torch
 
 from .artifacts import ArtifactEnvelope, atomic_write_json, write_artifact
 from .data import PromptExample, content_hashes_for_examples
@@ -38,7 +41,6 @@ from .pipeline import (
     load_config,
     project_paths,
     random_direction_control,
-    release_compute_resources,
     transformer_module_lists,
 )
 from .qwen_dose import (
@@ -156,39 +158,67 @@ def load_reusable_artifact(
     return payload
 
 
+def _forget_compute_refs(
+    holder: dict[str, Any],
+    model: Any = None,
+    tokenizer: Any = None,
+    bound: Any = None,
+) -> tuple[None, None, None]:
+    holder["model"] = None
+    holder["tokenizer"] = None
+    del model
+    del tokenizer
+    del bound
+    return None, None, None
+
+
 def _release_resource_holder(
     holder: dict[str, Any],
     release_resources: Callable[[], None] | None = None,
 ) -> None:
-    model = holder.pop("model", None)
-    tokenizer = holder.pop("tokenizer", None)
     holder["model"] = None
     holder["tokenizer"] = None
     if release_resources is not None:
         release_resources()
-        return
-    release_compute_resources(model, tokenizer)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
-def _result_files_for_status(status: str) -> list[str]:
+def _completed_stages_for_status(status: str) -> list[str]:
     if status == STATUS_NO_DOSE_QUALIFIED:
-        return [
+        return ["prepare", "sweep"]
+    if status == STATUS_OPERATIONAL_ERROR:
+        return []
+    return ["prepare", "sweep", "confirm"]
+
+
+def _result_files_for_status(
+    status: str,
+    *,
+    grid: Sequence[float] = (),
+) -> list[str]:
+    if status == STATUS_NO_DOSE_QUALIFIED:
+        named = [
             "00_dose_prepare.json",
             "01_dose_baseline.json",
             "02_dose_selection.json",
             "dose_followup_evaluation.json",
             "execution_manifest.json",
         ]
-    if status == STATUS_OPERATIONAL_ERROR:
+    elif status == STATUS_OPERATIONAL_ERROR:
         return ["dose_followup_evaluation.json"]
-    return [
-        "00_dose_prepare.json",
-        "01_dose_baseline.json",
-        "02_dose_selection.json",
-        "03_dose_confirmation.json",
-        "dose_followup_evaluation.json",
-        "execution_manifest.json",
-    ]
+    else:
+        named = [
+            "00_dose_prepare.json",
+            "01_dose_baseline.json",
+            "02_dose_selection.json",
+            "03_dose_confirmation.json",
+            "dose_followup_evaluation.json",
+            "execution_manifest.json",
+        ]
+    named.extend(coefficient_checkpoint_name(item) for item in grid)
+    return named
 
 
 def _terminal_observability(
@@ -247,15 +277,12 @@ def _reconcile_terminal_observability(
             evaluation.get("model_revision") or config["model_revision"]
         ),
     )
-    completed_stages = ["prepare", "sweep"]
-    if status != STATUS_NO_DOSE_QUALIFIED:
-        completed_stages.append("confirm")
     _write_manifest(
         results_dir,
         config=dict(config),
         provenance=provenance,
-        completed_stages=completed_stages,
-        result_files=_result_files_for_status(status),
+        completed_stages=_completed_stages_for_status(status),
+        result_files=_result_files_for_status(status, grid=config["dose_grid"]),
         status=status,
     )
     snapshot = {
@@ -285,8 +312,19 @@ def _reconcile_terminal_observability(
         state=spec["state"],
         stage=spec["current_stage"],
         abort_gate=spec["abort_gate"],
+        completed_units=spec["completed_units"],
+        total_units=spec["total_units"],
     ):
         store.append_public_event(event)
+
+
+def _complete_store_progress(store: RunProgressStore) -> None:
+    current = store.read_status()
+    if current is None:
+        return
+    total = int(current["total_units"])
+    if int(current["completed_units"]) != total:
+        store.update_progress(completed_units=total)
 
 
 def _assert_resolved_revision(model, config: Mapping[str, Any]) -> str:
@@ -810,23 +848,19 @@ def run_dose_sweep(
                 results_dir,
                 config=config,
                 provenance=provenance,
-                completed_stages=["prepare", "sweep"],
-                result_files=[
-                    "00_dose_prepare.json",
-                    "01_dose_baseline.json",
-                    "02_dose_selection.json",
-                    "dose_followup_evaluation.json",
-                    "execution_manifest.json",
-                ],
+                completed_stages=_completed_stages_for_status(STATUS_NO_DOSE_QUALIFIED),
+                result_files=_result_files_for_status(
+                    STATUS_NO_DOSE_QUALIFIED,
+                    grid=grid,
+                ),
                 status=STATUS_NO_DOSE_QUALIFIED,
             )
+            _complete_store_progress(store)
             store.abort(gate="dose", reason="no qualifying dose pair")
             return evaluation
         return selection
     finally:
-        del model
-        del tokenizer
-        del bound
+        model, tokenizer, bound = _forget_compute_refs(holder, model, tokenizer, bound)
 
 
 def _evaluation_from_confirmation(
@@ -881,18 +915,12 @@ def _evaluation_from_confirmation(
         results_dir,
         config=dict(config),
         provenance=provenance,
-        completed_stages=["prepare", "sweep", "confirm"],
-        result_files=[
-            "00_dose_prepare.json",
-            "01_dose_baseline.json",
-            "02_dose_selection.json",
-            "03_dose_confirmation.json",
-            "dose_followup_evaluation.json",
-            "execution_manifest.json",
-        ],
+        completed_stages=_completed_stages_for_status(status),
+        result_files=_result_files_for_status(status, grid=config["dose_grid"]),
         status=status,
     )
     if not gate.passed:
+        _complete_store_progress(store)
         store.abort(gate="causal", reason=gate.reason)
     return evaluation
 
@@ -949,16 +977,14 @@ def run_dose_confirm(
             results_dir,
             config=config,
             provenance=provenance,
-            completed_stages=["prepare", "sweep"],
-            result_files=[
-                "00_dose_prepare.json",
-                "01_dose_baseline.json",
-                "02_dose_selection.json",
-                "dose_followup_evaluation.json",
-                "execution_manifest.json",
-            ],
+            completed_stages=_completed_stages_for_status(STATUS_NO_DOSE_QUALIFIED),
+            result_files=_result_files_for_status(
+                STATUS_NO_DOSE_QUALIFIED,
+                grid=grid,
+            ),
             status=STATUS_NO_DOSE_QUALIFIED,
         )
+        _complete_store_progress(store)
         store.abort(gate="dose", reason="no qualifying dose pair")
         return evaluation
     existing_confirmation = load_reusable_artifact(
@@ -1102,9 +1128,7 @@ def run_dose_confirm(
             store=store,
         )
     finally:
-        del model
-        del tokenizer
-        del bound
+        model, tokenizer, bound = _forget_compute_refs(holder, model, tokenizer, bound)
 
 
 def _existing_terminal_evaluation(

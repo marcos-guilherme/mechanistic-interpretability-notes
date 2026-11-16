@@ -191,6 +191,100 @@ def test_validator_rejects_prompt_leakage(
     _write_json(path, payload)
     checks = validate_qwen_dose(root)
     assert checks["no_raw_prompt_or_generation_leakage"] is False
+    generation_path = root / "results" / "qwen25_coder_7b_dose" / "01_dose_baseline.json"
+    generation_payload = _read(generation_path)
+    generation_payload["results"]["generation"] = "a generated refusal sentence"
+    _write_json(generation_path, generation_payload)
+    checks = validate_qwen_dose(root)
+    assert checks["no_raw_prompt_or_generation_leakage"] is False
+
+
+def test_validator_accepts_multiple_gate_failures_without_leak_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    result = run_qwen_dose(
+        tmp_path,
+        run_id=DOSE_RUN,
+        measure=ScriptedMetrics(confirmation_pass=False),
+    )
+    assert result["status"] == STATUS_CAUSAL_GATE_FAILED
+    reason = result["causal_gate"]["reason"]
+    assert reason.count(";") >= 1
+    assert len(reason.split()) >= 8
+    checks = validate_qwen_dose(tmp_path)
+    assert checks["no_raw_prompt_or_generation_leakage"] is True
+    assert checks["status_matches_gate"] is True
+
+
+def test_validator_rejects_terminal_event_missing_required_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    events_path = root / "artifacts" / "qwen25_coder_7b_dose" / "events.jsonl"
+    rewritten: list[str] = []
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("event") == "stage_completed" and record.get("stage") == "confirm":
+            record.pop("run_id", None)
+            record.pop("completed_units", None)
+            record.pop("total_units", None)
+        rewritten.append(json.dumps(record, sort_keys=True))
+    events_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+    checks = validate_qwen_dose(root)
+    assert checks["observability_reconciles"] is False
+
+
+def test_validator_rejects_terminal_event_missing_abort_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source_pilot(tmp_path)
+    write_leftover_datasets(tmp_path)
+    monkeypatch.setenv("REFUSAL_IMPLEMENTATION_COMMIT", IMPLEMENTATION_COMMIT)
+    run_qwen_dose(
+        tmp_path,
+        run_id=DOSE_RUN,
+        measure=ScriptedMetrics(confirmation_pass=False),
+    )
+    run_qwen_dose(tmp_path, run_id=DOSE_RUN, measure=ScriptedMetrics(confirmation_pass=False))
+    assert validate_qwen_dose(tmp_path)["observability_reconciles"] is True
+    events_path = tmp_path / "artifacts" / "qwen25_coder_7b_dose" / "events.jsonl"
+    rewritten: list[str] = []
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("event") == "aborted" and record.get("stage") == "confirm":
+            record.pop("abort_gate", None)
+        rewritten.append(json.dumps(record, sort_keys=True))
+    events_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+    checks = validate_qwen_dose(tmp_path)
+    assert checks["observability_reconciles"] is False
+
+
+def test_validator_rejects_manifest_missing_checkpoint_or_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = passing_dose_root(tmp_path, monkeypatch)
+    path = root / "results" / "qwen25_coder_7b_dose" / "execution_manifest.json"
+    payload = _read(path)
+    payload["results"]["result_files"] = [
+        name
+        for name in payload["results"]["result_files"]
+        if not str(name).startswith("checkpoint_coeff_")
+    ]
+    payload["results"]["completed_stages"] = ["prepare", "sweep"]
+    _write_json(path, payload)
+    checks = validate_qwen_dose(root)
+    assert checks["manifest_agrees"] is False
 
 
 def test_validator_rejects_status_result_mismatch(

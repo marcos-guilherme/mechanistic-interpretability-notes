@@ -624,6 +624,33 @@ def test_metadata_leak_check_walks_nested_keys() -> None:
     assert metadata_contains_leak({"example_ids": ["harmful_test-0010"]}) is False
 
 
+def test_metadata_allowlists_aggregated_gate_reasons_without_word_count() -> None:
+    concatenated = (
+        "min_harmful_ablation_drop: observed 0.01 not >= 0.2; "
+        "max_random_control_harmful_drop: observed 0.50 not <= 0.1; "
+        "max_harmless_ablation_kl: observed 0.50 not <= 0.1"
+    )
+    assert len(concatenated.split()) >= 8
+    payload = {
+        "status": "causal_gate_failed",
+        "causal_gate": {
+            "name": "causal",
+            "passed": False,
+            "reason": concatenated,
+            "checks": [
+                {"name": "min_harmful_ablation_drop", "reason": concatenated[:40]},
+            ],
+        },
+        "abort_reason": concatenated,
+    }
+    assert metadata_contains_leak(payload) is False
+    assert metadata_contains_leak({"prompt": "short"}) is True
+    assert metadata_contains_leak({"generation": "also short"}) is True
+    assert metadata_contains_leak(
+        {"notes": "one two three four five six seven eight nine"}
+    ) is True
+
+
 def test_selects_smallest_qualifying_ablation_and_addition() -> None:
     chosen = select_dose_coefficients(
         ablation_curve=[

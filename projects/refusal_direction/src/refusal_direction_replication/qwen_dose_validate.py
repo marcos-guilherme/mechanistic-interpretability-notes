@@ -20,6 +20,7 @@ from .qwen_dose import (
     STATUS_NO_DOSE_QUALIFIED,
     coefficient_checkpoint_name,
     collect_original_usage,
+    metadata_contains_leak,
     select_dose_coefficients,
     source_artifact_hashes,
 )
@@ -30,7 +31,6 @@ from .qwen_pilot_validate import (
     _commit_ok,
     _model_ok,
     _run_id_ok,
-    _walk_contains_leak,
     validate_qwen_pilot,
 )
 from .run_progress import EVENTS_FILENAME, STATUS_FILENAME
@@ -188,7 +188,7 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
             checks["model_and_revision"] = False
         if not _all_finite(payload):
             checks["metrics_are_finite"] = False
-        if _walk_contains_leak(payload):
+        if metadata_contains_leak(payload):
             checks["no_raw_prompt_or_generation_leakage"] = False
 
     try:
@@ -468,11 +468,25 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
     else:
         checks["status_matches_result"] = False
 
+    expected_stages = {
+        STATUS_PASS: ["prepare", "sweep", "confirm"],
+        STATUS_CAUSAL_GATE_FAILED: ["prepare", "sweep", "confirm"],
+        STATUS_NO_DOSE_QUALIFIED: ["prepare", "sweep"],
+        STATUS_OPERATIONAL_ERROR: [],
+    }.get(str(status), [])
+    expected_manifest_files = set(required)
+    if status != STATUS_OPERATIONAL_ERROR:
+        expected_manifest_files.update(expected_checkpoint_names)
     manifest_path = results_dir / "execution_manifest.json"
     if manifest_path.is_file():
         manifest = _load(manifest_path)
-        manifest_status = (manifest.get("results") or {}).get("status")
-        checks["manifest_agrees"] = manifest_status == status
+        manifest_results = manifest.get("results") or {}
+        checks["manifest_agrees"] = (
+            manifest_results.get("status") == status
+            and list(manifest_results.get("completed_stages") or []) == expected_stages
+            and set(manifest_results.get("result_files") or [])
+            == expected_manifest_files
+        )
     else:
         checks["manifest_agrees"] = status == STATUS_OPERATIONAL_ERROR
 
@@ -520,6 +534,11 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
         STATUS_CAUSAL_GATE_FAILED: "aborted",
         STATUS_NO_DOSE_QUALIFIED: "aborted",
     }.get(str(status))
+    expected_abort_gate = {
+        STATUS_PASS: None,
+        STATUS_CAUSAL_GATE_FAILED: "causal",
+        STATUS_NO_DOSE_QUALIFIED: "dose",
+    }.get(str(status))
     events_ok = False
     if events_path.is_file() and terminal_event is not None:
         for line in events_path.read_text(encoding="utf-8").splitlines():
@@ -530,6 +549,11 @@ def validate_qwen_dose(root: Path) -> dict[str, bool]:
                 record.get("event") == terminal_event
                 and record.get("state") == state
                 and record.get("stage") == expected_stage
+                and record.get("run_id") == evaluation.get("run_id")
+                and record.get("completed_units")
+                == status_payload.get("completed_units")
+                and record.get("total_units") == status_payload.get("total_units")
+                and record.get("abort_gate") == expected_abort_gate
             ):
                 events_ok = True
                 break

@@ -287,6 +287,8 @@ class RunProgressStore:
         state: str,
         stage: str,
         abort_gate: str | None = None,
+        completed_units: int | None = None,
+        total_units: int | None = None,
     ) -> bool:
         if not self.events_path.is_file():
             return False
@@ -300,6 +302,11 @@ class RunProgressStore:
                 and record.get("state") == state
                 and record.get("stage") == stage
                 and record.get("abort_gate") == abort_gate
+                and (
+                    completed_units is None
+                    or record.get("completed_units") == completed_units
+                )
+                and (total_units is None or record.get("total_units") == total_units)
             ):
                 return True
         return False

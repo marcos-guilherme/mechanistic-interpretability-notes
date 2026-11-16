@@ -17,6 +17,7 @@ from .data import (
     prompt_content_hash,
 )
 from .gates import (
+    OPERATIONAL_ERROR_MESSAGES,
     STATUS_CAUSAL_GATE_FAILED,
     STATUS_OPERATIONAL_ERROR,
     STATUS_PASS,
@@ -74,6 +75,24 @@ METADATA_LEAK_KEYS = frozenset(
         "completions",
     }
 )
+ALLOWED_AGGREGATE_TEXT_FIELDS = frozenset(
+    {
+        "reason",
+        "abort_reason",
+        "abort_gate",
+        "exception_category",
+        "error_code",
+        "status",
+        "message",
+        "name",
+        "comparator",
+        "experiment",
+        "refusal_prefixes",
+        "gpu",
+        "device",
+    }
+)
+ALLOWED_OPERATIONAL_MESSAGES = frozenset(OPERATIONAL_ERROR_MESSAGES.values())
 
 
 def sha256_file(path: Path) -> str:
@@ -315,10 +334,17 @@ def metadata_contains_leak(obj: Any, *, key: str | None = None) -> bool:
     if isinstance(obj, list):
         return any(metadata_contains_leak(item, key=key) for item in obj)
     if isinstance(obj, str):
-        stripped = obj.strip()
-        if len(stripped.split()) >= 8:
+        lowered = (key or "").casefold()
+        if lowered in METADATA_LEAK_KEYS:
             return True
-        return False
+        if lowered in ALLOWED_AGGREGATE_TEXT_FIELDS:
+            if lowered == "message":
+                return obj not in ALLOWED_OPERATIONAL_MESSAGES
+            return False
+        stripped = obj.strip()
+        if not stripped:
+            return False
+        return " " in stripped
     return False
 
 
