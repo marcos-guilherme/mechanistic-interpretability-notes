@@ -69,7 +69,7 @@ def test_v2_profile_is_isolated_from_v1_lab_and_code_eval() -> None:
     v2 = load_config(ROOT, profile=JLENS_V2_PROFILE)
     lab = load_config(ROOT, profile="qwen25_coder_7b_lab.json")
 
-    assert v2["max_seq_len"] == V2_MAX_SEQ_LEN == 512
+    assert v2["max_seq_len"] == V2_MAX_SEQ_LEN == 256
     assert v2["min_tokens_before_truncation"] == V2_MAX_SEQ_LEN
     assert v2["holdout_count"] == V2_HOLDOUT_COUNT == 200
     assert v2["fit_count_candidates"] == V2_FIT_COUNT_CANDIDATES

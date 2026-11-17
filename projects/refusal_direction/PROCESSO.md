@@ -532,7 +532,15 @@ A v1 validou formato e utilidade mínima com 100 ajustes e holdout de 20
 exemplos em contexto curto. Abri o perfil `qwen25-coder-jlens-v2` para testar o
 mesmo compromisso upstream (`anthropics/jacobian-lens` no commit congelado)
 com **512 tokens** por exemplo, **200 amostras** fixas no holdout e tamanho de
-ajuste escolhido por probe sob teto de **12 horas** projetadas na A100.
+ajuste escolhido por probe sob teto de **12 horas** projetadas na A100. O probe
+real mostrou que 512 tokens integrais não eram viáveis: os lotes 32, 16 e 8
+esgotaram 80 GB, e a tentativa com lotes menores não concluiu uma Jacobiana em
+61 minutos. A sessão foi encerrada sem ajustar uma lente.
+
+O perfil foi então reduzido para **256 tokens integrais**, mantendo o holdout
+de 200 e o mesmo teto de tempo. Se esse segundo probe também falhar, a próxima
+execução usará 128 tokens. Essa sequência evita apresentar a redução de
+contexto como se fosse o desenho inicial.
 
 A v2 grava em `artifacts/qwen25_coder_7b_jlens_v2/` e compara a lente nova com a
 v1 congelada no holdout compartilhado. O laboratório visual e o code-eval em

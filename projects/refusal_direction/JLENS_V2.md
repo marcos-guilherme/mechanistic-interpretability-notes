@@ -10,11 +10,13 @@ Perfil JSON: `configs/qwen25_coder_7b_jlens_v2.json`. Operador local:
 
 ## Objetivo e o que muda em relação à v1
 
-A v1 ajustou 100 funções Python com contexto curto e holdout de 20 exemplos. A
-v2 aumenta o contrato para **512 tokens** por exemplo, fixa **200 amostras** no
-holdout e deixa o tamanho do ajuste (`fit_count`) ser escolhido por probe entre
+A v1 ajustou 100 funções Python com contexto de 128 tokens e holdout de 20
+exemplos. A tentativa inicial da v2 usou 512 tokens, mas não coube na A100. O
+perfil atual testa **256 tokens** por exemplo, fixa **200 amostras** no holdout
+e deixa o tamanho do ajuste (`fit_count`) ser escolhido por probe entre
 candidatos até 800, com projeção limitada a **12 horas** de GPU. Os artefatos
-ficam em `artifacts/qwen25_coder_7b_jlens_v2/` e `results/qwen25_coder_7b_jlens_v2/`.
+ficam em `artifacts/qwen25_coder_7b_jlens_v2/` e
+`results/qwen25_coder_7b_jlens_v2/`.
 
 O laboratório visual (`qwen25-coder-lab`) e a avaliação de código em batch
 continuam usando a lente v1 congelada em
@@ -26,7 +28,7 @@ troca automática da lente usada nas intervenções já documentadas.
 
 - Repositório: `code-search-net/code_search_net`, split `train`, config `python`,
   revisão fixa no JSON.
-- Cada exemplo precisa atingir pelo menos 512 tokens antes do truncamento no
+- Cada exemplo precisa atingir pelo menos 256 tokens antes do truncamento no
   `skip_first` (16).
 - O holdout tem exatamente 200 itens, fixos após a preparação; o conjunto de
   ajuste é um prefixo do pool restante, recortado pelo `fit_count` selecionado.
@@ -66,6 +68,11 @@ Isso cobre os 512 tokens de cada exemplo em quatro observações que cabem em
 memória. Essa alternativa muda a interpretação: ela aumenta a cobertura de
 tokens, mas não mede uma Jacobiana com 512 tokens simultaneamente no contexto.
 Essa diferença deve permanecer explícita na comparação com a lente original.
+
+Antes de adotar as janelas, o perfil faz uma tentativa intermediária com 256
+tokens integrais. Se o probe também exceder a memória ou não encontrar um
+`fit_count` dentro de 12 horas, a execução será encerrada e o próximo perfil
+usará 128 tokens.
 
 O valor escolhido fica gravado no checkpoint remoto (`fit_count`, `n_done`,
 `next_idx`, somas de Jacobiano por camada fonte). A comparação v2 versus v1 no
