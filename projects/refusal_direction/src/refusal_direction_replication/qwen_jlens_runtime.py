@@ -7,6 +7,7 @@ reimplementing Jacobian math.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -41,7 +42,9 @@ from .qwen_jlens import (
     QWEN_REVISION,
     SKIP_FIRST,
     SOURCE_DOSE_RUN_ID,
+    V2_FINAL_LENS_FILENAME,
     DimBatchOOMError,
+    JLensCorpus,
     assert_jlens_contract,
     build_codesearchnet_corpus,
     compact_corpus_records,
@@ -54,6 +57,8 @@ from .qwen_jlens import (
     project_fit_duration,
     rank_one_based,
     require_finite_logits,
+    select_fit_count,
+    slice_v2_corpus,
     summarize_holdout_metrics,
     valid_token_positions,
     validate_checkpoint_identity,
@@ -142,12 +147,20 @@ def resolve_jlens_run_id(
     *,
     requested: str | None,
     checkpoint_path: Path,
+    v2: bool = False,
 ) -> str:
     if requested:
         return requested
     if checkpoint_path.is_file():
         payload = load_fit_checkpoint(checkpoint_path)
-        validate_checkpoint_structure(payload)
+        if v2:
+            if "fit_count" not in payload:
+                raise ValueError(
+                    "stale checkpoint fit_count: v2 checkpoint has no selected fit count"
+                )
+            validate_checkpoint_structure(payload, fit_count=int(payload["fit_count"]))
+        else:
+            validate_checkpoint_structure(payload)
         existing = payload.get("run_id")
         if existing:
             return str(existing)
@@ -169,6 +182,7 @@ def reconcile_jlens_resume(
     *,
     n_done: int,
     dim_batch: int,
+    fit_total: int = FIT_COUNT,
 ) -> dict[str, Any]:
     events = [
         item for item in _read_store_events(store) if item.get("run_id") == store.run_id
@@ -202,12 +216,12 @@ def reconcile_jlens_resume(
     if lagged_status:
         extra = {
             "fit_completed_units": int(n_done),
-            "fit_total_units": FIT_COUNT,
+            "fit_total_units": int(fit_total),
         }
         if status is None:
             store.initialize(
                 stage="fit",
-                total_units=FIT_COUNT,
+                total_units=int(fit_total),
                 completed_units=int(n_done),
                 extra=extra,
             )
@@ -215,7 +229,7 @@ def reconcile_jlens_resume(
         elif status.get("state") in MUTABLE_STATES:
             store.update_progress(
                 completed_units=int(n_done),
-                total_units=FIT_COUNT,
+                total_units=int(fit_total),
                 extra=extra,
             )
     for index in missing_checkpoints:
@@ -227,7 +241,7 @@ def reconcile_jlens_resume(
                 "n_done": index,
                 "next_idx": index,
                 "completed_units": index,
-                "total_units": FIT_COUNT,
+                "total_units": int(fit_total),
                 "recovered": True,
             }
         )
@@ -297,6 +311,23 @@ def _zero_sums(source_layers: Sequence[int], d_model: int) -> dict[int, torch.Te
     }
 
 
+def _select_v2_corpus(
+    pool: JLensCorpus,
+    *,
+    fit_count: int,
+    max_fit_count: int,
+    candidates: Sequence[int],
+) -> JLensCorpus:
+    """Slice the pool to the selected fit count, keeping pool scan metadata."""
+    split = slice_v2_corpus(
+        pool,
+        fit_count=fit_count,
+        max_fit_count=max_fit_count,
+        candidates=candidates,
+    )
+    return dataclasses.replace(pool, fit=split.fit, holdout=split.holdout)
+
+
 def _write_raw_corpus(path: Path, corpus: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -347,6 +378,8 @@ def build_jlens_evaluation(
     source_dose_run_id: str,
     source_dose_status: str,
     selected_dim_batch: int | None = None,
+    n_fit: int | None = FIT_COUNT,
+    n_holdout: int | None = HOLDOUT_COUNT,
     abort_gate: str | None = None,
     abort_reason: str | None = None,
     message: str | None = None,
@@ -372,8 +405,8 @@ def build_jlens_evaluation(
         "dataset_revision": DATASET_REVISION,
         "source_dose_run_id": source_dose_run_id,
         "source_dose_status": source_dose_status,
-        "n_fit": FIT_COUNT,
-        "n_holdout": HOLDOUT_COUNT,
+        "n_fit": n_fit,
+        "n_holdout": n_holdout,
     }
     if selected_dim_batch is not None:
         payload["selected_dim_batch"] = selected_dim_batch
@@ -484,11 +517,13 @@ def run_qwen_jlens(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     source_dose = require_source_dose_pass(root, config)
     checkpoint_path = artifacts_dir / CHECKPOINT_FILENAME
-    lens_path = artifacts_dir / FINAL_LENS_FILENAME
+    is_v2 = "fit_count_candidates" in config
+    lens_path = artifacts_dir / (V2_FINAL_LENS_FILENAME if is_v2 else FINAL_LENS_FILENAME)
     resolved_run_id = resolve_jlens_run_id(
         artifacts_dir,
         requested=run_id,
         checkpoint_path=checkpoint_path,
+        v2=is_v2,
     )
     commit = implementation_commit_hash()
     store = RunProgressStore(
@@ -509,6 +544,12 @@ def run_qwen_jlens(
     tokenizer: Any = None
     bound: Any = None
     selected_dim_batch: int | None = None
+    # Counts reported in evaluations. v1 keeps its fixed 100/20 contract; v2
+    # reports only a selected fit count (None until the probe selects one).
+    report_fit: int | None = None if is_v2 else FIT_COUNT
+    report_holdout: int | None = (
+        int(config["holdout_count"]) if is_v2 else HOLDOUT_COUNT
+    )
 
     def release_loaded() -> None:
         nonlocal model, tokenizer, bound
@@ -564,7 +605,8 @@ def run_qwen_jlens(
 
     try:
         contract()
-        enter_stage("prepare", FIT_COUNT)
+        # v2 sizes stages from the corpus pool until the probe selects a count.
+        enter_stage("prepare", int(config["max_fit_count"]) if is_v2 else FIT_COUNT)
         _, tokenizer = ensure_model()
         provenance["resolved_model_revision"] = resolved_revision()
         exclusion = load_exclusion_hashes(
@@ -572,46 +614,96 @@ def run_qwen_jlens(
             if config.get("exclusion_hashes_path")
             else None
         )
-        corpus = build_codesearchnet_corpus(
-            rows_fn(),
-            tokenizer=tokenizer,
-            fit_count=int(config.get("fit_count", FIT_COUNT)),
-            holdout_count=int(config.get("holdout_count", HOLDOUT_COUNT)),
-            min_tokens=int(
-                config.get("min_tokens_before_truncation", MIN_TOKENS_BEFORE_TRUNCATION)
-            ),
-            dataset_revision=str(config.get("dataset_revision", DATASET_REVISION)),
-            exclusion_hashes=exclusion.hashes,
-            exclusions_available=exclusion.available,
-        )
-        _write_raw_corpus(artifacts_dir / "corpus.jsonl", corpus)
-        compact = compact_corpus_records(corpus, exclusion=exclusion)
-        compact["config_hash"] = hashed_config
-        _write_compact(
-            results_dir / "00_jlens_prepare.json",
-            experiment="jlens_prepare",
-            config=config,
-            results=compact,
-            provenance=provenance,
-        )
-        digest = corpus_hash(corpus)
-        identity = {
-            "source_layers": source_layers,
-            "target_layer": target_layer,
-            "skip_first": skip_first,
-            "corpus_hash": digest,
-            "config_hash": hashed_config,
-            "model_revision": provenance["resolved_model_revision"],
-            "implementation_commit": commit,
-            "run_id": resolved_run_id,
-        }
+        if is_v2:
+            # One pool at the maximum fit count; the holdout stays fixed no
+            # matter which candidate the probe later selects.
+            corpus = build_codesearchnet_corpus(
+                rows_fn(),
+                tokenizer=tokenizer,
+                fit_count=int(config["max_fit_count"]),
+                holdout_count=int(config["holdout_count"]),
+                min_tokens=int(config["min_tokens_before_truncation"]),
+                dataset_revision=str(config.get("dataset_revision", DATASET_REVISION)),
+                exclusion_hashes=exclusion.hashes,
+                exclusions_available=exclusion.available,
+            )
+        else:
+            corpus = build_codesearchnet_corpus(
+                rows_fn(),
+                tokenizer=tokenizer,
+                fit_count=int(config.get("fit_count", FIT_COUNT)),
+                holdout_count=int(config.get("holdout_count", HOLDOUT_COUNT)),
+                min_tokens=int(
+                    config.get(
+                        "min_tokens_before_truncation", MIN_TOKENS_BEFORE_TRUNCATION
+                    )
+                ),
+                dataset_revision=str(config.get("dataset_revision", DATASET_REVISION)),
+                exclusion_hashes=exclusion.hashes,
+                exclusions_available=exclusion.available,
+            )
+
+        def write_prepare(corpus_obj: Any) -> str:
+            _write_raw_corpus(artifacts_dir / "corpus.jsonl", corpus_obj)
+            compact = compact_corpus_records(corpus_obj, exclusion=exclusion)
+            compact["config_hash"] = hashed_config
+            _write_compact(
+                results_dir / "00_jlens_prepare.json",
+                experiment="jlens_prepare",
+                config=config,
+                results=compact,
+                provenance=provenance,
+            )
+            return corpus_hash(corpus_obj)
+
+        def make_identity(corpus_digest: str) -> dict[str, Any]:
+            return {
+                "source_layers": source_layers,
+                "target_layer": target_layer,
+                "skip_first": skip_first,
+                "corpus_hash": corpus_digest,
+                "config_hash": hashed_config,
+                "model_revision": provenance["resolved_model_revision"],
+                "implementation_commit": commit,
+                "run_id": resolved_run_id,
+            }
+
+        loaded: dict[str, Any] | None = None
+        if is_v2:
+            pool = corpus
+            v2_candidates = [int(value) for value in config["fit_count_candidates"]]
+            v2_max_fit = int(config["max_fit_count"])
+            if checkpoint_path.is_file():
+                # The selected count is frozen by the checkpoint: resume never
+                # re-probes or re-selects.
+                loaded = load_fit_checkpoint(checkpoint_path)
+                if "fit_count" not in loaded:
+                    raise ValueError(
+                        "stale checkpoint fit_count: v2 checkpoint has no selected fit count"
+                    )
+                corpus = _select_v2_corpus(
+                    pool,
+                    fit_count=int(loaded["fit_count"]),
+                    max_fit_count=v2_max_fit,
+                    candidates=v2_candidates,
+                )
+                report_fit = len(corpus.fit)
+                digest = write_prepare(corpus)
+                identity = make_identity(digest)
+            else:
+                digest = ""
+                identity = {}
+        else:
+            digest = write_prepare(corpus)
+            identity = make_identity(digest)
 
         resumed = False
         jacobian_sum = _zero_sums(source_layers, d_model)
         n_done = 0
         next_idx = 0
         if checkpoint_path.is_file():
-            loaded = load_fit_checkpoint(checkpoint_path)
+            if loaded is None:
+                loaded = load_fit_checkpoint(checkpoint_path)
             validate_checkpoint_identity(loaded, **identity)
             validate_checkpoint_payload(
                 loaded,
@@ -631,11 +723,178 @@ def run_qwen_jlens(
                 store,
                 n_done=n_done,
                 dim_batch=selected_dim_batch,
+                fit_total=len(corpus.fit),
             )
 
-        if not resumed:
-            enter_stage("probe", FIT_COUNT)
-            store.update_progress(completed_units=0, total_units=FIT_COUNT)
+        if not resumed and is_v2:
+            probe_total = len(pool.fit)
+            enter_stage("probe", probe_total)
+            store.update_progress(completed_units=0, total_units=probe_total)
+            hf_model, tokenizer = ensure_model()
+            bound = wrap(hf_model, tokenizer)
+            probe_prompt = pool.fit[0].fit_text
+            limit_seconds = int(float(config["max_projected_hours"]) * 3600)
+            probe_order = list(
+                config.get("dim_batch_probe_order", DIM_BATCH_PROBE_ORDER)
+            )
+
+            def v2_probe_runner(dim_batch: int) -> None:
+                jacobian_fn(
+                    bound,
+                    probe_prompt,
+                    source_layers,
+                    target_layer=target_layer,
+                    dim_batch=dim_batch,
+                    max_seq_len=max_seq_len,
+                    skip_first=skip_first,
+                )
+
+            def abort_v2(
+                *,
+                gate: str,
+                reason: str,
+                stage_dim_batch: int | None,
+            ) -> dict[str, Any]:
+                evaluation = build_jlens_evaluation(
+                    status=STATUS_ABORTED,
+                    operational_success=True,
+                    run_id=resolved_run_id,
+                    implementation_commit=commit,
+                    model_revision=provenance["resolved_model_revision"],
+                    source_dose_run_id=source_dose["run_id"],
+                    source_dose_status=STATUS_PASS,
+                    selected_dim_batch=stage_dim_batch,
+                    n_fit=None,
+                    n_holdout=report_holdout,
+                    abort_gate=gate,
+                    abort_reason=reason,
+                    stage="probe",
+                    corpus_hash=pool_digest,
+                    config_hash=hashed_config,
+                )
+                _write_evaluation(results_dir, evaluation)
+                _write_manifest(
+                    results_dir,
+                    config=config,
+                    provenance=provenance,
+                    status=STATUS_ABORTED,
+                    files=[
+                        "00_jlens_prepare.json",
+                        "01_jlens_probe.json",
+                        "jlens_evaluation.json",
+                        "execution_manifest.json",
+                    ],
+                )
+                store.abort(gate=gate, reason=reason)
+                return evaluation
+
+            # Aborts before selection describe the full candidate pool.
+            pool_digest = write_prepare(pool)
+            try:
+                probe = probe_dim_batch(
+                    v2_probe_runner,
+                    order=tuple(probe_order),
+                    clock=probe_clock or clock,
+                )
+            except DimBatchOOMError as exc:
+                attempts = list(exc.attempts)
+                wall_seconds = sum(
+                    float(item.get("wall_seconds") or 0) for item in attempts
+                )
+                projection = project_fit_duration(
+                    probe_seconds=wall_seconds,
+                    n_prompts=min(v2_candidates),
+                    limit_seconds=limit_seconds,
+                )
+                _write_compact(
+                    results_dir / "01_jlens_probe.json",
+                    experiment="jlens_probe",
+                    config=config,
+                    results={
+                        "probe_order": probe_order,
+                        "attempts": attempts,
+                        "selected_dim_batch": None,
+                        "fit_count_candidates": v2_candidates,
+                        "selected_fit_count": None,
+                        "max_seq_len": max_seq_len,
+                        "wall_seconds": wall_seconds,
+                        "projected_seconds": projection.projected_seconds,
+                        "projected_limit_seconds": projection.limit_seconds,
+                        "exceeds_limit": projection.exceeds_limit,
+                    },
+                    provenance=provenance,
+                )
+                return abort_v2(
+                    gate="dim_batch_oom",
+                    reason="dim_batch 8 OOMed",
+                    stage_dim_batch=None,
+                )
+            selected_dim_batch = probe.selected
+            minimum = project_fit_duration(
+                probe_seconds=probe.wall_seconds,
+                n_prompts=min(v2_candidates),
+                limit_seconds=limit_seconds,
+            )
+            selected_fit_count: int | None = None
+            projection = minimum
+            if not minimum.exceeds_limit:
+                projection = select_fit_count(
+                    probe_seconds=probe.wall_seconds,
+                    candidates=v2_candidates,
+                    limit_seconds=limit_seconds,
+                )
+                selected_fit_count = int(projection.n_prompts)
+            store.append_public_event(
+                {
+                    "event": "probe_choice",
+                    "stage": "probe",
+                    "state": "running",
+                    "dim_batch": selected_dim_batch,
+                    "fit_count": selected_fit_count,
+                    "attempts": list(probe.attempts),
+                    "wall_seconds": probe.wall_seconds,
+                }
+            )
+            _write_compact(
+                results_dir / "01_jlens_probe.json",
+                experiment="jlens_probe",
+                config=config,
+                results={
+                    "probe_order": probe_order,
+                    "attempts": list(probe.attempts),
+                    "selected_dim_batch": selected_dim_batch,
+                    "fit_count_candidates": v2_candidates,
+                    "selected_fit_count": selected_fit_count,
+                    "max_seq_len": max_seq_len,
+                    "wall_seconds": probe.wall_seconds,
+                    "projected_seconds": projection.projected_seconds,
+                    "projected_limit_seconds": projection.limit_seconds,
+                    "exceeds_limit": projection.exceeds_limit,
+                },
+                provenance=provenance,
+            )
+            if selected_fit_count is None:
+                return abort_v2(
+                    gate="projected_runtime",
+                    reason=(
+                        "projected fit duration of the minimum candidate "
+                        f"({min(v2_candidates)} prompts) exceeds {limit_seconds}s: "
+                        f"{projection.projected_seconds:.1f}s"
+                    ),
+                    stage_dim_batch=selected_dim_batch,
+                )
+            corpus = _select_v2_corpus(
+                pool,
+                fit_count=selected_fit_count,
+                max_fit_count=v2_max_fit,
+                candidates=v2_candidates,
+            )
+            report_fit = len(corpus.fit)
+            digest = write_prepare(corpus)
+            identity = make_identity(digest)
+        elif not resumed:
+            enter_stage("probe", len(corpus.fit))
+            store.update_progress(completed_units=0, total_units=len(corpus.fit))
             hf_model, tokenizer = ensure_model()
             bound = wrap(hf_model, tokenizer)
             probe_prompt = corpus.fit[0].fit_text
@@ -789,22 +1048,24 @@ def run_qwen_jlens(
         if bound is None:
             hf_model, tokenizer = ensure_model()
             bound = wrap(hf_model, tokenizer)
+        fit_total = len(corpus.fit)
+        holdout_total = len(corpus.holdout)
         enter_stage(
             "fit",
-            FIT_COUNT,
+            fit_total,
             completed_units=n_done,
             extra={
                 "fit_completed_units": n_done,
-                "fit_total_units": FIT_COUNT,
+                "fit_total_units": fit_total,
             },
         )
         if n_done:
             store.update_progress(
                 completed_units=n_done,
-                total_units=FIT_COUNT,
+                total_units=fit_total,
                 extra={
                     "fit_completed_units": n_done,
-                    "fit_total_units": FIT_COUNT,
+                    "fit_total_units": fit_total,
                 },
             )
         for prompt_idx, item in enumerate(corpus.fit):
@@ -829,14 +1090,15 @@ def run_qwen_jlens(
                 n_done=n_done,
                 next_idx=next_idx,
                 dim_batch=int(selected_dim_batch),
+                fit_count=fit_total,
                 **identity,
             )
             store.update_progress(
                 completed_units=n_done,
-                total_units=FIT_COUNT,
+                total_units=fit_total,
                 extra={
                     "fit_completed_units": n_done,
-                    "fit_total_units": FIT_COUNT,
+                    "fit_total_units": fit_total,
                 },
             )
             store.append_public_event(
@@ -847,7 +1109,7 @@ def run_qwen_jlens(
                     "next_idx": next_idx,
                     "n_done": n_done,
                     "completed_units": n_done,
-                    "total_units": FIT_COUNT,
+                    "total_units": fit_total,
                 }
             )
         if n_done != len(corpus.fit):
@@ -869,27 +1131,31 @@ def run_qwen_jlens(
         tmp_lens.replace(lens_path)
         lens_digest = sha256_file(lens_path)
         lens_bytes = lens_path.stat().st_size
+        fit_results: dict[str, Any] = {
+            "n_done": n_done,
+            "selected_dim_batch": selected_dim_batch,
+            "checkpoint": str(Path(config["artifacts_dir"]) / CHECKPOINT_FILENAME),
+            "lens": str(Path(config["artifacts_dir"]) / lens_path.name),
+            "source_layers": source_layers,
+            "target_layer": target_layer,
+            "skip_first": skip_first,
+            "corpus_hash": digest,
+            "config_hash": hashed_config,
+            "lens_sha256": lens_digest,
+            "lens_bytes": lens_bytes,
+            "resolved_model_revision": provenance["resolved_model_revision"],
+            "jlens_upstream_commit": provenance["jlens_upstream_commit"],
+            "implementation_commit": commit,
+            "run_id": resolved_run_id,
+        }
+        if is_v2:
+            fit_results["n_fit"] = fit_total
+            fit_results["n_holdout"] = holdout_total
         _write_compact(
             results_dir / "02_jlens_fit.json",
             experiment="jlens_fit",
             config=config,
-            results={
-                "n_done": n_done,
-                "selected_dim_batch": selected_dim_batch,
-                "checkpoint": str(Path(config["artifacts_dir"]) / CHECKPOINT_FILENAME),
-                "lens": str(Path(config["artifacts_dir"]) / FINAL_LENS_FILENAME),
-                "source_layers": source_layers,
-                "target_layer": target_layer,
-                "skip_first": skip_first,
-                "corpus_hash": digest,
-                "config_hash": hashed_config,
-                "lens_sha256": lens_digest,
-                "lens_bytes": lens_bytes,
-                "resolved_model_revision": provenance["resolved_model_revision"],
-                "jlens_upstream_commit": provenance["jlens_upstream_commit"],
-                "implementation_commit": commit,
-                "run_id": resolved_run_id,
-            },
+            results=fit_results,
             provenance=provenance,
         )
         loaded_lens = lens.load(str(lens_path))
@@ -901,10 +1167,10 @@ def run_qwen_jlens(
         )
         enter_stage(
             "holdout",
-            HOLDOUT_COUNT,
+            holdout_total,
             extra={
-                "fit_completed_units": FIT_COUNT,
-                "fit_total_units": FIT_COUNT,
+                "fit_completed_units": fit_total,
+                "fit_total_units": fit_total,
             },
         )
         records = run_holdout_readout(
@@ -933,6 +1199,8 @@ def run_qwen_jlens(
             source_dose_run_id=source_dose["run_id"],
             source_dose_status=STATUS_PASS,
             selected_dim_batch=selected_dim_batch,
+            n_fit=fit_total,
+            n_holdout=holdout_total,
             lens_sha256=lens_digest,
             lens_bytes=lens_bytes,
             corpus_hash=digest,
@@ -976,6 +1244,8 @@ def run_qwen_jlens(
             source_dose_status=str(source_dose.get("status", STATUS_PASS))
             if "source_dose" in locals()
             else STATUS_PASS,
+            n_fit=report_fit,
+            n_holdout=report_holdout,
             message=message,
             exception_category=category,
             error_code=error_code,
