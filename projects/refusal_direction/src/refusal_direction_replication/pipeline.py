@@ -308,6 +308,7 @@ JLENS_PROFILE = "qwen25_coder_7b_jlens.json"
 JLENS_V2_PROFILE = "qwen25_coder_7b_jlens_v2.json"
 CODE_EVAL_PROFILE = "qwen25_coder_7b_code_eval.json"
 LAB_PROFILE = "qwen25_coder_7b_lab.json"
+CAUSAL_JLENS_PROFILE = "qwen25_coder_7b_causal_jlens.json"
 REQUIRED_NON_GEMMA_FIELDS = (
     "results_dir",
     "artifacts_dir",
@@ -331,6 +332,7 @@ def validate_profile_config(config: dict, *, profile: str) -> None:
         JLENS_V2_PROFILE,
         CODE_EVAL_PROFILE,
         LAB_PROFILE,
+        CAUSAL_JLENS_PROFILE,
     }:
         return
     missing = [
