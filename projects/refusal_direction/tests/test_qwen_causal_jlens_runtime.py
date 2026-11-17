@@ -871,6 +871,7 @@ def _stamp_canonical_source_manifests(root: Path) -> None:
         candidate = purple_root / relative
         if candidate.is_file():
             identity["sha256"] = sha256_file(candidate)
+            identity["bytes"] = candidate.stat().st_size
         source_files[dataset] = identity
     results["source_files"] = source_files
     prepare_payload["results"] = results

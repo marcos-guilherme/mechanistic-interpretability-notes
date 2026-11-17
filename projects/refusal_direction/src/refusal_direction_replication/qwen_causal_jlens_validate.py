@@ -127,7 +127,7 @@ PREPARE_RESULT_KEYS = frozenset({*DATASETS, "source_files"})
 DATASET_BLOCK_KEYS = frozenset(
     {"dataset", "example_ids", "content_hashes", "source_indices", "selection_size"}
 )
-SOURCE_FILE_REQUIRED = frozenset({"repository", "revision", "relative_path"})
+SOURCE_FILE_REQUIRED = frozenset({"repository", "revision", "relative_path", "bytes"})
 SOURCE_FILE_OPTIONAL = frozenset({"sha256"})
 PILOT_RESULT_KEYS = frozenset(
     {
@@ -455,6 +455,11 @@ def _check_result_schemas(
             raise ValueError(f"unexpected key in {dataset} source identity: {sorted(extra)[0]}")
         if missing:
             raise ValueError(f"missing key in {dataset} source identity: {sorted(missing)[0]}")
+        stored_bytes = _strict_int(identity.get("bytes"), "source identity bytes")
+        _require(
+            stored_bytes >= 0,
+            "source identity bytes must be a nonnegative integer",
+        )
     _check_exact_keys(
         _results_of(payloads[STAGE_FILES["pilot"]], STAGE_FILES["pilot"]),
         set(PILOT_RESULT_KEYS),
@@ -900,6 +905,18 @@ def _check_ids_and_matrix(
             == frozen_identity.get("relative_path")
             == config[relative_key],
             f"{dataset} source relative_path drifted from the frozen source prepare",
+        )
+        stored_bytes = _strict_int(identity.get("bytes"), "source identity bytes")
+        frozen_bytes = _strict_int(
+            frozen_identity.get("bytes"), "source identity bytes"
+        )
+        _require(
+            stored_bytes >= 0 and frozen_bytes >= 0,
+            "source identity bytes must be a nonnegative integer",
+        )
+        _require(
+            stored_bytes == frozen_bytes,
+            f"{dataset} source identity bytes drifted from the frozen source prepare",
         )
         if frozen_identity.get("sha256") is not None:
             _require(

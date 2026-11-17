@@ -613,6 +613,22 @@ def _mutate(root: Path, mutation: str) -> None:
         rows[0]["refusal"] = 1
         _write_jsonl(path, rows)
         return
+    if mutation == "source_identity_bytes_drift":
+        _rewrite_json(
+            _res(root, "00_prepare.json"),
+            lambda payload: payload["results"]["source_files"]["mitre"].update(
+                bytes=payload["results"]["source_files"]["mitre"]["bytes"] + 1
+            ),
+        )
+        return
+    if mutation == "source_identity_bytes_non_integer":
+        _rewrite_json(
+            _res(root, "00_prepare.json"),
+            lambda payload: payload["results"]["source_files"]["mitre"].update(
+                bytes=3.5
+            ),
+        )
+        return
     raise AssertionError(mutation)
 
 
@@ -640,6 +656,18 @@ def test_validator_accepts_complete_recomputable_tree(tmp_path: Path) -> None:
     assert sample["resamples"] == 10_000
     assert sample["seed"] == 2028
     assert not compact_contains_text_leak(analysis)
+    prepare = json.loads(_res(tmp_path, "00_prepare.json").read_text(encoding="utf-8"))
+    source_prepare = json.loads(
+        (tmp_path / "results" / "qwen25_coder_7b_code_eval" / "00_prepare.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for dataset in DATASETS:
+        identity = prepare["results"]["source_files"][dataset]
+        frozen = source_prepare["results"]["source_files"][dataset]
+        assert isinstance(identity["bytes"], int) and not isinstance(identity["bytes"], bool)
+        assert identity["bytes"] >= 0
+        assert identity["bytes"] == frozen["bytes"]
 
 
 @pytest.mark.parametrize(
@@ -767,6 +795,36 @@ def test_fixture_mode_rejects_non_allowlisted_profile_fields(tmp_path: Path) -> 
     ],
 )
 def test_validator_rejects_rereview_corruption(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    _seed_complete_tree(tmp_path)
+    _mutate(tmp_path, mutation)
+    with pytest.raises(ValueError, match=message):
+        validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)
+
+
+def test_validator_accepts_production_source_identity_bytes(tmp_path: Path) -> None:
+    _seed_complete_tree(tmp_path)
+    prepare = json.loads(_res(tmp_path, "00_prepare.json").read_text(encoding="utf-8"))
+    for dataset in DATASETS:
+        identity = prepare["results"]["source_files"][dataset]
+        assert set(identity) >= {"repository", "revision", "relative_path", "bytes"}
+        assert isinstance(identity["bytes"], int) and not isinstance(
+            identity["bytes"], bool
+        )
+        assert identity["bytes"] >= 0
+    checks = validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)
+    assert checks and all(checks.values())
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("source_identity_bytes_drift", "bytes drifted"),
+        ("source_identity_bytes_non_integer", "strict integer"),
+    ],
+)
+def test_validator_rejects_source_identity_bytes_corruption(
     tmp_path: Path, mutation: str, message: str
 ) -> None:
     _seed_complete_tree(tmp_path)
