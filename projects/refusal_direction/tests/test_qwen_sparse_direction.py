@@ -70,6 +70,31 @@ def test_sparse_solver_recovers_known_signed_components() -> None:
     assert result.coefficients[1] < 0
 
 
+def test_sparse_solver_detaches_autograd_inputs_and_outputs() -> None:
+    decoder = torch.eye(2, requires_grad=True)
+    direction = torch.tensor([1.0, -1.0], requires_grad=True)
+
+    result = solve_elastic_net(
+        decoder,
+        direction,
+        l1=0.0,
+        l2=0.0,
+        steps=50,
+    )
+
+    assert decoder.grad is None
+    assert direction.grad is None
+    for tensor in (
+        result.coefficients,
+        result.decoder_columns,
+        result.reconstruction,
+        result.target,
+    ):
+        assert tensor is not None
+        assert not tensor.requires_grad
+        assert tensor.grad_fn is None
+
+
 def test_elastic_net_rejects_nonfinite_inputs_and_objective() -> None:
     with pytest.raises(ValueError, match="finite"):
         elastic_net_objective(
@@ -125,6 +150,66 @@ def test_filter_removes_only_defensive_components_and_rescales() -> None:
     assert filtered.kind == "sparse_filtered"
     assert filtered.reconstruction.norm().item() == pytest.approx(4.0)
     assert filtered.original_norm == pytest.approx(10.0**0.5)
+
+
+@pytest.mark.parametrize(
+    "associations",
+    (
+        (association(0, "unresolved"),),
+        (
+            association(0, "unresolved"),
+            association(1, "unresolved"),
+            association(2, "unresolved"),
+        ),
+        (
+            association(0, "unresolved"),
+            association(0, "offensive_associated"),
+        ),
+        (
+            association(0, "invalid_label"),
+            association(1, "unresolved"),
+        ),
+    ),
+)
+def test_filter_requires_association_bijection_and_valid_labels(
+    associations: tuple[FeatureAssociation, ...],
+) -> None:
+    candidate = candidate_with_indices([0, 1], [1.0, 2.0])
+
+    with pytest.raises(ValueError, match="association"):
+        filter_direction(candidate, associations)
+
+
+def test_filter_rejects_removing_every_feature() -> None:
+    candidate = candidate_with_indices([0, 1], [1.0, 2.0])
+
+    with pytest.raises(ValueError, match="all features"):
+        filter_direction(
+            candidate,
+            (
+                association(0, "defensive_associated"),
+                association(1, "defensive_associated"),
+            ),
+        )
+
+
+def test_candidate_rejects_zero_or_nonpositive_norms() -> None:
+    with pytest.raises(ValueError, match="target_norm"):
+        DirectionCandidate.from_components(
+            feature_indices=[0],
+            coefficients=torch.ones(1),
+            decoder_columns=torch.ones(2, 1),
+            target_norm=0.0,
+            kind="sparse_unfiltered",
+        )
+    with pytest.raises(ValueError, match="original norm"):
+        DirectionCandidate.from_components(
+            feature_indices=[0],
+            coefficients=torch.zeros(1),
+            decoder_columns=torch.ones(2, 1),
+            target_norm=1.0,
+            kind="sparse_unfiltered",
+        )
 
 
 def test_random_control_uses_exact_local_seed_semantics() -> None:
@@ -212,6 +297,28 @@ def test_association_uses_last_token_paired_differences_and_seed() -> None:
         )
         for item in first
     )
+
+
+def test_association_sign_fraction_uses_bootstrap_draws() -> None:
+    rows = (
+        PairedFeatureRow("p1", "offensive", 7, (0.0,), 1, 0.1, 0.2),
+        PairedFeatureRow("p1", "defensive", 7, (1.0,), 1, 0.1, 0.2),
+        PairedFeatureRow("p2", "offensive", 7, (1.0,), 1, 0.1, 0.2),
+        PairedFeatureRow("p2", "defensive", 7, (0.0,), 1, 0.1, 0.2),
+        PairedFeatureRow("p3", "offensive", 7, (1.0,), 1, 0.1, 0.2),
+        PairedFeatureRow("p3", "defensive", 7, (0.0,), 1, 0.1, 0.2),
+    )
+    rng = random.Random(2029)
+    draws = [
+        sum(rng.choices((-1.0, 1.0, 1.0), k=3)) / 3
+        for _ in range(10_000)
+    ]
+    expected = sum(draw > 0 for draw in draws) / len(draws)
+
+    result = associate_features(rows, [7], seed=2029)[0]
+
+    assert result.positive_fraction == expected
+    assert result.positive_fraction != pytest.approx(2 / 3)
 
 
 def test_top_examples_return_ids_only_with_deterministic_ties() -> None:

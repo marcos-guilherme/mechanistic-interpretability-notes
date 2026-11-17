@@ -15,6 +15,13 @@ from torch.nn import functional as F
 
 _ASSOCIATION_RESAMPLES = 10_000
 _ALLOWED_EXAMPLE_SOURCES = frozenset({"discovery", "unlabeled_corpus"})
+_ASSOCIATION_LABELS = frozenset(
+    {
+        "offensive_associated",
+        "defensive_associated",
+        "unresolved",
+    }
+)
 
 
 def _finite_tensor(value: torch.Tensor, name: str) -> None:
@@ -70,30 +77,46 @@ class DirectionCandidate:
         rescale: bool = False,
     ) -> DirectionCandidate:
         indices = tuple(int(index) for index in feature_indices)
-        compact_coefficients = coefficients.float().reshape(-1)
-        columns = decoder_columns.float()
+        compact_coefficients = coefficients.detach().float().reshape(-1)
+        columns = decoder_columns.detach().float()
+        if not indices:
+            raise ValueError("feature_indices must be nonempty")
         if len(indices) != len(set(indices)):
             raise ValueError("feature_indices must be unique")
         if compact_coefficients.shape != (len(indices),):
             raise ValueError("coefficients must match feature_indices")
         if columns.ndim != 2 or columns.shape[1] != len(indices):
             raise ValueError("decoder_columns must be [hidden, features]")
-        if not math.isfinite(target_norm) or target_norm < 0:
-            raise ValueError("target_norm must be finite and nonnegative")
+        if not math.isfinite(target_norm) or target_norm <= 0:
+            raise ValueError("target_norm must be finite and strictly positive")
         _finite_tensor(compact_coefficients, "coefficients")
         _finite_tensor(columns, "decoder_columns")
         reconstruction = columns @ compact_coefficients
         original_norm = float(torch.linalg.vector_norm(reconstruction).item())
-        if rescale and original_norm > 0:
+        if not math.isfinite(original_norm) or original_norm <= 0:
+            raise ValueError("original norm must be finite and strictly positive")
+        if rescale:
             scale = target_norm / original_norm
             compact_coefficients = compact_coefficients * scale
             reconstruction = reconstruction * scale
         target_value: torch.Tensor | None = None
         if target is not None:
-            target_value = target.float().reshape(-1)
+            target_value = target.detach().float().reshape(-1)
             if target_value.shape != reconstruction.shape:
                 raise ValueError("target must match reconstruction")
             _finite_tensor(target_value, "target")
+            actual_target_norm = float(target_value.norm().item())
+            if actual_target_norm <= 0:
+                raise ValueError(
+                    "target norm must be finite and strictly positive"
+                )
+            if not math.isclose(
+                actual_target_norm,
+                target_norm,
+                rel_tol=1e-5,
+                abs_tol=1e-7,
+            ):
+                raise ValueError("target_norm does not match target")
             cosine = (
                 float(
                     F.cosine_similarity(
@@ -101,11 +124,9 @@ class DirectionCandidate:
                         target_value.unsqueeze(0),
                     ).item()
                 )
-                if reconstruction.norm().item() > 0
-                and target_value.norm().item() > 0
-                else 0.0
+                if reconstruction.norm().item() > 0 else 0.0
             )
-            denominator = max(float(target_value.norm().item()), 1e-12)
+            denominator = actual_target_norm
             relative_l2 = float(
                 torch.linalg.vector_norm(reconstruction - target_value).item()
                 / denominator
@@ -121,9 +142,9 @@ class DirectionCandidate:
         return cls(
             kind=kind,
             feature_indices=indices,
-            coefficients=compact_coefficients,
-            decoder_columns=columns,
-            reconstruction=reconstruction,
+            coefficients=compact_coefficients.detach(),
+            decoder_columns=columns.detach(),
+            reconstruction=reconstruction.detach(),
             target_norm=float(target_norm),
             original_norm=original_norm,
             cosine=cosine,
@@ -132,7 +153,7 @@ class DirectionCandidate:
             removed_feature_indices=tuple(
                 int(index) for index in removed_feature_indices
             ),
-            target=target_value,
+            target=target_value.detach() if target_value is not None else None,
             l1=l1,
             l2=l2,
         )
@@ -148,7 +169,7 @@ class DirectionCandidate:
         l1: float | None = None,
         l2: float | None = None,
     ) -> DirectionCandidate:
-        full_coefficients = coefficients.float().reshape(-1)
+        full_coefficients = coefficients.detach().float().reshape(-1)
         selected = torch.nonzero(
             full_coefficients != 0,
             as_tuple=False,
@@ -164,23 +185,27 @@ class DirectionCandidate:
                 device=reconstruction.device,
             )
         else:
-            columns = decoder[:, selected]
+            columns = decoder.detach()[:, selected]
         candidate = cls.from_components(
             feature_indices=selected.tolist(),
             coefficients=full_coefficients[selected],
             decoder_columns=columns,
-            target_norm=float(target.float().reshape(-1).norm().item()),
-            target=target,
+            target_norm=float(
+                target.detach().float().reshape(-1).norm().item()
+            ),
+            target=target.detach(),
             kind="sparse_unfiltered",
             l1=l1,
             l2=l2,
         )
-        torch.testing.assert_close(
+        expected = reconstruction.detach().float().reshape(-1)
+        if not torch.allclose(
             candidate.reconstruction,
-            reconstruction.float().reshape(-1),
+            expected,
             rtol=1e-5,
             atol=1e-6,
-        )
+        ):
+            raise ValueError("reconstruction does not match components")
         return candidate
 
     def restrict_to(
@@ -190,6 +215,10 @@ class DirectionCandidate:
         kind: str,
     ) -> DirectionCandidate:
         keep = tuple(int(index) for index in feature_indices)
+        if not keep:
+            raise ValueError("restricted feature set must be nonempty")
+        if len(keep) != len(set(keep)):
+            raise ValueError("restricted feature set must be unique")
         positions = {index: position for position, index in enumerate(self.feature_indices)}
         if any(index not in positions for index in keep):
             raise ValueError("restricted feature not present in candidate")
@@ -300,6 +329,7 @@ def _elastic_net_objective_value(
     return float(objective.item())
 
 
+@torch.no_grad()
 def solve_elastic_net(
     decoder: torch.Tensor,
     direction: torch.Tensor,
@@ -311,8 +341,8 @@ def solve_elastic_net(
     """Fit signed coefficients with deterministic proximal gradient descent."""
     if steps <= 0:
         raise ValueError("steps must be positive")
-    matrix = decoder.float()
-    target = direction.float().reshape(-1)
+    matrix = decoder.detach().float()
+    target = direction.detach().float().reshape(-1)
     if (
         matrix.ndim != 2
         or matrix.shape[0] != target.numel()
@@ -321,6 +351,8 @@ def solve_elastic_net(
         raise ValueError("decoder and direction shapes do not align")
     _finite_tensor(matrix, "decoder")
     _finite_tensor(target, "direction")
+    if float(target.norm().item()) <= 0:
+        raise ValueError("direction norm must be strictly positive")
     coefficients = torch.zeros(
         matrix.shape[1],
         dtype=torch.float32,
@@ -378,14 +410,15 @@ def solve_elastic_net(
     )
 
 
+@torch.no_grad()
 def fit_direction_grid(
     decoder: torch.Tensor,
     direction: torch.Tensor,
     cardinalities: Sequence[int],
 ) -> tuple[DirectionCandidate, ...]:
     """Fit the frozen regularization grid and select deterministic candidates."""
-    matrix = decoder.float()
-    target = direction.float().reshape(-1)
+    matrix = decoder.detach().float()
+    target = direction.detach().float().reshape(-1)
     if (
         matrix.ndim != 2
         or matrix.shape[0] != target.numel()
@@ -399,6 +432,8 @@ def fit_direction_grid(
         raise ValueError("cardinalities must be within decoder width")
     _finite_tensor(matrix, "decoder")
     _finite_tensor(target, "direction")
+    if float(target.norm().item()) <= 0:
+        raise ValueError("direction norm must be strictly positive")
     l1_max = float(2.0 * (matrix.T @ target).abs().max().item())
     candidates = [
         solve_elastic_net(
@@ -531,9 +566,7 @@ def associate_features(
             for _ in range(_ASSOCIATION_RESAMPLES)
         ]
         ci_lower, ci_upper = _bootstrap_bounds(draws)
-        positive_fraction = sum(value > 0 for value in differences) / len(
-            differences
-        )
+        positive_fraction = sum(value > 0 for value in draws) / len(draws)
         output.append(
             FeatureAssociation(
                 feature_index=int(feature_index),
@@ -597,12 +630,38 @@ def filter_direction(
     candidate: DirectionCandidate,
     associations: Sequence[FeatureAssociation],
 ) -> DirectionCandidate:
+    if (
+        not math.isfinite(candidate.target_norm)
+        or candidate.target_norm <= 0
+        or not math.isfinite(candidate.original_norm)
+        or candidate.original_norm <= 0
+    ):
+        raise ValueError("candidate norms must be finite and strictly positive")
+    reconstruction_norm = float(candidate.reconstruction.norm().item())
+    if not math.isfinite(reconstruction_norm) or reconstruction_norm <= 0:
+        raise ValueError(
+            "candidate reconstruction norm must be strictly positive"
+        )
+    association_indices = tuple(
+        item.feature_index for item in associations
+    )
+    if (
+        len(association_indices) != len(set(association_indices))
+        or set(association_indices) != set(candidate.feature_indices)
+    ):
+        raise ValueError(
+            "association features must bijectively match candidate features"
+        )
+    if any(item.label not in _ASSOCIATION_LABELS for item in associations):
+        raise ValueError("association label is invalid")
     labels = {item.feature_index: item.label for item in associations}
     keep = tuple(
         index
         for index in candidate.feature_indices
         if labels.get(index) != "defensive_associated"
     )
+    if not keep:
+        raise ValueError("filtering removed all features")
     return candidate.restrict_to(keep, kind="sparse_filtered")
 
 
