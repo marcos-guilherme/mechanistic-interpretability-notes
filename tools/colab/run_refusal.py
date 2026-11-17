@@ -852,6 +852,13 @@ def main() -> int:
                 run(upload_command(session, local_path, remote))
         if causal_sources is not None:
             source_direction, source_v1, source_v2 = causal_sources
+            run(
+                exec_command(
+                    session,
+                    PROJECT / "scripts" / "colab_clean_causal_jlens_chunks.py",
+                    timeout=60,
+                )
+            )
             upload_chunked_source(
                 session,
                 source_direction,

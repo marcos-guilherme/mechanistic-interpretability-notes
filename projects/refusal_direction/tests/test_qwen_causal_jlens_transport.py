@@ -24,6 +24,7 @@ from refusal_direction_replication.qwen_colab_transport import (
     REMOTE_CAUSAL_JLENS_DIRECTION_STAGING,
     REMOTE_CAUSAL_JLENS_V1_LENS_STAGING,
     REMOTE_CAUSAL_JLENS_V2_LENS_STAGING,
+    assemble_chunked_file,
     atomic_install_causal_jlens_sources,
     extract_qwen_causal_jlens_archive,
     is_allowed_causal_jlens_fetch_member,
@@ -39,6 +40,7 @@ RUN_SCRIPT = ROOT / "scripts" / "qwen_run_causal_jlens.py"
 STATUS_SCRIPT = ROOT / "scripts" / "qwen_run_causal_jlens_status.py"
 PACK_SCRIPT = ROOT / "scripts" / "colab_pack_qwen_causal_jlens_results.py"
 INSTALL_SCRIPT = ROOT / "scripts" / "colab_install_causal_jlens.py"
+CLEAN_SCRIPT = ROOT / "scripts" / "colab_clean_causal_jlens_chunks.py"
 VALIDATE_SCRIPT = ROOT / "scripts" / "validate_qwen_causal_jlens.py"
 
 CAUSAL_PROFILE = "qwen25-coder-causal-jlens"
@@ -77,6 +79,14 @@ def _installer():
     spec = importlib.util.spec_from_file_location(
         "install_causal_jlens", INSTALL_SCRIPT
     )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_script(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -348,9 +358,7 @@ def test_causal_archive_rejects_links_and_extract_leaves_project_untouched(
     assert not (project / "results").exists()
 
 
-def test_causal_source_triple_installs_atomically_and_rolls_back(
-    tmp_path: Path,
-) -> None:
+def test_causal_source_triple_installs_atomically(tmp_path: Path) -> None:
     project = tmp_path / "project"
     direction, v1, v2 = _seed_causal_sources(project)
     assert require_local_causal_jlens_sources(project) == (direction, v1, v2)
@@ -372,19 +380,88 @@ def test_causal_source_triple_installs_atomically_and_rolls_back(
     assert v1.read_bytes() == b"new-v1"
     assert v2.read_bytes() == b"new-v2"
 
-    staged_direction.write_bytes(b"rollback-direction")
-    staged_v1.write_bytes(b"rollback-v1")
-    staged_v2.unlink()
-    with pytest.raises(FileNotFoundError):
+
+def test_causal_source_triple_rolls_back_after_third_stream_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import refusal_direction_replication.qwen_colab_transport as transport
+
+    project = tmp_path / "project"
+    direction, v1, v2 = _seed_causal_sources(project)
+    original = (direction.read_bytes(), v1.read_bytes(), v2.read_bytes())
+    staged_direction = tmp_path / "direction.pt"
+    staged_v1 = tmp_path / "v1.pt"
+    staged_v2 = tmp_path / "v2.pt"
+    staged_direction.write_bytes(b"new-direction")
+    staged_v1.write_bytes(b"new-v1")
+    staged_v2.write_bytes(b"new-v2")
+
+    real_stream = transport._stream_install_regular_file
+    replaced_before_failure: list[bytes] = []
+
+    def fail_third_stream(**kwargs):
+        destination = kwargs["destination"]
+        if destination.name == V2_LENS_NAME:
+            replaced_before_failure.append(direction.read_bytes())
+            replaced_before_failure.append(v1.read_bytes())
+            raise OSError("disk full")
+        return real_stream(**kwargs)
+
+    monkeypatch.setattr(transport, "_stream_install_regular_file", fail_third_stream)
+    with pytest.raises(OSError, match="disk full"):
         atomic_install_causal_jlens_sources(
             staged_direction=staged_direction,
             staged_v1_lens=staged_v1,
             staged_v2_lens=staged_v2,
             project=project,
         )
-    assert direction.read_bytes() == b"new-direction"
-    assert v1.read_bytes() == b"new-v1"
-    assert v2.read_bytes() == b"new-v2"
+    assert replaced_before_failure == [b"new-direction", b"new-v1"]
+    assert (direction.read_bytes(), v1.read_bytes(), v2.read_bytes()) == original
+    leftovers = [
+        path
+        for path in project.glob("**/*")
+        if ".causal_jlens_sources_backup." in path.name
+        or path.name.startswith(".causal_")
+    ]
+    assert leftovers == []
+
+
+def test_causal_staging_clean_removes_reused_session_leftovers_before_assemble(
+    tmp_path: Path,
+) -> None:
+    cleaner = _load_script(CLEAN_SCRIPT, "clean_causal_jlens_chunks")
+    staging_names = (
+        Path(REMOTE_CAUSAL_JLENS_DIRECTION_STAGING).name,
+        Path(REMOTE_CAUSAL_JLENS_V1_LENS_STAGING).name,
+        Path(REMOTE_CAUSAL_JLENS_V2_LENS_STAGING).name,
+    )
+    destinations = [tmp_path / name for name in staging_names]
+    leftover = b"OLD-SESSION-PART"
+    payload = b"fresh-direction"
+    poisoned, poisoned_manifest = _stage_chunked(
+        tmp_path, destinations[0], payload, chunk_bytes=64
+    )
+    for destination in destinations:
+        destination.write_bytes(b"old-assembled")
+        (tmp_path / f"{destination.name}.part001").write_bytes(leftover)
+        (tmp_path / f"{destination.name}.assembling").write_bytes(leftover)
+    with pytest.raises(ValueError, match="extra"):
+        assemble_chunked_file(
+            poisoned, manifest_path=poisoned_manifest, require_manifest=True
+        )
+
+    cleaner.clean_causal_jlens_chunk_files(*destinations)
+    leftover_names = sorted(path.name for path in tmp_path.glob("causal_jlens_source_*"))
+    assert leftover_names == []
+
+    staged, manifest = _stage_chunked(
+        tmp_path, destinations[0], payload, chunk_bytes=64
+    )
+    assembled = assemble_chunked_file(
+        staged, manifest_path=manifest, require_manifest=True
+    )
+    assert assembled.read_bytes() == payload
 
 
 def test_causal_chunked_install_validates_hash_and_size(
@@ -645,6 +722,28 @@ def test_causal_orchestrator_routes_sync_bootstrap_status_fetch_and_stop(
     )
     module.main()
     uploaded = [item for command in commands for item in command]
+    clean_indexes = [
+        index
+        for index, command in enumerate(commands)
+        if any("colab_clean_causal_jlens_chunks.py" in str(item) for item in command)
+    ]
+    upload_indexes = [
+        index
+        for index, command in enumerate(commands)
+        if any(
+            str(item).startswith(prefix)
+            for prefix in (
+                REMOTE_CAUSAL_JLENS_DIRECTION_STAGING,
+                REMOTE_CAUSAL_JLENS_V1_LENS_STAGING,
+                REMOTE_CAUSAL_JLENS_V2_LENS_STAGING,
+            )
+            for item in command
+        )
+    ]
+    assert clean_indexes, "causal sync must remove stale remote parts before upload"
+    assert upload_indexes
+    assert clean_indexes[0] < upload_indexes[0]
+    assert CLEAN_SCRIPT.is_file()
     assert any(
         str(item).startswith(REMOTE_CAUSAL_JLENS_DIRECTION_STAGING)
         for item in uploaded
