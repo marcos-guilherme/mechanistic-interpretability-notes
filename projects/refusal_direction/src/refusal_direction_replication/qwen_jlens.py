@@ -550,6 +550,7 @@ def write_fit_checkpoint(
     implementation_commit: str,
     run_id: str,
     dim_batch: int,
+    fit_count: int = FIT_COUNT,
 ) -> None:
     payload = {
         "jacobian_sum": {int(layer): tensor for layer, tensor in jacobian_sum.items()},
@@ -564,6 +565,7 @@ def write_fit_checkpoint(
         "implementation_commit": implementation_commit,
         "run_id": run_id,
         "dim_batch": int(dim_batch),
+        "fit_count": int(fit_count),
     }
     _atomic_torch_save(payload, path)
 
@@ -633,8 +635,14 @@ def validate_checkpoint_structure(
     next_idx = int(payload["next_idx"])
     if n_done != next_idx:
         raise ValueError(f"checkpoint n_done {n_done} != next_idx {next_idx}")
-    if not 0 <= n_done <= int(fit_count):
-        raise ValueError(f"checkpoint n_done {n_done} outside 0..{fit_count}")
+    selected_fit_count = int(fit_count)
+    stored_fit_count = int(payload.get("fit_count", FIT_COUNT))
+    if stored_fit_count != selected_fit_count:
+        raise ValueError(
+            f"checkpoint fit_count {stored_fit_count} != selected {selected_fit_count}"
+        )
+    if not 0 <= n_done <= selected_fit_count:
+        raise ValueError(f"checkpoint n_done {n_done} outside 0..{selected_fit_count}")
     if "dim_batch" not in payload:
         raise ValueError("checkpoint is missing dim_batch")
     if int(payload["dim_batch"]) not in DIM_BATCH_PROBE_ORDER:

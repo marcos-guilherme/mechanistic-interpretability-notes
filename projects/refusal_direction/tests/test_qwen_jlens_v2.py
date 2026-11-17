@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import pytest
+import torch
 
 from refusal_direction_replication.pipeline import load_config
 from refusal_direction_replication.qwen_jlens import (
@@ -16,12 +18,47 @@ from refusal_direction_replication.qwen_jlens import (
     V2_HOLDOUT_COUNT,
     V2_MAX_FIT_COUNT,
     V2_MAX_SEQ_LEN,
+    load_fit_checkpoint,
     select_fit_count,
     slice_v2_corpus,
+    validate_checkpoint_structure,
+    write_fit_checkpoint,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+QWEN_REVISION = "c03e6d358207e414f1eca0bb1891e29f1db0e242"
+
+
+def _identity() -> dict[str, Any]:
+    return {
+        "source_layers": [0, 1, 2],
+        "target_layer": 3,
+        "skip_first": 16,
+        "corpus_hash": "a" * 64,
+        "config_hash": "b" * 64,
+        "model_revision": QWEN_REVISION,
+        "implementation_commit": "c" * 40,
+        "run_id": "jlens-run-v2",
+    }
+
+
+def _checkpoint_payload(
+    *,
+    n_done: int,
+    next_idx: int,
+    fit_count: int,
+    dim_batch: int = 8,
+) -> dict[str, Any]:
+    payload = {
+        "jacobian_sum": {0: torch.eye(4)},
+        "n_done": n_done,
+        "next_idx": next_idx,
+        "dim_batch": dim_batch,
+        "fit_count": fit_count,
+        **_identity(),
+    }
+    return payload
 
 
 def test_v2_profile_is_isolated_from_v1_lab_and_code_eval() -> None:
@@ -92,6 +129,34 @@ def test_select_fit_count_rejects_when_minimum_exceeds_limit() -> None:
             candidates=[100, 150],
             limit_seconds=43_200,
         )
+
+
+def test_v2_checkpoint_accepts_progress_above_v1_limit(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.pt"
+    write_fit_checkpoint(
+        path,
+        jacobian_sum={0: torch.eye(4)},
+        n_done=150,
+        next_idx=150,
+        dim_batch=8,
+        fit_count=200,
+        **_identity(),
+    )
+    payload = load_fit_checkpoint(path)
+    validate_checkpoint_structure(payload, fit_count=200)
+    assert payload["fit_count"] == 200
+
+
+def test_v2_checkpoint_rejects_progress_past_selected_fit(tmp_path: Path) -> None:
+    payload = _checkpoint_payload(n_done=201, next_idx=201, fit_count=200)
+    with pytest.raises(ValueError, match="outside 0..200"):
+        validate_checkpoint_structure(payload, fit_count=200)
+
+
+def test_v2_checkpoint_rejects_mismatched_selected_fit_count() -> None:
+    payload = _checkpoint_payload(n_done=50, next_idx=50, fit_count=200)
+    with pytest.raises(ValueError, match="fit_count"):
+        validate_checkpoint_structure(payload, fit_count=150)
 
 
 def test_slice_v2_corpus_keeps_holdout_fixed() -> None:
