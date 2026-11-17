@@ -44,6 +44,29 @@ esgotaram a memória de uma A100 de 80 GB antes do ajuste. Por isso, a ordem foi
 estendida até 1. A mudança reduz o pico de memória sem alterar os exemplos nem
 o cálculo; o custo é processar as dimensões da Jacobiana em mais etapas.
 
+## Resultado do probe na A100
+
+A execução real mostrou que o desenho de contexto integral de 512 tokens não
+cabe no orçamento atual:
+
+- a primeira tentativa encerrou corretamente após `dim_batch` 32, 16 e 8
+  esgotarem os 80 GB da A100;
+- a ordem foi ampliada para 4, 2 e 1 e o probe foi reiniciado;
+- após 61 minutos, nenhuma tentativa adicional havia produzido uma Jacobiana
+  completa nem um checkpoint;
+- a sessão foi encerrada manualmente, e o servidor confirmou que nenhuma GPU
+  permaneceu ativa.
+
+Nenhuma lente v2 foi ajustada nessa execução. O resultado é um diagnóstico de
+inviabilidade do cálculo integral de 512 tokens, não um resultado negativo
+sobre a qualidade da J-lens.
+
+O próximo desenho a avaliar é percorrer cada função em janelas de 128 tokens.
+Isso cobre os 512 tokens de cada exemplo em quatro observações que cabem em
+memória. Essa alternativa muda a interpretação: ela aumenta a cobertura de
+tokens, mas não mede uma Jacobiana com 512 tokens simultaneamente no contexto.
+Essa diferença deve permanecer explícita na comparação com a lente original.
+
 O valor escolhido fica gravado no checkpoint remoto (`fit_count`, `n_done`,
 `next_idx`, somas de Jacobiano por camada fonte). A comparação v2 versus v1 no
 holdout exige os mesmos `example_id` e a lente v1 carregada do caminho
