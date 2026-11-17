@@ -27,6 +27,7 @@ import torch
 from refusal_direction_replication import qwen_jlens_runtime as runtime
 from refusal_direction_replication.qwen_jlens import (
     FIT_COUNT,
+    JLENS_LEAK_KEYS,
     JLENS_V2_PROFILE,
     V2_FINAL_LENS_FILENAME,
     V2_FIT_COUNT_CANDIDATES,
@@ -188,6 +189,28 @@ def test_valid_aborted_preselection_tree_is_accepted(tmp_path: Path) -> None:
     assert all(_validate(tmp_path).values())
 
 
+ABORTED_VIOLATIONS: dict[str, Callable[[Path], None]] = {
+    "extra_checkpoint": lambda root: _art(root, "jlens_fit_checkpoint.pt").write_bytes(b"x"),
+    "final_lens": lambda root: _art(root, V2_FINAL_LENS_FILENAME).write_bytes(b"x"),
+    "compare_file": lambda root: _res(root, "04_jlens_compare.json").write_text(
+        "{}", encoding="utf-8"
+    ),
+    "non_null_n_fit": lambda root: _rewrite_json(
+        _res(root, "jlens_evaluation.json"), lambda p: p.update(n_fit=200)
+    ),
+}
+
+
+@pytest.mark.parametrize("violation", sorted(ABORTED_VIOLATIONS))
+def test_aborted_run_with_post_selection_work_is_rejected(
+    tmp_path: Path, violation: str
+) -> None:
+    _write_tree(tmp_path, "projected_runtime")
+    ABORTED_VIOLATIONS[violation](tmp_path)
+    with pytest.raises(ValueError, match="pre-selection|n_fit null"):
+        _validate(tmp_path)
+
+
 # --------------------------------------------------------------------------
 # Candidate count, holdout count and cross-artifact agreement
 # --------------------------------------------------------------------------
@@ -328,7 +351,13 @@ LEAKS: dict[str, Callable[[Path], None]] = {
     "code_value": lambda root: _edit_results(
         root, "04_jlens_compare.json", lambda r: r.update(note="def f():\n    return 1\n")
     ),
+    "forbidden_key": lambda root: _edit_results(
+        root, "04_jlens_compare.json", lambda r: r.update(fit_text="x")
+    ),
 }
+
+
+assert "fit_text" in JLENS_LEAK_KEYS  # the forbidden-key case uses a real leak key
 
 
 @pytest.mark.parametrize("leak", sorted(LEAKS))
