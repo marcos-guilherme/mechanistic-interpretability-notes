@@ -624,15 +624,21 @@ class DualLensReadout:
             if layers is not None
             else tuple(int(layer) for layer in next(iter(lenses.values())).jacobians)
         )
-        target_device = torch.device(device or "cpu")
+        self._layers = requested
         self._jacobians: dict[str, dict[int, torch.Tensor]] = {}
+        self.to_device(device or "cpu")
+
+    def to_device(self, device: torch.device | str) -> None:
+        target_device = torch.device(device)
         for version, lens in self._lenses.items():
-            missing = [layer for layer in requested if layer not in lens.jacobians]
+            missing = [
+                layer for layer in self._layers if layer not in lens.jacobians
+            ]
             if missing:
                 raise ValueError(f"{version} lens is missing layers {missing}")
             prepared = {
                 layer: lens.jacobians[layer].to(target_device)
-                for layer in requested
+                for layer in self._layers
             }
             lens.jacobians = prepared
             self._jacobians[version] = prepared
@@ -1366,7 +1372,7 @@ def _default_load_readout(
         lenses={"v1": v1, "v2": v2},
         bound_model=bound,
         layers=tuple(int(layer) for layer in config["readout_layers"]),
-        device=_model_device(model),
+        device="cpu",
     )
 
 
@@ -1534,6 +1540,8 @@ def _run_generation_matrix(
                 example_id=first_example_id,
                 layer=int(config.get("primary_layer", PRIMARY_LAYER)),
             )
+        if isinstance(readout, DualLensReadout):
+            readout.to_device(_model_device(model))
         completed = len(matrix) - len(pending)
         for dataset, example_id, condition in pending:
             example = examples[dataset][example_id]
