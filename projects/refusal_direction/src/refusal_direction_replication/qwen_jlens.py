@@ -64,7 +64,7 @@ DIM_BATCH_PROBE_ORDER = [32, 16, 8]
 MAX_PROJECTED_SECONDS = 12 * 3600
 CHECKPOINT_FILENAME = "jlens_fit_checkpoint.pt"
 FINAL_LENS_FILENAME = "qwen25_coder_7b_jacobian_lens.pt"
-V2_FINAL_LENS_FILENAME = FINAL_LENS_FILENAME
+V2_FINAL_LENS_FILENAME = "qwen25_coder_7b_jacobian_lens_v2.pt"
 CHECKPOINT_IDENTITY_FIELDS = (
     "source_layers",
     "target_layer",

@@ -10,7 +10,6 @@
   "max_seq_len": 512,
   "skip_first": 16,
   "min_tokens_before_truncation": 512,
-  "fit_count": 100,
   "holdout_count": 200,
   "fit_count_candidates": [100, 150, 200, 250, 300, 400, 600, 800],
   "max_fit_count": 800,
