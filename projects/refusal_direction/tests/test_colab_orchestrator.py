@@ -193,6 +193,8 @@ def test_legacy_qwen_fetch_still_downloads(monkeypatch, tmp_path) -> None:
 V2 = "qwen25-coder-jlens-v2"
 V2_SESSION = "refusal-qwen-jlens-v2"
 V2_REMOTE_ARTIFACTS = "/content/refusal_direction/artifacts/qwen25_coder_7b_jlens_v2"
+CAUSAL = "qwen25-coder-causal-jlens"
+CAUSAL_SESSION = "refusal-qwen-causal-jlens"
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 
 
@@ -518,6 +520,43 @@ def test_v2_stop_alerts_when_stop_never_succeeds(
     assert "A100 MAY STILL BE RUNNING" in err
     assert (
         "python tools/colab/run_refusal.py stop --profile qwen25-coder-jlens-v2" in err
+    )
+
+
+def test_causal_stop_retries_transient_failure(monkeypatch) -> None:
+    attempts: list[list[str]] = []
+
+    def flaky_run(command: list[str]) -> None:
+        attempts.append(list(command))
+        if len(attempts) < 3:
+            raise RuntimeError("transient stop failure")
+
+    monkeypatch.setattr(MODULE, "run", flaky_run)
+    monkeypatch.setattr(MODULE.time, "sleep", lambda _seconds: None)
+
+    assert _main(monkeypatch, "stop", "--profile", CAUSAL) == 0
+    assert attempts == [MODULE.stop_command(CAUSAL_SESSION)] * 3
+
+
+def test_causal_stop_persistent_failure_warns_and_returns_nonzero(
+    monkeypatch, capsys
+) -> None:
+    attempts: list[list[str]] = []
+
+    def always_fail(command: list[str]) -> None:
+        attempts.append(list(command))
+        raise RuntimeError("persistent stop failure")
+
+    monkeypatch.setattr(MODULE, "run", always_fail)
+    monkeypatch.setattr(MODULE.time, "sleep", lambda _seconds: None)
+
+    assert _main(monkeypatch, "stop", "--profile", CAUSAL) == 1
+    assert attempts == [MODULE.stop_command(CAUSAL_SESSION)] * MODULE.STOP_RETRY_ATTEMPTS
+    err = capsys.readouterr().err
+    assert "A100 MAY STILL BE RUNNING" in err
+    assert (
+        "python tools/colab/run_refusal.py stop "
+        "--profile qwen25-coder-causal-jlens" in err
     )
 
 

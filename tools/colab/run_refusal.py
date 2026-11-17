@@ -1088,7 +1088,7 @@ def main() -> int:
                         file=sys.stderr,
                     )
         finally:
-            if args.profile == JLENS_V2:
+            if args.profile in {JLENS_V2, CAUSAL_JLENS}:
                 stop_ok = try_stop_session(session)
             else:
                 run(stop_command(session))

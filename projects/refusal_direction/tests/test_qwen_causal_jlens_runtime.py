@@ -407,6 +407,39 @@ def test_dual_readout_ranks_the_same_target_from_the_same_residual() -> None:
     assert ranks == {"v1": 1, "v2": 2}
 
 
+def test_dual_readout_prepares_only_requested_layers_once_on_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layers = (19, 22, 25, 26)
+    lenses = {
+        "v1": _lens(d_model=2, layers=(0, *layers, 30)),
+        "v2": _lens(1.0, d_model=2, layers=(0, *layers, 30)),
+    }
+    readout = DualLensReadout(
+        lenses=lenses,
+        bound_model=_bound_model(),
+        layers=layers,
+        device=torch.device("cpu"),
+    )
+    assert all(set(lens.jacobians) == set(layers) for lens in lenses.values())
+    assert all(
+        tensor.device == torch.device("cpu")
+        for lens in lenses.values()
+        for tensor in lens.jacobians.values()
+    )
+
+    def forbidden_transport(*_args, **_kwargs):
+        raise AssertionError("rank_target must use the prepared cache")
+
+    monkeypatch.setattr(JacobianLens, "transport", forbidden_transport)
+    for _ in range(3):
+        assert readout.rank_target(
+            torch.tensor([1.0, 2.0]),
+            layer=25,
+            target_token_id=3,
+        ) == {"v1": 1, "v2": 2}
+
+
 def test_stream_records_four_layers_two_lenses_for_first_eight_steps() -> None:
     result = stream_causal_generation(
         model=_greedy_fixture(tokens=10),
@@ -433,6 +466,27 @@ def test_stream_always_removes_hooks(terminal: str) -> None:
     with contextlib.suppress(RuntimeError):
         stream_causal_generation(model=model, **_fixture_args())
     assert model.active_hook_count == 0
+
+
+def test_stream_rejects_real_hook_registry_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication import qwen_causal_jlens_runtime as module
+
+    model = _greedy_fixture(tokens=1)
+    original = module.temporary_hooks
+
+    @contextlib.contextmanager
+    def leaking_hooks(*args, **kwargs):
+        with original(*args, **kwargs):
+            yield
+        model.model.layers[19].register_forward_hook(
+            lambda _module, _inputs, _output: None
+        )
+
+    monkeypatch.setattr(module, "temporary_hooks", leaking_hooks)
+    with pytest.raises(ValueError, match="hook registry"):
+        stream_causal_generation(model=model, **_fixture_args())
 
 
 def test_rank_target_matches_canonical_apply_for_both_lenses() -> None:
@@ -523,11 +577,14 @@ def test_tuple_block_outputs_are_captured_without_replacing_output(
         layer: model.model.layers[layer].register_forward_hook
         for layer in layers
     }
-    original_readout = module.incremental_logits_from_residual
+    readout = _dual_readout()
+    original_readout = readout.rank_target
 
-    def spy(lens, bound_model, residual, *, layer):
+    def spy(residual, *, layer, target_token_id):
         ranked.append(residual.detach().float().reshape(-1).cpu().clone())
-        return original_readout(lens, bound_model, residual, layer=layer)
+        return original_readout(
+            residual, layer=layer, target_token_id=target_token_id
+        )
 
     def bind(layer: int):
         original = originals[layer]
@@ -550,11 +607,11 @@ def test_tuple_block_outputs_are_captured_without_replacing_output(
     for layer in layers:
         model.model.layers[layer].register_forward_hook = bind(layer)  # type: ignore[method-assign]
 
-    monkeypatch.setattr(module, "incremental_logits_from_residual", spy)
+    monkeypatch.setattr(readout, "rank_target", spy)
     result = stream_causal_generation(
         model=model,
         tokenizer=_tokenizer(),
-        readout=_dual_readout(),
+        readout=readout,
         layers=layers,
         readout_steps=8,
         max_new_tokens=64,
@@ -569,11 +626,9 @@ def test_tuple_block_outputs_are_captured_without_replacing_output(
     )
     assert all(torch.is_tensor(item[0]) for item in original_outputs)
     assert extracted
-    assert len(ranked) == len(extracted) * 2
+    assert len(ranked) == len(extracted)
     for index, residual in enumerate(extracted):
-        pair = ranked[index * 2 : index * 2 + 2]
-        assert torch.equal(pair[0], residual)
-        assert torch.equal(pair[1], residual)
+        assert torch.equal(ranked[index], residual)
     assert model.past_seen[0] is None
     assert model.past_seen[1] == model.prompt_length
 
@@ -587,24 +642,22 @@ def test_dual_lenses_see_the_same_captured_residual_from_one_forward(
     readout = _dual_readout()
     layers = (19, 22, 25, 26)
     seen: list[dict[str, Any]] = []
-    original = module.incremental_logits_from_residual
+    original = readout.rank_target
 
-    def spy(lens, bound_model, residual, *, layer):
-        version = next(
-            name for name, item in readout._lenses.items() if item is lens
-        )
+    def spy(residual, *, layer, target_token_id):
         vector = residual.detach().float().reshape(-1).cpu().clone()
+        ranks = original(residual, layer=layer, target_token_id=target_token_id)
         seen.append(
             {
-                "version": version,
                 "layer": int(layer),
                 "residual": vector,
                 "forward_id": int(round(float(vector[0].item()))),
+                "versions": set(ranks),
             }
         )
-        return original(lens, bound_model, residual, layer=layer)
+        return ranks
 
-    monkeypatch.setattr(module, "incremental_logits_from_residual", spy)
+    monkeypatch.setattr(readout, "rank_target", spy)
     result = stream_causal_generation(
         model=model,
         tokenizer=_tokenizer(),
@@ -615,7 +668,7 @@ def test_dual_lenses_see_the_same_captured_residual_from_one_forward(
         **_intervention_inputs("baseline"),
     )
     readout_steps = min(8, len(result.generated_token_ids))
-    assert len(seen) == readout_steps * len(layers) * 2
+    assert len(seen) == readout_steps * len(layers)
     _assert_each_observation_targets_its_generated_token(result)
     for step in range(1, readout_steps + 1):
         expected_forward = model.forward_ids[step - 1]
@@ -625,8 +678,8 @@ def test_dual_lenses_see_the_same_captured_residual_from_one_forward(
                 for item in seen
                 if item["forward_id"] == expected_forward and item["layer"] == layer
             ]
-            assert {item["version"] for item in pair} == {"v1", "v2"}
-            assert torch.equal(pair[0]["residual"], pair[1]["residual"])
+            assert len(pair) == 1
+            assert pair[0]["versions"] == {"v1", "v2"}
             assert int(round(float(pair[0]["residual"][1].item()))) == layer
 
 
@@ -937,6 +990,62 @@ def test_source_context_requires_exact_frozen_inputs(tmp_path: Path) -> None:
         source_context(tmp_path, _config(tmp_path, dataset_size=2))
 
 
+def test_runtime_production_config_contract_is_exact_and_fixture_is_explicit() -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        _require_config_contract,
+    )
+
+    packaged = json.loads(
+        (
+            _PROJECT_ROOT / "configs" / CAUSAL_JLENS_PROFILE
+        ).read_text(encoding="utf-8")
+    )
+    _require_config_contract(packaged)
+    for field in (
+        "model_name",
+        "model_revision",
+        "dtype",
+        "batch_size",
+        "datasets",
+        "dataset_size",
+        "conditions",
+        "ablation_coefficient",
+        "addition_coefficient",
+        "random_control_coefficient",
+        "random_control_seed",
+        "readout_layers",
+        "readout_steps",
+        "max_new_tokens",
+        "bootstrap_resamples",
+        "bootstrap_seed",
+        "equivalence_margin",
+        "source_prepare",
+        "source_direction",
+        "source_v1_lens",
+        "source_v2_lens",
+        "results_dir",
+        "artifacts_dir",
+        "expected_prepare_sha256",
+        "expected_v1_run_id",
+    ):
+        drifted = dict(packaged)
+        value = drifted[field]
+        drifted[field] = (
+            [*value, "drift"]
+            if isinstance(value, list)
+            else value + 1
+            if isinstance(value, (int, float))
+            else f"{value}-drift"
+        )
+        with pytest.raises(ValueError, match="production contract"):
+            _require_config_contract(drifted)
+
+    fixture = _config(Path("."), dataset_size=2)
+    with pytest.raises(ValueError, match="production contract"):
+        _require_config_contract(fixture)
+    _require_config_contract(fixture, allow_fixture_contract=True)
+
+
 def test_resume_skips_only_complete_matching_pairs(tmp_path: Path) -> None:
     from refusal_direction_replication.qwen_causal_jlens_runtime import PanelCheckpoint
 
@@ -1036,6 +1145,44 @@ def _seed_causal_project(root: Path, *, dataset_size: int = 2) -> dict[str, Any]
     config["_source_root"] = source_root
     config["_records"] = records
     return config
+
+
+def _write_passing_pilot_gate(
+    root: Path,
+    *,
+    config: Mapping[str, Any],
+    source: Mapping[str, Any],
+    prepare: Mapping[str, Any],
+    run_id: str = "causal-run",
+    implementation_commit: str = "a" * 40,
+) -> Path:
+    from refusal_direction_replication import qwen_causal_jlens_runtime as module
+
+    pilot_ids = {
+        dataset: list(prepare[dataset]["example_ids"][:2])
+        for dataset in DATASETS
+    }
+    path = root / str(config["results_dir"]) / "01_pilot.json"
+    module._write_stage(
+        path,
+        stage="pilot",
+        config=config,
+        results={
+            "response_count": 16,
+            "observation_count": 0,
+            "pilot_status": "pass",
+            "conditions": list(CONDITIONS),
+            "pilot_ids": pilot_ids,
+            "terminal_reasons": {"eos": 16, "max_tokens": 0},
+        },
+        provenance=module._provenance(
+            config=config,
+            run_id=run_id,
+            implementation_commit=implementation_commit,
+            source=source,
+        ),
+    )
+    return path
 
 
 def _progress_store(root: Path, *, run_id: str = "causal-run") -> RunProgressStore:
@@ -1228,6 +1375,76 @@ def test_pilot_exercises_four_conditions_and_parity_hook(tmp_path: Path) -> None
     assert all(int(row["generated_token_count"]) == 3 for row in responses)
 
 
+def test_panel_requires_same_identity_passing_exact_pilot_gate(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        run_panel_stage,
+        run_prepare_stage,
+        source_context,
+    )
+
+    config = _seed_causal_project(tmp_path)
+    source = source_context(tmp_path, config)
+    store = _progress_store(tmp_path)
+    prepare = run_prepare_stage(
+        root=tmp_path,
+        config=config,
+        artifacts_dir=store.artifacts_dir,
+        store=store,
+        source=source,
+        source_root=config["_source_root"],
+    )
+    with pytest.raises(ValueError, match="01_pilot|pilot gate"):
+        run_panel_stage(
+            root=tmp_path,
+            config=config,
+            artifacts_dir=store.artifacts_dir,
+            store=store,
+            source=source,
+            prepare=prepare,
+            run_id="causal-run",
+            implementation_commit="a" * 40,
+            load_model=lambda *_args, **_kwargs: pytest.fail("model loaded"),
+        )
+
+    pilot_path = _write_passing_pilot_gate(
+        tmp_path, config=config, source=source, prepare=prepare
+    )
+    payload = json.loads(pilot_path.read_text(encoding="utf-8"))
+    payload["provenance"]["run_id"] = "stale-run"
+    pilot_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="stale|run_id|pilot gate"):
+        run_panel_stage(
+            root=tmp_path,
+            config=config,
+            artifacts_dir=store.artifacts_dir,
+            store=store,
+            source=source,
+            prepare=prepare,
+            run_id="causal-run",
+            implementation_commit="a" * 40,
+            load_model=lambda *_args, **_kwargs: pytest.fail("model loaded"),
+        )
+
+    _write_passing_pilot_gate(
+        tmp_path, config=config, source=source, prepare=prepare
+    )
+    payload = json.loads(pilot_path.read_text(encoding="utf-8"))
+    payload["results"]["response_count"] = 15
+    pilot_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="16|pilot gate"):
+        run_panel_stage(
+            root=tmp_path,
+            config=config,
+            artifacts_dir=store.artifacts_dir,
+            store=store,
+            source=source,
+            prepare=prepare,
+            run_id="causal-run",
+            implementation_commit="a" * 40,
+            load_model=lambda *_args, **_kwargs: pytest.fail("model loaded"),
+        )
+
+
 def test_panel_resume_skips_completed_pairs_and_keeps_compact_clean(
     tmp_path: Path,
 ) -> None:
@@ -1268,6 +1485,9 @@ def test_panel_resume_skips_completed_pairs_and_keeps_compact_clean(
     )
     checkpoint.mark_complete("mitre", first_id, "baseline")
     checkpoint.write(store.artifacts_dir / "checkpoint.json")
+    _write_passing_pilot_gate(
+        tmp_path, config=config, source=source, prepare=prepare
+    )
     results = run_panel_stage(
         root=tmp_path,
         config=config,
@@ -1414,6 +1634,7 @@ def test_analysis_and_finalize_write_six_compact_result_files(tmp_path: Path) ->
         stage_runner=runner,
         gpu_probe=_a100_probe,
         load_model=_load_model,
+        allow_fixture_contract=True,
     )
     assert calls == ["prepare", "pilot", "panel", "analysis", "finalize"]
     results_dir = tmp_path / "results/qwen25_coder_7b_causal_jlens"
@@ -1593,6 +1814,9 @@ def test_resume_regenerates_partial_pair_exactly_once(tmp_path: Path) -> None:
         _pair_observations("mitre", first_id, "baseline", steps=3)[:4],
     )
     PanelCheckpoint.create(identity).write(store.artifacts_dir / "checkpoint.json")
+    _write_passing_pilot_gate(
+        tmp_path, config=config, source=source, prepare=prepare
+    )
     results = run_panel_stage(
         root=tmp_path,
         config=config,
@@ -1665,18 +1889,8 @@ def test_pilot_and_panel_require_exact_unique_key_matrix(tmp_path: Path) -> None
 def test_stream_and_rank_target_reject_nonfinite_logits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from refusal_direction_replication import qwen_causal_jlens_runtime as module
-
     readout = _dual_readout()
-    original = module.incremental_logits_from_residual
-
-    def nan_logits(lens, bound_model, residual, *, layer):
-        logits = original(lens, bound_model, residual, layer=layer)
-        logits = logits.clone()
-        logits[0] = float("nan")
-        return logits
-
-    monkeypatch.setattr(module, "incremental_logits_from_residual", nan_logits)
+    readout._jacobians["v1"][25][0, 0] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         readout.rank_target(torch.tensor([1.0] * READOUT_D_MODEL), layer=25, target_token_id=3)
 
@@ -1854,6 +2068,7 @@ def test_resume_initialize_does_not_regress_completed_units(
         load_readout=_load_readout,
         parity_check=lambda **_kwargs: None,
         source_root=config["_source_root"],
+        allow_fixture_contract=True,
     )
     by_stage = {stage: completed for stage, completed in seen}
     assert by_stage["pilot"] == 1

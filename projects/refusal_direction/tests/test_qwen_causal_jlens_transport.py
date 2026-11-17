@@ -172,7 +172,19 @@ def _seed_causal_tree(root: Path, *, run_id: str = "causal-run") -> None:
         encoding="utf-8",
     )
     (artifacts / "observations.jsonl").write_text(
-        json.dumps(_raw_identity(run_id, rank=1, layer=25)) + "\n",
+        json.dumps(
+            {
+                "dataset": "mitre",
+                "example_id": "example-1",
+                "condition": "baseline",
+                "generation_step": 1,
+                "layer": 25,
+                "lens_version": "v1",
+                "rank": 1,
+                "target_token_id": 2,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     (artifacts / "datasets" / "mitre.jsonl").parent.mkdir(parents=True, exist_ok=True)
@@ -689,6 +701,30 @@ def test_causal_pack_rejects_raw_text_leak_in_compact_results(tmp_path: Path) ->
     )
     with pytest.raises(ValueError, match="leak"):
         pack_qwen_causal_jlens_results(tmp_path, tmp_path / "out.tar.gz")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("raw", "forbidden"),
+        ("rank", 0),
+        ("rank", 1.5),
+        ("generation_step", True),
+    ],
+)
+def test_causal_pack_rejects_invalid_observation_before_archive_creation(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    _seed_causal_tree(tmp_path)
+    path = tmp_path / CAUSAL_JLENS_ARTIFACTS_DIR / "observations.jsonl"
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row[field] = value
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    archive = tmp_path / "out.tar.gz"
+
+    with pytest.raises(ValueError, match="observation|rank|generation_step|unexpected"):
+        pack_qwen_causal_jlens_results(tmp_path, archive)
+    assert not archive.exists()
 
 
 def test_causal_orchestrator_routes_sync_bootstrap_status_fetch_and_stop(

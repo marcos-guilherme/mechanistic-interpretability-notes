@@ -621,16 +621,115 @@ def _check_generation_integrity(
 
 
 def _check_unique_observation_keys(observations: Sequence[Mapping[str, Any]]) -> None:
+    for row in observations:
+        _check_exact_keys(row, set(OBSERVATION_KEYS), "observation")
+        _require(row["dataset"] in DATASETS, "observation dataset is not configured")
+        _require(
+            row["condition"] in CONDITIONS,
+            "observation condition is not configured",
+        )
+        _require(
+            row["lens_version"] in LENS_VERSIONS,
+            "observation lens_version is not configured",
+        )
+        for field in ("generation_step", "layer", "target_token_id"):
+            value = _strict_int(row[field], field)
+            _require(value >= 0, f"{field} must be a nonnegative integer")
+        _require(
+            int(row["layer"]) in READOUT_LAYERS,
+            "observation layer is not configured",
+        )
+        rank = _strict_int(row["rank"], "rank")
+        _require(rank > 0, "rank must be a positive integer")
     try:
         keys = [observation_key(row) for row in observations]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("observation keys are malformed") from exc
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate observation keys")
-    for row in observations:
-        missing = [key for key in OBSERVATION_KEYS if key not in row]
-        if missing:
-            raise ValueError("observation missing keys: " + ", ".join(missing))
+
+
+def _check_event_sequence(
+    events: Sequence[Mapping[str, Any]], *, run_id: str
+) -> None:
+    expected_stage_index = 0
+    active_stage: str | None = None
+    state: str | None = None
+    previous_completed = 0
+    total_units: int | None = None
+    for index, event in enumerate(events):
+        _require(
+            event.get("run_id") == run_id,
+            f"run_id mismatch in events.jsonl at event {index}",
+        )
+        stage = event.get("stage")
+        _require(stage in CAUSAL_STAGES, f"unknown event stage at event {index}")
+        kind = event.get("event")
+        event_state = event.get("state")
+        if active_stage is None:
+            _require(
+                expected_stage_index < len(CAUSAL_STAGES)
+                and stage == CAUSAL_STAGES[expected_stage_index],
+                "events stage order must be prepare, pilot, panel, analysis, finalize",
+            )
+            _require(
+                kind == "initialized" and event_state == "pending",
+                "illegal event state transition: stage must initialize pending",
+            )
+            active_stage = str(stage)
+            state = "pending"
+            previous_completed = _strict_int(
+                event.get("completed_units", 0), "event completed_units"
+            )
+            total_units = _strict_int(event.get("total_units"), "event total_units")
+            _require(
+                0 <= previous_completed <= total_units,
+                "event counters are outside the stage total",
+            )
+            continue
+        _require(stage == active_stage, "events stage order changed before completion")
+        completed = _strict_int(
+            event.get("completed_units"), "event completed_units"
+        )
+        current_total = _strict_int(event.get("total_units"), "event total_units")
+        _require(
+            current_total == total_units,
+            "event total_units changed within a stage",
+        )
+        _require(
+            completed >= previous_completed,
+            "event completed counters must be monotonic within stages",
+        )
+        _require(completed <= current_total, "event completed_units exceeds total_units")
+        if kind == "state_changed":
+            _require(
+                state == "pending" and event_state == "running",
+                "illegal event state transition",
+            )
+            state = "running"
+        elif kind == "progress":
+            _require(
+                state == "running" and event_state == "running",
+                "illegal event state transition",
+            )
+        elif kind == "stage_completed":
+            _require(
+                state == "running"
+                and event_state == "completed"
+                and completed == current_total,
+                "illegal event state transition to completed",
+            )
+            expected_stage_index += 1
+            active_stage = None
+            state = None
+            total_units = None
+        else:
+            raise ValueError(f"illegal event type in completed run: {kind!r}")
+        previous_completed = completed
+    _require(
+        active_stage is None and expected_stage_index == len(CAUSAL_STAGES),
+        "events do not contain the exact completed stage order",
+    )
 
 
 def _recompute_bootstrap(
@@ -1070,6 +1169,7 @@ def _check_status_events_manifest(
         "status must be completed at the finalize stage",
     )
     _require(bool(events), f"{EVENTS_FILENAME} is empty")
+    _check_event_sequence(events, run_id=str(evaluation.get("run_id")))
     last = events[-1]
     _require(
         last.get("event") == "stage_completed"
@@ -1170,11 +1270,11 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
 
     responses = _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
     observations = _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
+    _check_unique_observation_keys(observations)
+    checks["unique_observation_keys"] = True
     _check_generation_integrity(responses, observations, config)
     checks["early_termination"] = True
     _check_exact_refusal_flags(responses)
-    _check_unique_observation_keys(observations)
-    checks["unique_observation_keys"] = True
     matrix = _check_ids_and_matrix(
         prepare=prepare,
         source_prepare=source_prepare,

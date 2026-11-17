@@ -408,25 +408,46 @@ def _seed_complete_tree(root: Path) -> None:
             "total_units": 1,
         },
     )
-    events = [
-        {
-            "event": "initialized",
-            "stage": stage,
-            "run_id": RUN_ID,
-            "state": "pending",
-        }
-        for stage in ("prepare", "pilot", "panel", "analysis", "finalize")
-    ]
-    events.append(
-        {
-            "event": "stage_completed",
-            "stage": "finalize",
-            "state": "completed",
-            "run_id": RUN_ID,
-            "completed_units": 1,
-            "total_units": 1,
-        }
-    )
+    totals = {"prepare": 4, "pilot": 16, "panel": 16, "analysis": 1, "finalize": 1}
+    events = []
+    for stage in ("prepare", "pilot", "panel", "analysis", "finalize"):
+        total = totals[stage]
+        events.extend(
+            [
+                {
+                    "event": "initialized",
+                    "stage": stage,
+                    "run_id": RUN_ID,
+                    "state": "pending",
+                    "completed_units": 0,
+                    "total_units": total,
+                },
+                {
+                    "event": "state_changed",
+                    "stage": stage,
+                    "run_id": RUN_ID,
+                    "state": "running",
+                    "completed_units": 0,
+                    "total_units": total,
+                },
+                {
+                    "event": "progress",
+                    "stage": stage,
+                    "run_id": RUN_ID,
+                    "state": "running",
+                    "completed_units": total,
+                    "total_units": total,
+                },
+                {
+                    "event": "stage_completed",
+                    "stage": stage,
+                    "run_id": RUN_ID,
+                    "state": "completed",
+                    "completed_units": total,
+                    "total_units": total,
+                },
+            ]
+        )
     _write_jsonl(artifacts_dir / "events.jsonl", events)
 
 
@@ -629,6 +650,38 @@ def _mutate(root: Path, mutation: str) -> None:
             ),
         )
         return
+    if mutation.startswith("observation_"):
+        path = _art(root, "observations.jsonl")
+        rows = _jsonl(path)
+        changes = {
+            "observation_extra_raw": ("raw", "forbidden"),
+            "observation_fractional_step": ("generation_step", 1.5),
+            "observation_boolean_step": ("generation_step", True),
+            "observation_negative_layer": ("layer", -1),
+            "observation_boolean_target": ("target_token_id", False),
+            "observation_fractional_rank": ("rank", 1.5),
+            "observation_zero_rank": ("rank", 0),
+            "observation_negative_rank": ("rank", -1),
+        }
+        key, value = changes[mutation]
+        rows[0][key] = value
+        _write_jsonl(path, rows)
+        return
+    if mutation.startswith("events_"):
+        path = _art(root, "events.jsonl")
+        rows = _jsonl(path)
+        if mutation == "events_stage_order":
+            rows[4]["stage"] = "panel"
+        elif mutation == "events_illegal_transition":
+            rows[1]["state"] = "completed"
+        elif mutation == "events_counter_regression":
+            rows.insert(3, {**rows[2], "completed_units": 0})
+        elif mutation == "events_identity":
+            rows[5]["run_id"] = "other-run"
+        else:
+            raise AssertionError(mutation)
+        _write_jsonl(path, rows)
+        return
     raise AssertionError(mutation)
 
 
@@ -668,6 +721,47 @@ def test_validator_accepts_complete_recomputable_tree(tmp_path: Path) -> None:
         assert isinstance(identity["bytes"], int) and not isinstance(identity["bytes"], bool)
         assert identity["bytes"] >= 0
         assert identity["bytes"] == frozen["bytes"]
+
+
+def test_runtime_reuses_terminal_only_after_strict_offline_validation(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        run_qwen_causal_jlens,
+    )
+
+    _seed_complete_tree(tmp_path)
+    terminal = run_qwen_causal_jlens(
+        tmp_path,
+        run_id=RUN_ID,
+        implementation_commit=COMMIT,
+        gpu_probe=lambda: {
+            "cuda_available": True,
+            "device_name": "NVIDIA A100",
+            "total_memory_bytes": 40_000_000_000,
+        },
+        load_model=lambda *_args, **_kwargs: pytest.fail("model must not load"),
+        allow_fixture_contract=True,
+    )
+    assert terminal["status"] == "pass"
+
+    _rewrite_json(
+        _res(tmp_path, EVALUATION_FILENAME),
+        lambda payload: payload["provenance"].update(config_sha256="0" * 64),
+    )
+    with pytest.raises(ValueError, match="config hash"):
+        run_qwen_causal_jlens(
+            tmp_path,
+            run_id=RUN_ID,
+            implementation_commit=COMMIT,
+            gpu_probe=lambda: {
+                "cuda_available": True,
+                "device_name": "NVIDIA A100",
+                "total_memory_bytes": 40_000_000_000,
+            },
+            load_model=lambda *_args, **_kwargs: pytest.fail("model must not load"),
+            allow_fixture_contract=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -825,6 +919,46 @@ def test_validator_accepts_production_source_identity_bytes(tmp_path: Path) -> N
     ],
 )
 def test_validator_rejects_source_identity_bytes_corruption(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    _seed_complete_tree(tmp_path)
+    _mutate(tmp_path, mutation)
+    with pytest.raises(ValueError, match=message):
+        validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("observation_extra_raw", "unexpected key"),
+        ("observation_fractional_step", "generation_step"),
+        ("observation_boolean_step", "generation_step"),
+        ("observation_negative_layer", "layer"),
+        ("observation_boolean_target", "target_token_id"),
+        ("observation_fractional_rank", "rank"),
+        ("observation_zero_rank", "rank"),
+        ("observation_negative_rank", "rank"),
+    ],
+)
+def test_validator_rejects_strict_observation_schema_corruption(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    _seed_complete_tree(tmp_path)
+    _mutate(tmp_path, mutation)
+    with pytest.raises(ValueError, match=message):
+        validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("events_stage_order", "stage order"),
+        ("events_illegal_transition", "transition"),
+        ("events_counter_regression", "monotonic"),
+        ("events_identity", "run_id"),
+    ],
+)
+def test_validator_rejects_event_sequence_corruption(
     tmp_path: Path, mutation: str, message: str
 ) -> None:
     _seed_complete_tree(tmp_path)

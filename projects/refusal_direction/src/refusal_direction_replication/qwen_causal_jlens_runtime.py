@@ -40,7 +40,6 @@ from .qwen_causal_jlens import (
     DATASETS,
     FROZEN_COHORT_DIGEST,
     FROZEN_PREPARE_SHA256,
-    FROZEN_EOS_TOKEN_ID,
     FROZEN_SOURCE_DOSE_RUN_ID,
     FROZEN_V1_EVALUATION_SHA256,
     FROZEN_V1_RUN_ID,
@@ -76,7 +75,6 @@ from .qwen_jlens import (
 )
 from .qwen_lab_readout import (
     assert_incremental_readout_parity,
-    incremental_logits_from_residual,
     verify_frozen_lens_hash,
 )
 from .qwen_lab_runtime import condition_hook_specs
@@ -129,6 +127,18 @@ OBSERVATION_KEYS = (
     "rank",
     "target_token_id",
 )
+FIXTURE_ALLOWED_PROFILE_FIELDS = frozenset(
+    {
+        "dataset_size",
+        "expected_prepare_sha256",
+        "expected_cohort_digest",
+        "expected_v1_evaluation_sha256",
+        "expected_v2_evaluation_sha256",
+        "expected_v1_run_id",
+        "expected_v2_run_id",
+        "expected_source_dose_run_id",
+    }
+)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -153,25 +163,43 @@ def _config_hash(config: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _require_config_contract(config: Mapping[str, Any]) -> None:
-    if str(config.get("model_revision")) != QWEN_REVISION:
-        raise ValueError("model revision must remain pinned")
-    if str(config.get("jlens_upstream_commit", JLENS_UPSTREAM_COMMIT)) != JLENS_UPSTREAM_COMMIT:
-        raise ValueError("jlens upstream commit must remain pinned")
-    if str(config.get("purplellama_revision", PURPLE_LLAMA_REVISION)) != PURPLE_LLAMA_REVISION:
-        raise ValueError("PurpleLlama revision must remain pinned")
-    if int(config.get("batch_size", 0)) != 1:
-        raise ValueError("causal J-lens batch_size must be 1")
-    if int(config.get("eos_token_id", -1)) != FROZEN_EOS_TOKEN_ID:
-        raise ValueError("eos_token_id must remain the frozen Qwen chat EOS id")
-    expected_coefficients = {
-        "ablation_coefficient": 0.2,
-        "addition_coefficient": 0.5,
-        "random_control_coefficient": 0.2,
-    }
-    for field, value in expected_coefficients.items():
-        if float(config.get(field, -1)) != float(value):
-            raise ValueError(f"config {field} must be {value}")
+def _packaged_profile() -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[2] / "configs" / CAUSAL_JLENS_PROFILE
+    if not path.is_file():
+        raise ValueError("production contract: packaged causal profile is missing")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("production contract: packaged causal profile is malformed")
+    return payload
+
+
+def _require_config_contract(
+    config: Mapping[str, Any], *, allow_fixture_contract: bool = False
+) -> None:
+    packaged = _packaged_profile()
+    actual = _jsonable_config(config)
+    for key in sorted(set(packaged) | set(actual)):
+        fixture_allowed = (
+            allow_fixture_contract and key in FIXTURE_ALLOWED_PROFILE_FIELDS
+        )
+        if key not in actual:
+            if fixture_allowed:
+                continue
+            raise ValueError(f"production contract: profile is missing {key}")
+        if key not in packaged:
+            if fixture_allowed:
+                continue
+            raise ValueError(f"production contract: unexpected profile field {key}")
+        if actual[key] == packaged[key] or fixture_allowed:
+            continue
+        if allow_fixture_contract:
+            raise ValueError(
+                f"fixture contract: {key} differs from the packaged profile "
+                "and is not allowlisted"
+            )
+        raise ValueError(
+            f"production contract: {key} differs from the packaged causal profile"
+        )
 
 
 def _canonical_evaluation_paths(root: Path, config: Mapping[str, Any]) -> dict[str, Path]:
@@ -405,7 +433,6 @@ def source_context(
     *,
     load_direction_payload: bool = True,
 ) -> dict[str, Any]:
-    _require_config_contract(config)
     paths = {
         "prepare": root / str(config["source_prepare"]),
         "direction": root / str(config["source_direction"]),
@@ -573,11 +600,35 @@ class GenerationResult:
 
 
 class DualLensReadout:
-    def __init__(self, lenses: Mapping[str, Any], bound_model: Any) -> None:
+    def __init__(
+        self,
+        lenses: Mapping[str, Any],
+        bound_model: Any,
+        *,
+        layers: Sequence[int] | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
         if tuple(lenses) != LENS_VERSIONS:
             raise ValueError("lenses must be ordered as v1, v2")
         self._lenses = dict(lenses)
         self._bound_model = bound_model
+        requested = (
+            tuple(int(layer) for layer in layers)
+            if layers is not None
+            else tuple(int(layer) for layer in next(iter(lenses.values())).jacobians)
+        )
+        target_device = torch.device(device or "cpu")
+        self._jacobians: dict[str, dict[int, torch.Tensor]] = {}
+        for version, lens in self._lenses.items():
+            missing = [layer for layer in requested if layer not in lens.jacobians]
+            if missing:
+                raise ValueError(f"{version} lens is missing layers {missing}")
+            prepared = {
+                layer: lens.jacobians[layer].to(target_device)
+                for layer in requested
+            }
+            lens.jacobians = prepared
+            self._jacobians[version] = prepared
 
     def rank_target(
         self,
@@ -587,10 +638,15 @@ class DualLensReadout:
         target_token_id: int,
     ) -> dict[str, int]:
         ranks: dict[str, int] = {}
-        for version, lens in self._lenses.items():
-            logits = incremental_logits_from_residual(
-                lens, self._bound_model, residual, layer=layer
-            )
+        layer_index = int(layer)
+        for version in LENS_VERSIONS:
+            jacobian = self._jacobians[version][layer_index]
+            if residual.device != jacobian.device:
+                raise ValueError(
+                    f"{version} residual and cached Jacobian are on different devices"
+                )
+            transported = residual.float() @ jacobian.T
+            logits = self._bound_model.unembed(transported).float().reshape(-1)
             require_finite_logits(logits, f"{version} readout logits")
             ranks[version] = rank_one_based(logits, target_token_id)
         return ranks
@@ -652,6 +708,20 @@ def _capture_hook(captured: dict[int, torch.Tensor], layer: int):
     return capture_hook
 
 
+def _hook_registry_snapshot(
+    modules: Sequence[Any],
+) -> dict[int, tuple[tuple[int, ...], tuple[int, ...]]]:
+    snapshot: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+    for module in modules:
+        marker = id(module)
+        if marker in snapshot:
+            continue
+        pre = getattr(module, "_forward_pre_hooks", {})
+        forward = getattr(module, "_forward_hooks", {})
+        snapshot[marker] = (tuple(pre.keys()), tuple(forward.keys()))
+    return snapshot
+
+
 def stream_causal_generation(
     *,
     model: Any,
@@ -673,6 +743,8 @@ def stream_causal_generation(
         seed_everything(int(seed))
     device = _model_device(model)
     blocks, attentions, mlps = transformer_module_lists(model)
+    involved_modules = [*blocks, *attentions, *mlps]
+    hooks_before = _hook_registry_snapshot(involved_modules)
     pre_hooks, forward_hooks = condition_hook_specs(
         condition=str(condition),
         coefficient=float(coefficient),
@@ -765,6 +837,9 @@ def stream_causal_generation(
     finally:
         captured.clear()
         past = None
+        hooks_after = _hook_registry_snapshot(involved_modules)
+        if hooks_after != hooks_before:
+            raise ValueError("production hook registry changed during generation")
 
     if compact_contains_text_leak(observations):
         raise ValueError("observations contain raw text")
@@ -1182,23 +1257,74 @@ def _default_load_readout(
     source: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> DualLensReadout:
-    del config
     from jlens.lens import JacobianLens
 
     assert_jlens_contract()
     v1 = JacobianLens.load(str(source["paths"]["v1_lens"]))
     v2 = JacobianLens.load(str(source["paths"]["v2_lens"]))
     bound = wrap_hf_model_for_jlens(model, tokenizer)
-    return DualLensReadout(lenses={"v1": v1, "v2": v2}, bound_model=bound)
+    return DualLensReadout(
+        lenses={"v1": v1, "v2": v2},
+        bound_model=bound,
+        layers=tuple(int(layer) for layer in config["readout_layers"]),
+        device=_model_device(model),
+    )
 
 
-def _verify_observations(observations: Sequence[Mapping[str, Any]]) -> None:
+def validate_observation_record(
+    row: Mapping[str, Any],
+    *,
+    layers: Sequence[int] = READOUT_LAYERS,
+    conditions: Sequence[str] = CONDITIONS,
+) -> None:
+    actual = set(row)
+    expected = set(OBSERVATION_KEYS)
+    extra = actual - expected
+    missing = expected - actual
+    if extra:
+        raise ValueError(f"unexpected key in observation: {sorted(extra)[0]}")
+    if missing:
+        raise ValueError(f"observation missing keys: {', '.join(sorted(missing))}")
+    if row["dataset"] not in DATASETS:
+        raise ValueError("observation dataset is not configured")
+    if row["condition"] not in conditions:
+        raise ValueError("observation condition is not configured")
+    if row["lens_version"] not in LENS_VERSIONS:
+        raise ValueError("observation lens_version is invalid")
+    for field in ("generation_step", "layer", "target_token_id"):
+        value = row[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                f"observation {field} must be a strict nonnegative integer"
+            )
+    if int(row["layer"]) not in {int(layer) for layer in layers}:
+        raise ValueError("observation layer is not configured")
+    rank = row["rank"]
+    if isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0:
+        raise ValueError("observation rank must be a strict positive integer")
+
+
+def _verify_observations(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> None:
     if compact_contains_text_leak(observations):
         raise ValueError("observations contain raw text")
     for row in observations:
-        missing = [key for key in OBSERVATION_KEYS if key not in row]
-        if missing:
-            raise ValueError("observation missing keys: " + ", ".join(missing))
+        validate_observation_record(
+            row,
+            layers=(
+                tuple(int(layer) for layer in config["readout_layers"])
+                if config is not None
+                else READOUT_LAYERS
+            ),
+            conditions=(
+                tuple(str(condition) for condition in config["conditions"])
+                if config is not None
+                else CONDITIONS
+            ),
+        )
 
 
 def _raw_response_record(
@@ -1330,7 +1456,7 @@ def _run_generation_matrix(
             )
             if hasattr(model, "active_hook_count") and int(model.active_hook_count) != 0:
                 raise ValueError("hooks were not cleaned")
-            _verify_observations(result.observations)
+            _verify_observations(result.observations, config=config)
             append_jsonl_atomic(
                 responses_path,
                 _raw_response_record(
@@ -1494,6 +1620,7 @@ def run_pilot_stage(
 
 def run_panel_stage(
     *,
+    root: Path,
     config: Mapping[str, Any],
     artifacts_dir: Path,
     store: RunProgressStore,
@@ -1506,6 +1633,27 @@ def run_panel_stage(
     parity_check: ParityCheck | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
+    pilot_path = root / str(config["results_dir"]) / STAGE_FILES["pilot"]
+    pilot_envelope = _load_stage(
+        pilot_path,
+        run_id=run_id,
+        implementation_commit=implementation_commit,
+        config=config,
+        source_hashes=source["source_artifact_hashes"],
+    )
+    if pilot_envelope is None:
+        raise ValueError("panel pilot gate requires same-identity 01_pilot.json")
+    pilot = pilot_envelope["results"]
+    expected_pilot_ids = _pilot_ids(prepare)
+    pilot_matrix = expected_matrix(prepare, example_ids=expected_pilot_ids)
+    if (
+        pilot.get("pilot_status") != "pass"
+        or pilot.get("pilot_ids") != expected_pilot_ids
+        or list(pilot.get("conditions") or []) != list(CONDITIONS)
+        or int(pilot.get("response_count", -1)) != len(pilot_matrix)
+        or len(pilot_matrix) != 16
+    ):
+        raise ValueError("panel pilot gate requires the exact passing 16-pair matrix")
     identity = checkpoint_identity(
         run_id=run_id,
         implementation_commit=implementation_commit,
@@ -1840,11 +1988,14 @@ def run_qwen_causal_jlens(
     parity_check: ParityCheck | None = None,
     gpu_probe: Callable[[], Mapping[str, Any]] = _default_gpu_probe,
     source_root: Path | None = None,
+    allow_fixture_contract: bool = False,
 ) -> dict[str, Any]:
     require_a100_preflight(gpu_probe)
     root = root.resolve()
     config = load_config(root, profile=profile)
-    _require_config_contract(config)
+    _require_config_contract(
+        config, allow_fixture_contract=allow_fixture_contract
+    )
     results_dir, artifacts_dir = project_paths(root, config)
     results_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -1871,11 +2022,16 @@ def run_qwen_causal_jlens(
             raise ValueError("stale causal J-lens terminal implementation_commit")
         if terminal.get("source_artifact_hashes") != source["source_artifact_hashes"]:
             raise ValueError("stale causal J-lens terminal source hashes")
-        if terminal.get("status") == STATUS_PASS:
-            _reconcile_terminal_status(store, terminal)
-            return terminal
-        terminal_path.unlink()
-        (results_dir / MANIFEST_FILENAME).unlink(missing_ok=True)
+        if terminal.get("status") != STATUS_PASS:
+            raise ValueError("pre-existing causal J-lens terminal is not reusable")
+        from .qwen_causal_jlens_validate import validate_qwen_causal_jlens
+
+        validate_qwen_causal_jlens(
+            root, allow_fixture_contract=allow_fixture_contract
+        )
+        terminal = _read_json(terminal_path)
+        _reconcile_terminal_status(store, terminal)
+        return terminal
     runner = stage_runner or _default_stage_runner
     accumulated: dict[str, Any] = {}
     last: dict[str, Any] | None = None

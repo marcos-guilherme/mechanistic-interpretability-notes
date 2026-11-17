@@ -2391,6 +2391,24 @@ def causal_jlens_member_byte_limit(name: str) -> int:
 
 
 def _validate_causal_jlens_compact(path: Path, relative: str) -> None:
+    if relative == f"{CAUSAL_JLENS_ARTIFACTS_DIR}/observations.jsonl":
+        from .qwen_causal_jlens_runtime import validate_observation_record
+
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                raise ValueError(
+                    f"observation line {number} is not valid JSON"
+                ) from None
+            if not isinstance(row, dict):
+                raise ValueError(f"observation line {number} is not an object")
+            validate_observation_record(row)
+        return
     if not relative.startswith(f"{CAUSAL_JLENS_RESULTS_DIR}/"):
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
