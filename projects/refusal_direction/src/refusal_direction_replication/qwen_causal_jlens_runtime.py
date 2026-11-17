@@ -40,6 +40,7 @@ from .qwen_causal_jlens import (
     DATASETS,
     FROZEN_COHORT_DIGEST,
     FROZEN_PREPARE_SHA256,
+    FROZEN_EOS_TOKEN_ID,
     FROZEN_SOURCE_DOSE_RUN_ID,
     FROZEN_V1_EVALUATION_SHA256,
     FROZEN_V1_RUN_ID,
@@ -161,6 +162,8 @@ def _require_config_contract(config: Mapping[str, Any]) -> None:
         raise ValueError("PurpleLlama revision must remain pinned")
     if int(config.get("batch_size", 0)) != 1:
         raise ValueError("causal J-lens batch_size must be 1")
+    if int(config.get("eos_token_id", -1)) != FROZEN_EOS_TOKEN_ID:
+        raise ValueError("eos_token_id must remain the frozen Qwen chat EOS id")
     expected_coefficients = {
         "ablation_coefficient": 0.2,
         "addition_coefficient": 0.5,
@@ -1090,6 +1093,8 @@ def _provenance(
         "source_artifact_hashes": dict(source["source_artifact_hashes"]),
         "direction_layer": source.get("direction_layer", EXPECTED_SOURCE_LAYER),
         "direction_offset": source.get("direction_offset", EXPECTED_SOURCE_OFFSET),
+        "eos_token_id": int(config["eos_token_id"]),
+        "cohort_digest": cohort_digest(_read_json(source["paths"]["prepare"])),
     }
 
 
@@ -1679,6 +1684,8 @@ def _write_terminal_files(
     payload = {
         "schema_version": 1,
         **dict(evaluation),
+        "config": _jsonable_config(config),
+        "provenance": dict(provenance),
     }
     atomic_write_json(results_dir / EVALUATION_FILENAME, payload)
     completed_stages = [

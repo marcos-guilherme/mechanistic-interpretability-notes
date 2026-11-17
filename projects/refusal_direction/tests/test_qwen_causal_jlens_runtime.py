@@ -663,6 +663,7 @@ def _config(root: Path, *, dataset_size: int = 32) -> dict[str, Any]:
         "format_style": "chat_template",
         "seed": 42,
         "max_new_tokens": 64,
+        "eos_token_id": 151645,
         "readout_steps": 8,
         "readout_layers": [19, 22, 25, 26],
         "datasets": ["mitre", "mitre_frr"],

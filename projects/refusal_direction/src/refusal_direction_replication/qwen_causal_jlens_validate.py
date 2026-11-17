@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
 import math
 import re
@@ -17,19 +18,23 @@ from .qwen_causal_jlens import (
     CAUSAL_JLENS_PROFILE,
     CONDITIONS,
     DATASETS,
+    FROZEN_EOS_TOKEN_ID,
     LENS_VERSIONS,
     PRIMARY_LAYER,
     PRODUCTION_DATASET_SIZE,
     READOUT_LAYERS,
     READOUT_STEPS,
+    TEXT_LEAK_KEYS,
     aggregate_fidelity,
     bootstrap_ci_indices,
     cluster_bootstrap_difference,
+    cohort_digest,
     compact_contains_text_leak,
     observation_key,
     summarize_behavior_changes,
 )
 from .qwen_causal_jlens_runtime import (
+    CAUSAL_STAGES,
     CHECKPOINT_FILENAME,
     EVALUATION_FILENAME,
     MANIFEST_FILENAME,
@@ -39,6 +44,7 @@ from .qwen_causal_jlens_runtime import (
     RESPONSES_FILENAME,
     STAGE_FILES,
     _compact_record,
+    _pair_key,
     checkpoint_identity,
     expected_matrix,
     require_complete_pair_artifacts,
@@ -59,6 +65,109 @@ PRODUCTION_PAIR_COUNT = len(DATASETS) * PRODUCTION_DATASET_SIZE * len(CONDITIONS
 FLOAT_TOLERANCE = 1e-9
 ABS_TOLERANCE = 1e-12
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+COMPLETED_STAGES = [*CAUSAL_STAGES]
+RAW_TEXT_ALIASES = TEXT_LEAK_KEYS | frozenset(
+    {
+        "samples",
+        "outputs",
+        "messages",
+        "completions",
+        "prompts",
+        "responses",
+        "text",
+        "code",
+        "raw",
+    }
+)
+FIXTURE_ALLOWED_PROFILE_FIELDS = frozenset(
+    {
+        "dataset_size",
+        "expected_prepare_sha256",
+        "expected_cohort_digest",
+        "expected_v1_evaluation_sha256",
+        "expected_v2_evaluation_sha256",
+        "expected_v1_run_id",
+        "expected_v2_run_id",
+        "expected_source_dose_run_id",
+    }
+)
+ENVELOPE_KEYS = frozenset(
+    {"experiment", "config", "results", "provenance", "schema_version"}
+)
+PROVENANCE_KEYS = frozenset(
+    {
+        "run_id",
+        "implementation_commit",
+        "config_sha256",
+        "model_name",
+        "requested_model_revision",
+        "resolved_model_revision",
+        "purplellama_revision",
+        "jlens_upstream_commit",
+        "source_dose_run_id",
+        "source_artifact_hashes",
+        "direction_layer",
+        "direction_offset",
+        "eos_token_id",
+        "cohort_digest",
+    }
+)
+PREPARE_RESULT_KEYS = frozenset({*DATASETS, "source_files"})
+DATASET_BLOCK_KEYS = frozenset(
+    {"dataset", "example_ids", "content_hashes", "source_indices", "selection_size"}
+)
+SOURCE_FILE_REQUIRED = frozenset({"repository", "revision", "relative_path"})
+SOURCE_FILE_OPTIONAL = frozenset({"sha256"})
+PILOT_RESULT_KEYS = frozenset(
+    {
+        "response_count",
+        "observation_count",
+        "pilot_status",
+        "conditions",
+        "pilot_ids",
+        "terminal_reasons",
+    }
+)
+PANEL_RESULT_KEYS = frozenset(
+    {
+        "response_count",
+        "observation_count",
+        "conditions",
+        "matrix_size",
+        "terminal_reasons",
+    }
+)
+ANALYSIS_RESULT_KEYS = frozenset(
+    {
+        "fidelity",
+        "bootstrap",
+        "behavior_changes",
+        "refusal_rates",
+        "observation_count",
+        "response_count",
+    }
+)
+MANIFEST_RESULT_KEYS = frozenset({"status", "completed_stages", "result_files"})
+EVALUATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "pilot_status",
+        "response_count",
+        "observation_count",
+        "prepare_ids",
+        "results",
+        "run_id",
+        "implementation_commit",
+        "model_revision",
+        "source_artifact_hashes",
+        "config",
+        "provenance",
+    }
+)
+EVALUATION_RESULT_KEYS = frozenset(
+    {"primary", "refusal_rates", "behavior_change_analysis", "fidelity"}
+)
 
 
 def _require(condition: bool, message: str) -> None:
@@ -155,20 +264,52 @@ def _close(left: Any, right: Any) -> bool:
     return left == right
 
 
-def _check_root_profile_is_production(config: Mapping[str, Any]) -> None:
+def _strict_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be a strict integer count")
+    return value
+
+
+def _check_exact_keys(obj: Any, expected: set[str], label: str) -> None:
+    _require(isinstance(obj, Mapping), f"{label} is not an object")
+    actual = set(obj)
+    extra = actual - expected
+    missing = expected - actual
+    if extra:
+        raise ValueError(f"unexpected key in {label}: {sorted(extra)[0]}")
+    if missing:
+        raise ValueError(f"missing key in {label}: {sorted(missing)[0]}")
+
+
+def _check_profile_against_packaged(
+    config: Mapping[str, Any], *, allow_fixture_contract: bool
+) -> None:
     package = _packaged_profile()
     for key in sorted(set(package) | set(config)):
+        fixture_allowed = (
+            allow_fixture_contract and key in FIXTURE_ALLOWED_PROFILE_FIELDS
+        )
         if key not in config:
+            if fixture_allowed:
+                continue
             raise ValueError(f"production contract: root profile is missing {key}")
         if key not in package:
+            if fixture_allowed:
+                continue
             raise ValueError(
                 f"production contract: root profile has unexpected key {key}"
             )
-        if config[key] != package[key]:
+        if config[key] == package[key] or fixture_allowed:
+            continue
+        if allow_fixture_contract:
             raise ValueError(
-                f"production contract: root profile {key} {config[key]!r} "
-                f"differs from the packaged causal profile {package[key]!r}"
+                f"fixture contract: {key} differs from the packaged causal profile "
+                "and is not in the fixture allowlist"
             )
+        raise ValueError(
+            f"production contract: root profile {key} {config[key]!r} "
+            f"differs from the packaged causal profile {package[key]!r}"
+        )
 
 
 def _check_scientific_constants(config: Mapping[str, Any]) -> None:
@@ -189,6 +330,14 @@ def _check_scientific_constants(config: Mapping[str, Any]) -> None:
         f"profile readout_steps must remain {READOUT_STEPS}",
     )
     _require(
+        int(config.get("max_new_tokens", -1)) == 64,
+        "profile max_new_tokens must remain 64",
+    )
+    _require(
+        int(config.get("eos_token_id", -1)) == FROZEN_EOS_TOKEN_ID,
+        "profile eos_token_id must remain the frozen Qwen chat EOS id",
+    )
+    _require(
         int(config.get("bootstrap_resamples", -1)) == BOOTSTRAP_DEFAULT_RESAMPLES,
         "bootstrap resamples must remain 10000",
     )
@@ -207,10 +356,88 @@ def _check_scientific_constants(config: Mapping[str, Any]) -> None:
     _require(int(config.get("primary_k", -1)) == 5, "primary k must remain 5")
 
 
+def _contains_raw_text(obj: Any) -> bool:
+    if compact_contains_text_leak(obj):
+        return True
+    if isinstance(obj, Mapping):
+        for key, value in obj.items():
+            if str(key).casefold() in RAW_TEXT_ALIASES:
+                return True
+            if _contains_raw_text(value):
+                return True
+        return False
+    if isinstance(obj, (list, tuple)):
+        return any(_contains_raw_text(item) for item in obj)
+    return False
+
+
 def _check_no_raw_text(named_payloads: Sequence[tuple[str, Any]]) -> None:
     for name, payload in named_payloads:
-        if compact_contains_text_leak(payload):
+        if _contains_raw_text(payload):
             raise ValueError(f"raw text found in {name}")
+
+
+def _check_result_schemas(
+    payloads: Mapping[str, Mapping[str, Any]],
+) -> None:
+    for name in (
+        STAGE_FILES["prepare"],
+        STAGE_FILES["pilot"],
+        STAGE_FILES["panel"],
+        STAGE_FILES["analysis"],
+        MANIFEST_FILENAME,
+    ):
+        _check_exact_keys(payloads[name], set(ENVELOPE_KEYS), name)
+        _check_exact_keys(payloads[name]["provenance"], set(PROVENANCE_KEYS), f"{name} provenance")
+    _check_exact_keys(
+        _results_of(payloads[STAGE_FILES["prepare"]], STAGE_FILES["prepare"]),
+        set(PREPARE_RESULT_KEYS),
+        "00_prepare.json results",
+    )
+    prepare = _results_of(payloads[STAGE_FILES["prepare"]], STAGE_FILES["prepare"])
+    for dataset in DATASETS:
+        _check_exact_keys(
+            prepare[dataset], set(DATASET_BLOCK_KEYS), f"00_prepare.json {dataset}"
+        )
+        identity = (prepare.get("source_files") or {}).get(dataset) or {}
+        _require(isinstance(identity, Mapping), f"{dataset} source identity missing")
+        extra = set(identity) - SOURCE_FILE_REQUIRED - SOURCE_FILE_OPTIONAL
+        missing = SOURCE_FILE_REQUIRED - set(identity)
+        if extra:
+            raise ValueError(f"unexpected key in {dataset} source identity: {sorted(extra)[0]}")
+        if missing:
+            raise ValueError(f"missing key in {dataset} source identity: {sorted(missing)[0]}")
+    _check_exact_keys(
+        _results_of(payloads[STAGE_FILES["pilot"]], STAGE_FILES["pilot"]),
+        set(PILOT_RESULT_KEYS),
+        "01_pilot.json results",
+    )
+    _check_exact_keys(
+        _results_of(payloads[STAGE_FILES["panel"]], STAGE_FILES["panel"]),
+        set(PANEL_RESULT_KEYS),
+        "02_panel.json results",
+    )
+    _check_exact_keys(
+        _results_of(payloads[STAGE_FILES["analysis"]], STAGE_FILES["analysis"]),
+        set(ANALYSIS_RESULT_KEYS),
+        "03_analysis.json results",
+    )
+    _check_exact_keys(
+        _results_of(payloads[MANIFEST_FILENAME], MANIFEST_FILENAME),
+        set(MANIFEST_RESULT_KEYS),
+        "execution_manifest.json results",
+    )
+    _check_exact_keys(payloads[EVALUATION_FILENAME], set(EVALUATION_KEYS), EVALUATION_FILENAME)
+    _check_exact_keys(
+        payloads[EVALUATION_FILENAME]["provenance"],
+        set(PROVENANCE_KEYS),
+        f"{EVALUATION_FILENAME} provenance",
+    )
+    _check_exact_keys(
+        (payloads[EVALUATION_FILENAME].get("results") or {}),
+        set(EVALUATION_RESULT_KEYS),
+        f"{EVALUATION_FILENAME} results",
+    )
 
 
 def _refusal_rates(responses: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -254,20 +481,71 @@ def _primary_from_bootstrap(
     return primary
 
 
-def _check_early_termination(responses: Sequence[Mapping[str, Any]]) -> None:
+def _check_generation_integrity(
+    responses: Sequence[Mapping[str, Any]],
+    observations: Sequence[Mapping[str, Any]],
+    config: Mapping[str, Any],
+) -> None:
+    max_new = _strict_int(config["max_new_tokens"], "max_new_tokens")
+    eos_id = _strict_int(config["eos_token_id"], "eos_token_id")
+    readout_limit = _strict_int(config["readout_steps"], "readout_steps")
+    grouped: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in observations:
+        grouped[_pair_key(row)].append(row)
     for row in responses:
-        try:
-            generated = int(row["generated_token_count"])
-            readout = int(row["readout_steps"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("termination fields missing from a response row") from exc
+        token_ids = row.get("generated_token_ids")
+        _require(
+            isinstance(token_ids, list),
+            "generated_token_ids must be a list of token ids",
+        )
+        for token in token_ids:
+            if isinstance(token, bool) or not isinstance(token, int):
+                raise ValueError(
+                    "generated_token_ids must contain strict integer token ids"
+                )
+        count = _strict_int(row.get("generated_token_count"), "generated_token_count")
+        _require(count >= 1, "empty generation is not allowed")
+        _require(
+            len(token_ids) == count,
+            "generated_token_ids length does not match generated_token_count",
+        )
+        readout = _strict_int(row.get("readout_steps"), "readout_steps")
+        expected_readout = min(readout_limit, count)
         terminal = row.get("terminal_reason")
         if not isinstance(terminal, str) or not terminal.strip():
             raise ValueError("early termination marker missing")
-        actual = min(READOUT_STEPS, generated)
-        if readout != actual:
+        if terminal == "max_tokens":
+            if count != max_new:
+                raise ValueError(
+                    "invalid terminal: max_tokens count is below max_new_tokens"
+                )
+            if token_ids[-1] == eos_id:
+                raise ValueError(
+                    "invalid terminal: max_tokens ends with the frozen EOS id"
+                )
+        elif terminal == "eos":
+            if not 1 <= count <= max_new:
+                raise ValueError(
+                    "invalid terminal: eos count is outside 1..max_new_tokens"
+                )
+            if token_ids[-1] != eos_id:
+                raise ValueError(
+                    "invalid terminal: eos final token is not the frozen EOS ID"
+                )
+        else:
+            raise ValueError("invalid terminal: unknown reason")
+        if readout != expected_readout:
             raise ValueError(
-                "termination readout_steps do not equal the actual generated denominator"
+                "termination readout_steps do not equal min(count, readout_steps)"
+            )
+        steps = {
+            _strict_int(item.get("generation_step"), "generation_step")
+            for item in grouped[_pair_key(row)]
+        }
+        expected_steps = set(range(1, expected_readout + 1))
+        if steps != expected_steps:
+            raise ValueError(
+                "observation steps are not exactly 1..min(count, readout_steps)"
             )
 
 
@@ -343,6 +621,68 @@ def _check_bootstrap_block(stored: Any, expected: Mapping[str, Any]) -> None:
     )
 
 
+def _check_file_identity(
+    *,
+    name: str,
+    payload: Mapping[str, Any],
+    run_id: str,
+    commit: str,
+    config: Mapping[str, Any],
+    source: Mapping[str, Any],
+    current_hashes: Mapping[str, str],
+    identity: Mapping[str, Any],
+    source_prepare: Mapping[str, Any],
+) -> None:
+    provenance = payload.get("provenance") or {}
+    _require(provenance.get("run_id") == run_id, f"run_id identity drifted in {name}")
+    _require(
+        provenance.get("implementation_commit") == commit,
+        f"implementation commit identity drifted in {name}",
+    )
+    _require(
+        provenance.get("config_sha256") == identity["config_hash"],
+        f"config hash identity drifted in {name}",
+    )
+    _require(
+        provenance.get("source_artifact_hashes") == dict(current_hashes),
+        f"source artifact hash identity drifted in {name}",
+    )
+    _require(
+        payload.get("config") == dict(config),
+        f"config in {name} differs from the causal profile",
+    )
+    _require(
+        provenance.get("model_name") == config["model_name"],
+        f"model name identity drifted in {name}",
+    )
+    _require(
+        provenance.get("requested_model_revision") == config["model_revision"]
+        and provenance.get("resolved_model_revision") == config["model_revision"],
+        f"model revision identity drifted in {name}",
+    )
+    _require(
+        provenance.get("jlens_upstream_commit") == config["jlens_upstream_commit"],
+        f"jlens upstream identity drifted in {name}",
+    )
+    _require(
+        provenance.get("source_dose_run_id") == source.get("source_dose_run_id"),
+        f"source dose identity drifted in {name}",
+    )
+    _require(
+        int(provenance.get("eos_token_id", -1)) == int(config["eos_token_id"]),
+        f"eos_token_id identity drifted in {name}",
+    )
+    _require(
+        provenance.get("cohort_digest") == cohort_digest(source_prepare),
+        f"cohort digest identity drifted in {name}",
+    )
+    _require(
+        int(provenance.get("direction_layer", -1)) == 18
+        and int(provenance.get("direction_offset", 0)) == -1,
+        f"direction identity drifted in {name}",
+    )
+
+
 def _check_shared_identity(
     *,
     payloads: Mapping[str, Mapping[str, Any]],
@@ -350,6 +690,7 @@ def _check_shared_identity(
     source: Mapping[str, Any],
     config: Mapping[str, Any],
     prepare: Mapping[str, Any],
+    source_prepare: Mapping[str, Any],
     status: Mapping[str, Any],
     events: Sequence[Mapping[str, Any]],
     checkpoint_path: Path,
@@ -375,30 +716,28 @@ def _check_shared_identity(
         prepare=prepare,
     )
     for name, payload in payloads.items():
-        if name == EVALUATION_FILENAME:
-            continue
-        provenance = payload.get("provenance") or {}
-        _require(
-            provenance.get("run_id") == run_id,
-            f"run_id identity drifted in {name}",
+        _check_file_identity(
+            name=name,
+            payload=payload,
+            run_id=str(run_id),
+            commit=str(commit),
+            config=config,
+            source=source,
+            current_hashes=current_hashes,
+            identity=identity,
+            source_prepare=source_prepare,
         )
-        _require(
-            provenance.get("implementation_commit") == commit,
-            f"implementation commit identity drifted in {name}",
-        )
-        _require(
-            provenance.get("config_sha256") == identity["config_hash"],
-            f"config hash identity drifted in {name}",
-        )
-        _require(
-            provenance.get("source_artifact_hashes") == current_hashes,
-            f"source artifact hash identity drifted in {name}",
-        )
-        if name != MANIFEST_FILENAME:
-            _require(
-                payload.get("config") == dict(config),
-                f"config in {name} differs from the causal profile",
-            )
+    _require(
+        evaluation.get("model_revision") == config["model_revision"],
+        "evaluation model revision identity drifted",
+    )
+    expected_ids = {
+        dataset: list(prepare[dataset]["example_ids"]) for dataset in DATASETS
+    }
+    _require(
+        evaluation.get("prepare_ids") == expected_ids,
+        "evaluation prepare_ids drifted from 00_prepare.json",
+    )
     _require(status.get("run_id") == run_id, "run_id mismatch in status.json")
     _require(
         all(item.get("run_id") == run_id for item in events),
@@ -455,7 +794,7 @@ def _check_ids_and_matrix(
     expected_observations = 0
     for row in responses:
         expected_observations += (
-            min(READOUT_STEPS, int(row["generated_token_count"]))
+            min(int(config["readout_steps"]), int(row["generated_token_count"]))
             * len(READOUT_LAYERS)
             * len(LENS_VERSIONS)
         )
@@ -471,6 +810,10 @@ def _check_status_events_manifest(
     status: Mapping[str, Any],
     events: Sequence[Mapping[str, Any]],
     manifest: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+    panel: Mapping[str, Any],
+    responses: Sequence[Mapping[str, Any]],
+    observations: Sequence[Mapping[str, Any]],
 ) -> None:
     _require(
         status.get("profile") == CAUSAL_JLENS_PROFILE,
@@ -494,6 +837,21 @@ def _check_status_events_manifest(
         list(results.get("result_files") or []) == list(RESULT_FILES),
         "manifest result_files differ from the documented set",
     )
+    _require(
+        list(results.get("completed_stages") or []) == COMPLETED_STAGES,
+        "manifest completed_stages differ from the documented stage sequence",
+    )
+    _require(
+        evaluation.get("pilot_status") == "pass",
+        "evaluation pilot_status must be pass",
+    )
+    _require(
+        evaluation.get("response_count") == len(responses)
+        and evaluation.get("observation_count") == len(observations)
+        and panel.get("response_count") == len(responses)
+        and panel.get("observation_count") == len(observations),
+        "evaluation counts drifted from actual response and observation denominators",
+    )
 
 
 def validate_qwen_causal_jlens(
@@ -504,9 +862,9 @@ def validate_qwen_causal_jlens(
     Strict production is the default: the run root profile must equal the
     packaged causal profile, the frozen 32+32 cohort must be intact, and the
     pair matrix must contain exactly 256 prompt-condition pairs.
-    ``allow_fixture_contract=True`` is only for CPU fixtures that use a reduced
-    dataset; it does not relax uniqueness, recomputation, identity or raw-text
-    rules.
+    ``allow_fixture_contract=True`` may change only
+    ``FIXTURE_ALLOWED_PROFILE_FIELDS``; every other packaged field, provenance
+    contract, uniqueness, recomputation and raw-text rule stays strict.
     """
     try:
         return _validate(root, allow_fixture_contract=allow_fixture_contract)
@@ -524,8 +882,9 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
     artifacts_dir = _confined_path(
         root, config.get("artifacts_dir"), "profile artifacts_dir"
     )
-    if not allow_fixture_contract:
-        _check_root_profile_is_production(config)
+    _check_profile_against_packaged(
+        config, allow_fixture_contract=allow_fixture_contract
+    )
     _check_scientific_constants(config)
     checks["production_contract"] = True
 
@@ -539,6 +898,7 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
     _require(evaluation.get("status") == "pass", "evaluation status must be pass")
     _check_no_raw_text(list(payloads.items()))
     checks["no_raw_text"] = True
+    _check_result_schemas(payloads)
 
     prepare = _results_of(payloads[STAGE_FILES["prepare"]], STAGE_FILES["prepare"])
     analysis = _results_of(payloads[STAGE_FILES["analysis"]], STAGE_FILES["analysis"])
@@ -554,6 +914,7 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
         source=source,
         config=config,
         prepare=prepare,
+        source_prepare=source_prepare,
         status=status,
         events=events,
         checkpoint_path=checkpoint_path,
@@ -562,7 +923,7 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
 
     responses = _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
     observations = _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
-    _check_early_termination(responses)
+    _check_generation_integrity(responses, observations, config)
     checks["early_termination"] = True
     _check_unique_observation_keys(observations)
     checks["unique_observation_keys"] = True
@@ -651,6 +1012,15 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
         status=status,
         events=events,
         manifest=payloads[MANIFEST_FILENAME],
+        evaluation=evaluation,
+        panel=panel,
+        responses=responses,
+        observations=observations,
+    )
+    pilot = _results_of(payloads[STAGE_FILES["pilot"]], STAGE_FILES["pilot"])
+    _require(
+        evaluation.get("pilot_status") == pilot.get("pilot_status") == "pass",
+        "evaluation pilot_status drifted from 01_pilot.json",
     )
     checks["status_events_manifest"] = True
     return checks

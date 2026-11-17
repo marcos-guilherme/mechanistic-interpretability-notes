@@ -126,6 +126,7 @@ def test_profile_freezes_the_approved_protocol() -> None:
         "random_control",
     ]
     assert config["max_new_tokens"] == 64
+    assert config["eos_token_id"] == 151645
     assert config["readout_steps"] == 8
     assert config["readout_layers"] == [19, 22, 25, 26]
     assert config["bootstrap_resamples"] == 10_000

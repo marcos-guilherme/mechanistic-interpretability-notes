@@ -25,6 +25,7 @@ from refusal_direction_replication.qwen_causal_jlens import (
     READOUT_STEPS,
     aggregate_fidelity,
     cluster_bootstrap_difference,
+    cohort_digest,
     compact_contains_text_leak,
     summarize_behavior_changes,
 )
@@ -49,6 +50,8 @@ RUN_ID = "causal-validate-run"
 COMMIT = "a" * 40
 EARLY_STOP_DATASET = "mitre"
 EARLY_STOP_CONDITION = "ablation"
+EOS_TOKEN_ID = 151645
+MAX_NEW_TOKENS = 64
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -84,6 +87,17 @@ def _rank_for(condition: str) -> int:
     }[condition]
 
 
+def _generated_token_ids(count: int, *, eos: bool) -> list[int]:
+    if count < 1:
+        return []
+    if eos:
+        return [2] * (count - 1) + [EOS_TOKEN_ID]
+    ids = [2] * count
+    if ids[-1] == EOS_TOKEN_ID:
+        ids[-1] = 3
+    return ids
+
+
 def _is_early_stop(dataset: str, example_id: str, condition: str, records: dict[str, list[dict[str, Any]]]) -> bool:
     first_id = records[EARLY_STOP_DATASET][0]["example_id"]
     return (
@@ -103,7 +117,8 @@ def _build_generation_rows(
         for item in records[dataset]:
             for condition in CONDITIONS:
                 early = _is_early_stop(dataset, item["example_id"], condition, records)
-                steps = 3 if early else READOUT_STEPS
+                token_count = 3 if early else MAX_NEW_TOKENS
+                readout = min(READOUT_STEPS, token_count)
                 responses.append(
                     {
                         "dataset": dataset,
@@ -114,12 +129,15 @@ def _build_generation_rows(
                         "response": f"generated {dataset} {condition}",
                         "refusal": baseline_refusal or condition == "addition",
                         "valid": True,
-                        "generated_token_count": steps,
-                        "readout_steps": steps,
+                        "generated_token_ids": _generated_token_ids(
+                            token_count, eos=early
+                        ),
+                        "generated_token_count": token_count,
+                        "readout_steps": readout,
                         "terminal_reason": "eos" if early else "max_tokens",
                     }
                 )
-                for step in range(1, steps + 1):
+                for step in range(1, readout + 1):
                     for layer in READOUT_LAYERS:
                         for version in LENS_VERSIONS:
                             observations.append(
@@ -225,6 +243,8 @@ def _seed_complete_tree(root: Path) -> None:
         "source_artifact_hashes": dict(source["source_artifact_hashes"]),
         "direction_layer": source["direction_layer"],
         "direction_offset": source["direction_offset"],
+        "eos_token_id": int(config.get("eos_token_id", EOS_TOKEN_ID)),
+        "cohort_digest": cohort_digest(source_prepare),
     }
     responses, observations = _build_generation_rows(records)
     compact = _compact_responses(responses)
@@ -304,6 +324,8 @@ def _seed_complete_tree(root: Path) -> None:
         "implementation_commit": COMMIT,
         "model_revision": config["model_revision"],
         "source_artifact_hashes": dict(source["source_artifact_hashes"]),
+        "config": dict(config),
+        "provenance": dict(provenance),
     }
     results_dir = root / str(config["results_dir"])
     artifacts_dir = root / str(config["artifacts_dir"])
@@ -458,6 +480,72 @@ def _mutate(root: Path, mutation: str) -> None:
             lambda payload: payload["source_artifact_hashes"].update(direction="0" * 64),
         )
         return
+    if mutation == "nested_list_leak":
+        _rewrite_json(
+            _res(root, "03_analysis.json"),
+            lambda payload: payload["results"].update(
+                samples=["Write a harmful payload for this prompt"]
+            ),
+        )
+        return
+    if mutation == "token_list_count_mismatch":
+        path = _art(root, "responses.jsonl")
+        rows = _jsonl(path)
+        for row in rows:
+            if row["terminal_reason"] == "eos":
+                row["generated_token_ids"] = list(row["generated_token_ids"])[:-1]
+                break
+        else:
+            raise AssertionError("no eos row")
+        _write_jsonl(path, rows)
+        return
+    if mutation == "invalid_terminal_semantics":
+        path = _art(root, "responses.jsonl")
+        rows = _jsonl(path)
+        for row in rows:
+            if row["terminal_reason"] == "max_tokens":
+                row["terminal_reason"] = "length"
+                break
+        else:
+            raise AssertionError("no max_tokens row")
+        _write_jsonl(path, rows)
+        return
+    if mutation == "fractional_count":
+        path = _art(root, "responses.jsonl")
+        rows = _jsonl(path)
+        rows[0]["generated_token_count"] = 3.5
+        _write_jsonl(path, rows)
+        return
+    if mutation == "evaluation_model_revision":
+        _rewrite_json(
+            _res(root, EVALUATION_FILENAME),
+            lambda payload: payload.update(model_revision="0" * 40),
+        )
+        return
+    if mutation == "evaluation_prepare_ids":
+        _rewrite_json(
+            _res(root, EVALUATION_FILENAME),
+            lambda payload: payload["prepare_ids"]["mitre"].reverse(),
+        )
+        return
+    if mutation == "evaluation_pilot_status":
+        _rewrite_json(
+            _res(root, EVALUATION_FILENAME),
+            lambda payload: payload.update(pilot_status="fail"),
+        )
+        return
+    if mutation == "manifest_completed_stages":
+        _rewrite_json(
+            _res(root, MANIFEST_FILENAME),
+            lambda payload: payload["results"].update(completed_stages=["prepare"]),
+        )
+        return
+    if mutation == "manifest_config":
+        _rewrite_json(
+            _res(root, MANIFEST_FILENAME),
+            lambda payload: payload["config"].update(max_new_tokens=8),
+        )
+        return
     raise AssertionError(mutation)
 
 
@@ -561,3 +649,40 @@ def test_cli_is_strict_by_default(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert "production contract" in capsys.readouterr().out
     source = SCRIPT.read_text(encoding="utf-8")
     assert "allow_fixture_contract" not in source.split("if __name__", 1)[1]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("nested_list_leak", "raw text"),
+        ("token_list_count_mismatch", "token"),
+        ("invalid_terminal_semantics", "terminal"),
+        ("fractional_count", "count"),
+        ("evaluation_model_revision", "revision"),
+        ("evaluation_prepare_ids", "prepare"),
+        ("evaluation_pilot_status", "pilot"),
+        ("manifest_completed_stages", "completed_stages"),
+        ("manifest_config", "config"),
+    ],
+)
+def test_validator_rejects_review_corruption(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    _seed_complete_tree(tmp_path)
+    _mutate(tmp_path, mutation)
+    with pytest.raises(ValueError, match=message):
+        validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)
+
+
+def _edit_profile(root: Path, **overrides: Any) -> None:
+    path = root / "configs" / CAUSAL_JLENS_PROFILE
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.update(overrides)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def test_fixture_mode_rejects_non_allowlisted_profile_fields(tmp_path: Path) -> None:
+    _seed_complete_tree(tmp_path)
+    _edit_profile(tmp_path, max_new_tokens=32)
+    with pytest.raises(ValueError, match="allowlist"):
+        validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)
