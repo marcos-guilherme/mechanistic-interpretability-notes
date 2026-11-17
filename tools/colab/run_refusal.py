@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,7 +23,9 @@ PROFILE_SESSIONS = {
     "qwen25-coder-jlens": "refusal-qwen",
     "qwen25-coder-code-eval": "refusal-qwen",
     "qwen25-coder-lab": "refusal-qwen-lab",
+    "qwen25-coder-jlens-v2": "refusal-qwen-jlens-v2",
 }
+JLENS_V2 = "qwen25-coder-jlens-v2"
 EXCLUDED_PARTS = {
     ".git",
     ".ipynb_checkpoints",
@@ -38,7 +42,19 @@ REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
 REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
 REMOTE_LAB_LENS_MANIFEST = "/content/lab_source_lens.pt.manifest.json"
 REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
-A100_PROFILES = frozenset({"qwen25-coder-code-eval", "qwen25-coder-lab"})
+A100_PROFILES = frozenset({"qwen25-coder-code-eval", "qwen25-coder-lab", JLENS_V2})
+DEFAULT_EXEC_TIMEOUT = 7200
+JLENS_V2_EXEC_TIMEOUT = 46800
+JLENS_V2_LENS_CHUNK_BYTES = LAB_LENS_CHUNK_BYTES
+REMOTE_JLENS_V2_LENS_STAGING = "/content/jlens_v2_source_v1_lens.pt"
+REMOTE_JLENS_V2_LENS_MANIFEST = "/content/jlens_v2_source_v1_lens.pt.manifest.json"
+REMOTE_JLENS_V2_ARTIFACTS = "/content/refusal_direction/artifacts/qwen25_coder_7b_jlens_v2"
+# Status/events before the checkpoint: the fit replaces the checkpoint before it
+# advances status/events, so this order can never yield status ahead of it.
+JLENS_V2_BACKUP_ORDER = ("status.json", "events.jsonl", "jlens_fit_checkpoint.pt")
+JLENS_V2_BACKUP_TIMEOUT_SECONDS = 1800
+STOP_BACKUP_TIMEOUT_SECONDS = 600
+REMOTE_FILE_MISSING_MARKER = "file or directory not found"
 
 
 def huggingface_token_path(home: Path | None = None) -> Path:
@@ -135,6 +151,8 @@ def resolve_session(profile: str, session: str | None) -> str:
 
 
 def fetch_pack_script(profile: str) -> Path:
+    if profile == JLENS_V2:
+        return PROJECT / "scripts" / "colab_pack_qwen_jlens_v2_results.py"
     if profile == "qwen25-coder-code-eval":
         return PROJECT / "scripts" / "colab_pack_qwen_code_eval_results.py"
     if profile == "qwen25-coder-jlens":
@@ -147,7 +165,7 @@ def fetch_pack_script(profile: str) -> Path:
 
 
 def fetch_pack_timeout(profile: str) -> int:
-    if profile == "qwen25-coder-code-eval":
+    if profile in ("qwen25-coder-code-eval", JLENS_V2):
         return 1800
     return 300
 
@@ -164,6 +182,8 @@ def status_command(session: str, *, profile: str = "qwen25-coder") -> list[str]:
         script = PROJECT / "scripts" / "qwen_run_code_eval_status.py"
     elif profile == "qwen25-coder-jlens":
         script = PROJECT / "scripts" / "qwen_run_jlens_status.py"
+    elif profile == JLENS_V2:
+        script = PROJECT / "scripts" / "qwen_run_jlens_v2_status.py"
     elif profile == "qwen25-coder-dose":
         script = PROJECT / "scripts" / "qwen_run_dose_status.py"
     return [
@@ -194,10 +214,13 @@ def dose_command(session: str, *, timeout: int) -> list[str]:
     )
 
 
-def jlens_command(session: str, *, timeout: int) -> list[str]:
+def jlens_command(
+    session: str, *, timeout: int, profile: str = "qwen25-coder-jlens"
+) -> list[str]:
+    script = "qwen_run_jlens_v2.py" if profile == JLENS_V2 else "qwen_run_jlens.py"
     return exec_command(
         session,
-        PROJECT / "scripts" / "qwen_run_jlens.py",
+        PROJECT / "scripts" / script,
         timeout=timeout,
     )
 
@@ -245,6 +268,15 @@ def extract_qwen_jlens_results_archive(archive: Path, project: Path) -> None:
     extract_qwen_jlens_archive(archive, project)
 
 
+def extract_qwen_jlens_v2_results_archive(archive: Path, project: Path) -> None:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        extract_qwen_jlens_v2_archive,
+    )
+
+    extract_qwen_jlens_v2_archive(archive, project)
+
+
 def extract_qwen_code_eval_results_archive(archive: Path, project: Path) -> None:
     sys.path.insert(0, str(project / "src"))
     from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
@@ -281,6 +313,112 @@ def optional_jlens_resume_bundle(project: Path) -> list[tuple[Path, str]]:
     return optional_local_jlens_resume_bundle(project)
 
 
+def optional_jlens_v2_resume_bundle(project: Path) -> list[tuple[Path, str]]:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        optional_local_jlens_v2_resume_bundle,
+    )
+
+    return optional_local_jlens_v2_resume_bundle(project)
+
+
+def require_jlens_v2_source_v1_lens(project: Path) -> Path:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.pipeline import load_config  # noqa: WPS433
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        path_is_link_or_junction,
+    )
+    from refusal_direction_replication.qwen_jlens import JLENS_V2_PROFILE  # noqa: WPS433
+    from refusal_direction_replication.qwen_lab_readout import (  # noqa: WPS433
+        FROZEN_LENS_SHA256,
+        verify_frozen_lens_hash,
+    )
+
+    config = load_config(project, profile=JLENS_V2_PROFILE)
+    lens = project / str(config["source_v1_lens"])
+    if path_is_link_or_junction(lens) or not lens.is_file():
+        raise FileNotFoundError(f"frozen v1 lens not found: {config['source_v1_lens']}")
+    verify_frozen_lens_hash(lens, FROZEN_LENS_SHA256)
+    return lens
+
+
+def download_optional(command: list[str], *, timeout: float) -> bool:
+    """Run ``colab download``; False only when the remote file is absent."""
+
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    if completed.returncode == 0:
+        return True
+    output = f"{completed.stdout or ''}{completed.stderr or ''}"
+    if REMOTE_FILE_MISSING_MARKER in output.casefold():
+        return False
+    raise subprocess.CalledProcessError(
+        completed.returncode, command, output=completed.stdout, stderr=completed.stderr
+    )
+
+
+def backup_jlens_v2_checkpoint(
+    session: str,
+    *,
+    project: Path,
+    staging_root: Path,
+    timeout: float,
+) -> dict | None:
+    """Back up the remote v2 resume bundle through the Colab file API only.
+
+    Never uses ``colab exec`` (which would queue behind a running fit) and never
+    stops the session. The previous local bundle is replaced only after the
+    exact downloaded triple validates; any failure leaves it untouched.
+    """
+
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        atomic_install_jlens_v2_resume,
+        validate_jlens_v2_resume_bundle,
+    )
+
+    deadline = time.monotonic() + timeout
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="jlens-v2-backup-", dir=staging_root))
+    try:
+        present: dict[str, bool] = {}
+        for name in JLENS_V2_BACKUP_ORDER:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"v2 backup exceeded {timeout:g}s before {name}")
+            present[name] = download_optional(
+                download_command(
+                    session, f"{REMOTE_JLENS_V2_ARTIFACTS}/{name}", staging / name
+                ),
+                timeout=remaining,
+            )
+        status, events, checkpoint = (staging / name for name in JLENS_V2_BACKUP_ORDER)
+        if not present["jlens_fit_checkpoint.pt"]:
+            print("v2 checkpoint-backup: no remote checkpoint yet; nothing to back up")
+            return None
+        if not (present["status.json"] and present["events.jsonl"]):
+            raise ValueError("remote v2 checkpoint exists without status.json/events.jsonl")
+        meta = validate_jlens_v2_resume_bundle(
+            checkpoint=checkpoint, status=status, events=events
+        )
+        atomic_install_jlens_v2_resume(
+            checkpoint=checkpoint, status=status, events=events, project=project
+        )
+        print(
+            "v2 checkpoint-backup: "
+            f"run_id={meta['run_id']} n_done={meta['n_done']}/{meta['fit_count']}"
+        )
+        return meta
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def require_code_eval_sources(project: Path) -> tuple[Path, Path]:
     sys.path.insert(0, str(project / "src"))
     from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
@@ -308,6 +446,9 @@ def bootstrap_scripts(profile: str) -> list[Path]:
     if profile == "qwen25-coder-jlens":
         scripts.append(PROJECT / "scripts" / "colab_install_jlens.py")
         scripts.append(PROJECT / "scripts" / "colab_install_jlens_checkpoint.py")
+    if profile == JLENS_V2:
+        scripts.append(PROJECT / "scripts" / "colab_install_jlens.py")
+        scripts.append(PROJECT / "scripts" / "colab_install_jlens_v2_checkpoint.py")
     if profile == "qwen25-coder-code-eval":
         scripts.append(PROJECT / "scripts" / "colab_install_code_eval.py")
     return scripts
@@ -442,6 +583,7 @@ def main() -> int:
             "jlens",
             "code-eval",
             "lab",
+            "checkpoint-backup",
             "stop",
         ),
     )
@@ -457,9 +599,16 @@ def main() -> int:
         default="L4",
     )
     parser.add_argument("--notebook", type=Path)
-    parser.add_argument("--timeout", type=int, default=7200)
+    parser.add_argument("--timeout", type=int, default=None)
     args = parser.parse_args()
     session = resolve_session(args.profile, args.session)
+    explicit_timeout = args.timeout
+    if args.timeout is None:
+        args.timeout = (
+            JLENS_V2_EXEC_TIMEOUT
+            if args.action == "jlens" and args.profile == JLENS_V2
+            else DEFAULT_EXEC_TIMEOUT
+        )
 
     if args.action == "probe":
         run([*AUTH, "sessions"])
@@ -568,6 +717,37 @@ def main() -> int:
         if args.profile == "qwen25-coder-jlens":
             for local_path, remote in optional_jlens_resume_bundle(PROJECT):
                 run(upload_command(session, local_path, remote))
+        if args.profile == JLENS_V2:
+            sys.path.insert(0, str(PROJECT / "src"))
+            from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+                write_artifact_chunk_manifest,
+            )
+
+            source_lens = require_jlens_v2_source_v1_lens(PROJECT)
+            parts_dir = ROOT / ".colab-staging" / "jlens-v2-lens-parts"
+            staged_name = Path(REMOTE_JLENS_V2_LENS_STAGING).name
+            lens_parts = split_artifact_file(
+                source_lens,
+                parts_dir,
+                chunk_bytes=JLENS_V2_LENS_CHUNK_BYTES,
+                part_prefix=staged_name + ".part",
+            )
+            manifest_path = write_artifact_chunk_manifest(
+                source_lens,
+                lens_parts,
+                parts_dir / (staged_name + ".manifest.json"),
+            )
+            run(upload_command(session, manifest_path, REMOTE_JLENS_V2_LENS_MANIFEST))
+            for index, part in enumerate(lens_parts):
+                run(
+                    upload_command(
+                        session,
+                        part,
+                        f"{REMOTE_JLENS_V2_LENS_STAGING}.part{index:03d}",
+                    )
+                )
+            for local_path, remote in optional_jlens_v2_resume_bundle(PROJECT):
+                run(upload_command(session, local_path, remote))
     elif args.action == "bootstrap":
         for script in bootstrap_scripts(args.profile):
             run(
@@ -619,6 +799,9 @@ def main() -> int:
         elif args.profile == "qwen25-coder-jlens":
             remote_archive = "/content/qwen_jlens_results.tar.gz"
             local_name = "qwen_jlens_results.tar.gz"
+        elif args.profile == JLENS_V2:
+            remote_archive = "/content/qwen_jlens_v2_results.tar.gz"
+            local_name = "qwen_jlens_v2_results.tar.gz"
         elif args.profile == "qwen25-coder-dose":
             remote_archive = "/content/qwen_dose_results.tar.gz"
             local_name = "qwen_dose_results.tar.gz"
@@ -648,6 +831,8 @@ def main() -> int:
             extract_qwen_code_eval_results_archive(local, PROJECT)
         elif args.profile == "qwen25-coder-jlens":
             extract_qwen_jlens_results_archive(local, PROJECT)
+        elif args.profile == JLENS_V2:
+            extract_qwen_jlens_v2_results_archive(local, PROJECT)
         elif args.profile == "qwen25-coder-dose":
             extract_qwen_dose_results_archive(local, PROJECT)
         elif args.profile == "qwen25-coder":
@@ -662,6 +847,7 @@ def main() -> int:
             "qwen25-coder-jlens",
             "qwen25-coder-code-eval",
             "qwen25-coder-lab",
+            JLENS_V2,
         ):
             parser.error("status is only available for Qwen profiles")
         run(status_command(session, profile=args.profile))
@@ -674,9 +860,12 @@ def main() -> int:
             parser.error("dose is only available for --profile qwen25-coder-dose")
         run(dose_command(session, timeout=args.timeout))
     elif args.action == "jlens":
-        if args.profile != "qwen25-coder-jlens":
-            parser.error("jlens is only available for --profile qwen25-coder-jlens")
-        run(jlens_command(session, timeout=args.timeout))
+        if args.profile not in ("qwen25-coder-jlens", JLENS_V2):
+            parser.error(
+                "jlens is only available for --profile qwen25-coder-jlens or "
+                f"{JLENS_V2}"
+            )
+        run(jlens_command(session, timeout=args.timeout, profile=args.profile))
     elif args.action == "code-eval":
         if args.profile != "qwen25-coder-code-eval":
             parser.error(
@@ -718,10 +907,40 @@ def main() -> int:
                     auth_path.unlink()
                 except FileNotFoundError:
                     pass
+    elif args.action == "checkpoint-backup":
+        if args.profile != JLENS_V2:
+            parser.error(f"checkpoint-backup is only available for --profile {JLENS_V2}")
+        backup_jlens_v2_checkpoint(
+            session,
+            project=PROJECT,
+            staging_root=ROOT / ".colab-staging",
+            timeout=explicit_timeout or JLENS_V2_BACKUP_TIMEOUT_SECONDS,
+        )
     elif args.action == "stop":
         if args.profile == "qwen25-coder-lab":
             cleanup_lab_local_staging(ROOT)
-        run(stop_command(session))
+        backup_failed = False
+        try:
+            if args.profile == JLENS_V2:
+                try:
+                    backup_jlens_v2_checkpoint(
+                        session,
+                        project=PROJECT,
+                        staging_root=ROOT / ".colab-staging",
+                        timeout=STOP_BACKUP_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:  # noqa: BLE001 - stop must still run
+                    backup_failed = True
+                    print(
+                        "WARNING: final v2 checkpoint backup failed "
+                        f"({type(exc).__name__}: {exc}); the previous local "
+                        "bundle was kept. Stopping the session anyway.",
+                        file=sys.stderr,
+                    )
+        finally:
+            run(stop_command(session))
+        if backup_failed:
+            return 1
     return 0
 
 

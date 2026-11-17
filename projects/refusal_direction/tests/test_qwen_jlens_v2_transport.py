@@ -511,3 +511,176 @@ def test_v2_resume_status_fit_total_must_match_checkpoint_fit_count(
         validate_jlens_v2_resume_bundle(
             checkpoint=checkpoint, status=status, events=events
         )
+
+
+# --- remote v2 scripts -------------------------------------------------------
+
+SCRIPTS = Path(__file__).parents[1] / "scripts"
+V1_LENS = "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
+
+
+def _load_script(name: str):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stage_chunked_lens(staging_dir: Path, payload: bytes) -> tuple[Path, Path]:
+    source = staging_dir / "source_lens.pt"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(payload)
+    staged = staging_dir / "jlens_v2_source_v1_lens.pt"
+    parts = transport.split_artifact_file(
+        source, staging_dir, chunk_bytes=5, part_prefix=staged.name + ".part"
+    )
+    manifest = staged.with_name(staged.name + ".manifest.json")
+    transport.write_artifact_chunk_manifest(source, parts, manifest)
+    source.unlink()
+    return staged, manifest
+
+
+def _sha(payload: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(payload).hexdigest()
+
+
+def test_v2_run_status_and_pack_scripts_target_only_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from refusal_direction_replication.qwen_jlens import JLENS_V2_PROFILE
+
+    run_script = _load_script("qwen_run_jlens_v2")
+    seen: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        run_script,
+        "run_qwen_jlens",
+        lambda root, *, profile: seen.append((root, profile)) or {"status": "pass"},
+    )
+    assert run_script.remote_main() == 0
+    assert seen == [(Path("/content/refusal_direction"), JLENS_V2_PROFILE)]
+
+    pack_script = _load_script("colab_pack_qwen_jlens_v2_results")
+    packed: list[Path] = []
+    monkeypatch.setattr(
+        pack_script, "pack_qwen_jlens_v2_results", lambda _root, archive: packed.append(archive)
+    )
+    assert pack_script.main() == 0
+    assert packed == [JLENS_V2_REMOTE_ARCHIVE]
+
+    status_script = _load_script("qwen_run_jlens_v2_status")
+    project = Path(__file__).parents[1]
+    root = tmp_path / "remote"
+    (root / "configs").mkdir(parents=True)
+    (root / "configs" / JLENS_V2_PROFILE).write_bytes(
+        (project / "configs" / JLENS_V2_PROFILE).read_bytes()
+    )
+    v1 = root / JLENS_ARTIFACTS_DIR
+    v1.mkdir(parents=True)
+    (v1 / "status.json").write_text('{"profile": "v1"}\n', encoding="utf-8")
+    assert status_script.main_with_root(root) == 2
+    v2 = root / V2_ARTIFACTS
+    v2.mkdir(parents=True)
+    (v2 / "status.json").write_text(
+        json.dumps(
+            {
+                "profile": JLENS_V2_PROFILE,
+                "run_id": "r",
+                "current_stage": "fit",
+                "state": "running",
+                "completed_units": 3,
+                "total_units": 200,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (v2 / "events.jsonl").write_text('{"event": "checkpoint"}\n', encoding="utf-8")
+    assert status_script.main_with_root(root) == 0
+    assert "stage=fit" in status_script.last_stdout_summary
+    assert "last_event=checkpoint" in status_script.last_stdout_summary
+
+
+def test_v2_installer_assembles_verifies_and_installs_v1_lens_and_resume(
+    tmp_path: Path,
+) -> None:
+    installer = _load_script("colab_install_jlens_v2_checkpoint")
+    payload = b"frozen-v1-lens-bytes"
+    staged, manifest = _stage_chunked_lens(tmp_path / "content", payload)
+    checkpoint, status, events = _write_resume_members(tmp_path / "content" / "resume")
+    project = tmp_path / "project"
+
+    installer.install_v2_sources(
+        project=project,
+        lens_staging=staged,
+        lens_manifest=manifest,
+        checkpoint=checkpoint,
+        status=status,
+        events=events,
+        expected_lens_sha256=_sha(payload),
+    )
+
+    assert (project / V1_LENS).read_bytes() == payload
+    assert (project / V2_ARTIFACTS / "jlens_fit_checkpoint.pt").is_file()
+    assert not (project / JLENS_ARTIFACTS_DIR / "jlens_fit_checkpoint.pt").exists()
+    assert not list((tmp_path / "content").glob("jlens_v2_source_v1_lens.pt*"))
+
+
+def test_v2_installer_without_resume_bundle_installs_lens_only(tmp_path: Path) -> None:
+    installer = _load_script("colab_install_jlens_v2_checkpoint")
+    payload = b"frozen-v1-lens-bytes"
+    staged, manifest = _stage_chunked_lens(tmp_path / "content", payload)
+    project = tmp_path / "project"
+    missing = tmp_path / "content" / "absent"
+
+    installer.install_v2_sources(
+        project=project,
+        lens_staging=staged,
+        lens_manifest=manifest,
+        checkpoint=missing / "c.pt",
+        status=missing / "s.json",
+        events=missing / "e.jsonl",
+        expected_lens_sha256=_sha(payload),
+    )
+
+    assert (project / V1_LENS).read_bytes() == payload
+    assert not (project / V2_ARTIFACTS).exists()
+
+
+@pytest.mark.parametrize("defect", ["wrong_hash", "altered_part"])
+def test_v2_installer_never_touches_v1_path_until_staged_lens_validates(
+    tmp_path: Path, defect: str
+) -> None:
+    installer = _load_script("colab_install_jlens_v2_checkpoint")
+    payload = b"frozen-v1-lens-bytes"
+    staged, manifest = _stage_chunked_lens(tmp_path / "content", payload)
+    expected = _sha(payload)
+    if defect == "wrong_hash":
+        expected = "0" * 64
+    else:
+        part = staged.with_name(staged.name + ".part001")
+        part.write_bytes(b"XXXXX")
+    project = tmp_path / "project"
+    destination = project / V1_LENS
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"previous")
+
+    with pytest.raises(ValueError):
+        installer.install_v2_sources(
+            project=project,
+            lens_staging=staged,
+            lens_manifest=manifest,
+            checkpoint=tmp_path / "none.pt",
+            status=tmp_path / "none.json",
+            events=tmp_path / "none.jsonl",
+            expected_lens_sha256=expected,
+        )
+
+    assert destination.read_bytes() == b"previous"
+    assert sorted(path.name for path in destination.parent.iterdir()) == [
+        destination.name
+    ]
+    assert not list((tmp_path / "content").glob("jlens_v2_source_v1_lens.pt*"))
