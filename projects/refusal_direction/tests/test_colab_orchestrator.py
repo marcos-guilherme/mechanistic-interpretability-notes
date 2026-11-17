@@ -456,6 +456,71 @@ def test_v2_stop_still_stops_and_reports_when_backup_fails(
     assert "backup failed" in capsys.readouterr().err
 
 
+def test_v2_checkpoint_backup_passes_explicit_zero_timeout(
+    monkeypatch, tmp_path
+) -> None:
+    captured: list[float] = []
+
+    def record_backup(*_args, **kwargs):
+        captured.append(kwargs["timeout"])
+        return None
+
+    monkeypatch.setattr(MODULE, "backup_jlens_v2_checkpoint", record_backup)
+    monkeypatch.setattr(MODULE, "ROOT", tmp_path)
+    monkeypatch.setattr(MODULE, "PROJECT", tmp_path / "refusal_direction")
+
+    assert _main(monkeypatch, "checkpoint-backup", "--profile", V2, "--timeout", "0") == 0
+    assert captured == [0]
+
+
+def test_v2_stop_retries_stop_until_success(monkeypatch, tmp_path) -> None:
+    commands: list[list[str]] = []
+    attempts = {"n": 0}
+
+    def flaky_run(command: list[str]) -> None:
+        commands.append(list(command))
+        if command[2] != "stop":
+            return
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("colab stop transient")
+
+    import time
+
+    monkeypatch.setattr(MODULE, "run", flaky_run)
+    monkeypatch.setattr(MODULE, "ROOT", tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    remote = _v2_remote_triple(tmp_path / "remote", n_done=2)
+    _fake_file_api(monkeypatch, remote)
+
+    assert _main(monkeypatch, "stop", "--profile", V2) == 0
+    stop_commands = [c for c in commands if c[2] == "stop"]
+    assert stop_commands == [MODULE.stop_command(V2_SESSION)] * 3
+
+
+def test_v2_stop_alerts_when_stop_never_succeeds(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    def always_fail(command: list[str]) -> None:
+        if command[2] == "stop":
+            raise RuntimeError("colab stop down")
+
+    import time
+
+    monkeypatch.setattr(MODULE, "run", always_fail)
+    monkeypatch.setattr(MODULE, "ROOT", tmp_path)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    remote = _v2_remote_triple(tmp_path / "remote", n_done=2)
+    _fake_file_api(monkeypatch, remote)
+
+    assert _main(monkeypatch, "stop", "--profile", V2) == 1
+    err = capsys.readouterr().err
+    assert "A100 MAY STILL BE RUNNING" in err
+    assert (
+        "python tools/colab/run_refusal.py stop --profile qwen25-coder-jlens-v2" in err
+    )
+
+
 def test_v2_fetch_uses_v2_archive_and_extraction(monkeypatch, tmp_path) -> None:
     commands = _record_runs(monkeypatch)
     monkeypatch.setattr(MODULE, "ROOT", tmp_path)

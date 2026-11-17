@@ -566,6 +566,50 @@ def test_resume_bundle_rejects_mismatched_run_and_progress(tmp_path: Path) -> No
     )
 
 
+def test_resume_install_keyboard_interrupt_restores_original_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication import qwen_colab_transport as transport
+
+    project = tmp_path / "project"
+    old_ckpt, old_status, old_events = _write_resume_members(
+        project / "artifacts" / "qwen25_coder_7b_jlens",
+        run_id="old-run",
+        n_done=1,
+    )
+    before = {
+        "checkpoint": old_ckpt.read_bytes(),
+        "status": old_status.read_bytes(),
+        "events": old_events.read_bytes(),
+    }
+    staged_dir = tmp_path / "staging"
+    staged_ckpt, staged_status, staged_events = _write_resume_members(
+        staged_dir, run_id="new-run", n_done=8
+    )
+
+    original = transport._stream_install_regular_file
+    calls = {"n": 0}
+
+    def interrupt_on_status(**kwargs):
+        calls["n"] += 1
+        if kwargs["destination"].name == "status.json":
+            raise KeyboardInterrupt
+        return original(**kwargs)
+
+    monkeypatch.setattr(transport, "_stream_install_regular_file", interrupt_on_status)
+    with pytest.raises(KeyboardInterrupt):
+        atomic_install_jlens_resume(
+            checkpoint=staged_ckpt,
+            status=staged_status,
+            events=staged_events,
+            project=project,
+        )
+    assert old_ckpt.read_bytes() == before["checkpoint"]
+    assert old_status.read_bytes() == before["status"]
+    assert old_events.read_bytes() == before["events"]
+
+
 def test_resume_install_rolls_back_writes_marker_and_consumes_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

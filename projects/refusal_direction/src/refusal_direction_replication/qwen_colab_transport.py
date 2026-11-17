@@ -1411,12 +1411,18 @@ def _atomic_install_resume(
             for staged in (checkpoint, status, events):
                 if staged.exists() and staged.is_file():
                     staged.unlink()
-        return installed
-    except Exception:
-        _rollback_install_records(records)
-        raise
-    finally:
         shutil.rmtree(backup_root, ignore_errors=True)
+        return installed
+    except BaseException:
+        try:
+            _rollback_install_records(records)
+        except BaseException as rollback_exc:
+            raise RuntimeError(
+                "jlens resume rollback failed; backups preserved at "
+                f"{backup_root}"
+            ) from rollback_exc
+        shutil.rmtree(backup_root, ignore_errors=True)
+        raise
 
 
 def is_allowed_dose_fetch_member(name: str) -> bool:

@@ -54,6 +54,8 @@ REMOTE_JLENS_V2_ARTIFACTS = "/content/refusal_direction/artifacts/qwen25_coder_7
 JLENS_V2_BACKUP_ORDER = ("status.json", "events.jsonl", "jlens_fit_checkpoint.pt")
 JLENS_V2_BACKUP_TIMEOUT_SECONDS = 1800
 STOP_BACKUP_TIMEOUT_SECONDS = 600
+STOP_RETRY_ATTEMPTS = 3
+STOP_RETRY_BACKOFF_SECONDS = (0.25, 0.5, 1.0)
 REMOTE_FILE_MISSING_MARKER = "file or directory not found"
 
 
@@ -102,6 +104,26 @@ def start_command(session: str, gpu: str) -> list[str]:
 
 def stop_command(session: str) -> list[str]:
     return [*AUTH, "stop", "-s", session]
+
+
+def format_stop_rerun_command(*, profile: str, session: str | None) -> str:
+    parts = ["python", "tools/colab/run_refusal.py", "stop", "--profile", profile]
+    if session is not None:
+        parts.extend(["--session", session])
+    return " ".join(parts)
+
+
+def try_stop_session(session: str) -> bool:
+    for attempt in range(STOP_RETRY_ATTEMPTS):
+        try:
+            run(stop_command(session))
+            return True
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            if attempt + 1 < STOP_RETRY_ATTEMPTS:
+                time.sleep(STOP_RETRY_BACKOFF_SECONDS[attempt])
+    return False
 
 
 def upload_command(session: str, local: Path, remote: str) -> list[str]:
@@ -914,12 +936,17 @@ def main() -> int:
             session,
             project=PROJECT,
             staging_root=ROOT / ".colab-staging",
-            timeout=explicit_timeout or JLENS_V2_BACKUP_TIMEOUT_SECONDS,
+            timeout=(
+                explicit_timeout
+                if explicit_timeout is not None
+                else JLENS_V2_BACKUP_TIMEOUT_SECONDS
+            ),
         )
     elif args.action == "stop":
         if args.profile == "qwen25-coder-lab":
             cleanup_lab_local_staging(ROOT)
         backup_failed = False
+        stop_ok = True
         try:
             if args.profile == JLENS_V2:
                 try:
@@ -938,7 +965,17 @@ def main() -> int:
                         file=sys.stderr,
                     )
         finally:
-            run(stop_command(session))
+            if args.profile == JLENS_V2:
+                stop_ok = try_stop_session(session)
+            else:
+                run(stop_command(session))
+        if not stop_ok:
+            print("A100 MAY STILL BE RUNNING", file=sys.stderr)
+            print(
+                format_stop_rerun_command(profile=args.profile, session=args.session),
+                file=sys.stderr,
+            )
+            return 1
         if backup_failed:
             return 1
     return 0
