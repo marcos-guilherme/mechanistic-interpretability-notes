@@ -210,10 +210,23 @@ def assert_incremental_readout_parity(
         residual,
         layer=layer,
     )
-    if not torch.allclose(canonical, incremental, atol=atol, rtol=0.0):
+    canonical_compare = canonical.detach().float().cpu()
+    incremental_compare = incremental.detach().float().cpu()
+    if not torch.allclose(
+        canonical_compare,
+        incremental_compare,
+        atol=atol,
+        rtol=0.0,
+    ):
         raise AssertionError("incremental logits diverge from JacobianLens.apply")
-    canonical_top = torch.topk(canonical, k=min(top_k, canonical.numel())).indices
-    incremental_top = torch.topk(incremental, k=min(top_k, incremental.numel())).indices
+    canonical_top = torch.topk(
+        canonical_compare,
+        k=min(top_k, canonical_compare.numel()),
+    ).indices
+    incremental_top = torch.topk(
+        incremental_compare,
+        k=min(top_k, incremental_compare.numel()),
+    ).indices
     if not torch.equal(canonical_top, incremental_top):
         raise AssertionError("top-k token ids/order differ between readout paths")
     if return_canonical_logits:
