@@ -42,9 +42,10 @@ ordem de probe (32, 16, 8, 4, 2, 1) e escolhe o maior candidato em
 `fit_count_candidates` cuja projeção total caiba em `max_projected_hours` (12).
 
 Na primeira execução real, em 17 de novembro de 2026, os lotes 32, 16 e 8
-esgotaram a memória de uma A100 de 80 GB antes do ajuste. Por isso, a ordem foi
-estendida até 1. A mudança reduz o pico de memória sem alterar os exemplos nem
-o cálculo; o custo é processar as dimensões da Jacobiana em mais etapas.
+esgotaram a memória da A100 antes do ajuste. A GPU alocada expôs 39,49 GiB, não
+80 GB como eu havia registrado inicialmente. Por isso, a ordem foi estendida
+até 1. A mudança reduz o pico de memória sem alterar os exemplos nem o cálculo;
+o custo é processar as dimensões da Jacobiana em mais etapas.
 
 ## Resultado do probe na A100
 
@@ -52,7 +53,7 @@ A execução real mostrou que o desenho de contexto integral de 512 tokens não
 cabe no orçamento atual:
 
 - a primeira tentativa encerrou corretamente após `dim_batch` 32, 16 e 8
-  esgotarem os 80 GB da A100;
+  esgotarem a memória da A100 de 40 GB;
 - a ordem foi ampliada para 4, 2 e 1 e o probe foi reiniciado;
 - após 61 minutos, nenhuma tentativa adicional havia produzido uma Jacobiana
   completa nem um checkpoint;
@@ -63,16 +64,10 @@ Nenhuma lente v2 foi ajustada nessa execução. O resultado é um diagnóstico d
 inviabilidade do cálculo integral de 512 tokens, não um resultado negativo
 sobre a qualidade da J-lens.
 
-O próximo desenho a avaliar é percorrer cada função em janelas de 128 tokens.
-Isso cobre os 512 tokens de cada exemplo em quatro observações que cabem em
-memória. Essa alternativa muda a interpretação: ela aumenta a cobertura de
-tokens, mas não mede uma Jacobiana com 512 tokens simultaneamente no contexto.
-Essa diferença deve permanecer explícita na comparação com a lente original.
-
-Antes de adotar as janelas, o perfil faz uma tentativa intermediária com 256
-tokens integrais. Se o probe também exceder a memória ou não encontrar um
-`fit_count` dentro de 12 horas, a execução será encerrada e o próximo perfil
-usará 128 tokens.
+A tentativa intermediária com 256 tokens funcionou. O probe esgotou a memória
+com `dim_batch` 32 e 16, completou com 8 em 78,10 segundos e escolheu 400
+amostras, com projeção de 8,68 horas. Assim, não foi necessário reduzir para
+128 tokens.
 
 O valor escolhido fica gravado no checkpoint remoto (`fit_count`, `n_done`,
 `next_idx`, somas de Jacobiano por camada fonte). A comparação v2 versus v1 no
@@ -137,6 +132,36 @@ medem **fidelidade descritiva da lente** no corpus de código, não correção d
 programas nem taxas de recusa comportamental por si só. Elas alimentam a
 comparação planejada no JSON de avaliação v2; não invalidam nem confirmam, só
 com os números do piloto causal, do follow-up de dose ou do code-eval MITRE.
+
+### Resultado final da corrida de 256 tokens
+
+A corrida `e35026e6-43e1-4014-8022-f4055aa6a58f` ajustou a lente em 400
+funções e avaliou 200 funções de holdout. Foram 1.290.600 observações, contando
+27 camadas fonte e 239 posições avaliadas por função.
+
+No agregado, a lente v2 alcançou `pass@1` de 13,312%, `pass@5` de 21,253% e
+`pass@10` de 25,003%, com rank médio 7.994. A lente v1 congelada obteve 14,032%,
+22,790% e 26,985%, com rank médio 7.359. A logit lens ficou em 11,874%,
+17,723% e 19,776%, com rank médio 31.504. Rank menor é melhor.
+
+Portanto, a v2 ficou claramente acima da logit lens, mas não superou a v1. A
+diferença para a v1 foi de menos 0,719 ponto percentual em `pass@1`. Na camada
+26, onde todas as lentes estão próximas da saída, a diferença foi menor:
+83,485% para a v2, 83,824% para a v1 e 83,310% para a logit lens. A mesma ordem
+apareceu nas duas metades independentes do holdout.
+
+Esse resultado não mostra que mais dados prejudicam a lente. Nesta corrida,
+quantidade de ajuste e comprimento do contexto mudaram juntos. Para separar os
+efeitos, seria necessário comparar 100 e 400 amostras com o mesmo comprimento,
+ou ajustar 128 e 256 tokens com a mesma quantidade de exemplos.
+
+A execução foi retomada após uma queda de conexão no item 9. O checkpoint
+preservou o ajuste, que terminou em `400/400`. O transporte de retomada não
+levou `01_jlens_probe.json` para a nova sessão; o arquivo foi reconstruído de
+forma determinística a partir do evento `probe_choice`, que guardava tentativas,
+tempos, `dim_batch` e `fit_count`. Depois disso, o validador passou em todos os
+17 contratos. A preparação também registra `benchmark_deduplicated=false`,
+pois não havia lista de exclusão disponível.
 
 ## Limites explícitos
 

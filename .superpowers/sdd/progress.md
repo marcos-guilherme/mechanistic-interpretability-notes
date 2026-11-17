@@ -19,4 +19,9 @@ Task 6: complete (commits 530a180..b14efdf, review approved; v2 tests pruned fro
 Task 7: complete (commits 54adc79..2475a89, review approved; focused transport suite).
 Task 8: complete (commits 89daae8..554e8d3, fast review approved; download-only in-run backup).
 Task 9: complete (implementation complete; post-probe zero checkpoint for v2 resume).
+Execution: complete (run e35026e6-43e1-4014-8022-f4055aa6a58f; 256 tokens,
+400 fit, 200 holdout, status pass; 17 validator contracts passed remotely).
+Comparison and documentation: complete (v2 beat logit lens but did not beat
+the frozen v1 on the shared holdout; GPU stopped and absence of active sessions
+confirmed).
 

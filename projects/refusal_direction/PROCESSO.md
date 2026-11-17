@@ -534,25 +534,34 @@ mesmo compromisso upstream (`anthropics/jacobian-lens` no commit congelado)
 com **512 tokens** por exemplo, **200 amostras** fixas no holdout e tamanho de
 ajuste escolhido por probe sob teto de **12 horas** projetadas na A100. O probe
 real mostrou que 512 tokens integrais não eram viáveis: os lotes 32, 16 e 8
-esgotaram 80 GB, e a tentativa com lotes menores não concluiu uma Jacobiana em
-61 minutos. A sessão foi encerrada sem ajustar uma lente.
+esgotaram a memória da A100 de 40 GB, e a tentativa com lotes menores não
+concluiu uma Jacobiana em 61 minutos. A sessão foi encerrada sem ajustar uma
+lente.
 
 O perfil foi então reduzido para **256 tokens integrais**, mantendo o holdout
-de 200 e o mesmo teto de tempo. Se esse segundo probe também falhar, a próxima
-execução usará 128 tokens. Essa sequência evita apresentar a redução de
-contexto como se fosse o desenho inicial.
+de 200 e o mesmo teto de tempo. O probe completou com `dim_batch=8` em 78,10
+segundos e selecionou 400 exemplos, com projeção de 8,68 horas. A corrida
+`e35026e6-43e1-4014-8022-f4055aa6a58f` terminou com status `pass`.
 
 A v2 grava em `artifacts/qwen25_coder_7b_jlens_v2/` e compara a lente nova com a
 v1 congelada no holdout compartilhado. O laboratório visual e o code-eval em
 batch **não** passam a usar a v2: continuam apontando para a lente v1 já
 documentada nesta seção.
 
-**Caderno.** A implementação local (corpus, transporte, checkpoints, comparação
-dual e testes) está fechada; a operação remota está descrita em
-[`JLENS_V2.md`](JLENS_V2.md). Ainda **não** há métricas de holdout v2 nem tensor
-final desta corrida: dependem de uma execução completa na A100 que não correu
-até a data desta entrada. Qualquer número futuro deve entrar aqui com `run_id` e
-links para `results/qwen25_coder_7b_jlens_v2/`, sem antecipar conclusão.
+**Caderno.** No holdout compartilhado de 200 funções, a v2 obteve `pass@1` de
+13,312%, contra 14,032% da v1 e 11,874% da logit lens. Em `pass@5`, os valores
+foram 21,253%, 22,790% e 17,723%. Em `pass@10`, 25,003%, 26,985% e 19,776%.
+O rank médio foi 7.994 na v2, 7.359 na v1 e 31.504 na logit lens; nesse caso,
+menor é melhor. A v2 melhorou claramente a projeção linear simples, mas não
+superou a lente curta original.
+
+As duas metades de 100 itens do holdout repetiram a mesma ordem. Isso torna o
+resultado mais estável, mas não explica sozinho a diferença entre v1 e v2,
+porque aumentei ao mesmo tempo o contexto e a quantidade de ajuste. A preparação
+também ficou sem deduplicação contra benchmarks externos. O tensor final e os
+JSONs estão em `artifacts/qwen25_coder_7b_jlens_v2/` e
+`results/qwen25_coder_7b_jlens_v2/`; os detalhes operacionais estão em
+[`JLENS_V2.md`](JLENS_V2.md).
 
 ### Avaliação em tarefas de código
 
