@@ -81,14 +81,21 @@ class CausalTokenizer:
 
 
 class ThinBlock(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, *, layer_index: int = 0, tuple_output: bool = False) -> None:
         super().__init__()
         self.self_attn = nn.Identity()
         self.mlp = nn.Identity()
+        self.layer_index = int(layer_index)
+        self.tuple_output = tuple_output
 
     def forward(self, hidden: torch.Tensor, *args, **kwargs):
         del args, kwargs
-        return hidden
+        stamped = hidden.clone()
+        stamped[:, -1, 1] = float(self.layer_index)
+        if self.tuple_output:
+            present = {"layer": self.layer_index}
+            return (stamped, present, {"aux": True})
+        return stamped
 
 
 class ResidualBlock(nn.Module):
@@ -145,11 +152,17 @@ class GreedyFixture(nn.Module):
         d_model: int = READOUT_D_MODEL,
         vocab_size: int = READOUT_VOCAB,
         terminal: str = "eos",
+        tuple_output: bool = False,
     ) -> None:
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model)
         self.model = nn.Module()
-        self.model.layers = nn.ModuleList([ThinBlock() for _ in range(n_layers)])
+        self.model.layers = nn.ModuleList(
+            [
+                ThinBlock(layer_index=index, tuple_output=tuple_output)
+                for index in range(n_layers)
+            ]
+        )
         self.config = SimpleNamespace(eos_token_id=0)
         self.vocab_size = vocab_size
         planned = [2 + index for index in range(max(tokens - 1, 0))]
@@ -161,6 +174,10 @@ class GreedyFixture(nn.Module):
         self.past_seen: list[object] = []
         self.use_cache_flags: list[bool] = []
         self.input_widths: list[int] = []
+        self.attention_masks: list[torch.Tensor | None] = []
+        self.cache_positions: list[torch.Tensor | None] = []
+        self.forward_ids: list[int] = []
+        self._forward_id = 0
         self.active_hook_count = 0
         self._patch_hook_counters()
 
@@ -196,9 +213,10 @@ class GreedyFixture(nn.Module):
         past_key_values=None,
         use_cache: bool = True,
         attention_mask=None,
+        cache_position=None,
         **kwargs,
     ):
-        del attention_mask, kwargs
+        del kwargs
         if self._terminal == "error":
             raise RuntimeError("causal readout failed")
         if self.prompt_length is None:
@@ -206,9 +224,19 @@ class GreedyFixture(nn.Module):
         self.past_seen.append(past_key_values)
         self.use_cache_flags.append(bool(use_cache))
         self.input_widths.append(int(input_ids.shape[1]))
-        hidden = self.embed(input_ids)
+        self.attention_masks.append(
+            None if attention_mask is None else attention_mask.detach().clone()
+        )
+        self.cache_positions.append(
+            None if cache_position is None else cache_position.detach().clone()
+        )
+        self._forward_id += 1
+        self.forward_ids.append(self._forward_id)
+        hidden = self.embed(input_ids).clone()
+        hidden[:, -1, 0] = float(self._forward_id)
         for block in self.model.layers:
-            hidden = block(hidden)
+            output = block(hidden)
+            hidden = output[0] if isinstance(output, tuple) else output
         logits = torch.zeros(
             input_ids.shape[0],
             input_ids.shape[1],
@@ -331,6 +359,14 @@ def _fixture_args() -> dict[str, Any]:
     }
 
 
+def _assert_each_observation_targets_its_generated_token(result) -> None:
+    generated = result.generated_token_ids
+    for row in result.observations:
+        step = int(row["generation_step"])
+        assert 1 <= step <= len(generated)
+        assert int(row["target_token_id"]) == int(generated[step - 1])
+
+
 def test_dual_readout_ranks_the_same_target_from_the_same_residual() -> None:
     readout = DualLensReadout(
         lenses={"v1": _lens(offset=0.0), "v2": _lens(offset=1.0)},
@@ -355,10 +391,8 @@ def test_stream_records_four_layers_two_lenses_for_first_eight_steps() -> None:
         **_intervention_inputs("baseline"),
     )
     assert len(result.observations) == 8 * 4 * 2
-    assert {row["target_token_id"] for row in result.observations} == set(
-        result.generated_token_ids[:8]
-    )
     assert len(result.generated_token_ids) == 10
+    _assert_each_observation_targets_its_generated_token(result)
     assert {row["layer"] for row in result.observations} == {19, 22, 25, 26}
     assert {row["lens_version"] for row in result.observations} == {"v1", "v2"}
     assert {row["generation_step"] for row in result.observations} == set(range(1, 9))
@@ -437,9 +471,157 @@ def test_stream_threads_kv_cache_and_stops_on_eos() -> None:
     assert len(result.generated_token_ids) == 3
     assert result.generated_token_ids[-1] == 0
     assert len(result.observations) == 3 * 4 * 2
+    _assert_each_observation_targets_its_generated_token(result)
     assert model.use_cache_flags == [True, True, True]
     assert model.past_seen[0] is None
     assert model.past_seen[1] == model.prompt_length
     assert model.past_seen[2] == model.prompt_length + 1
     assert model.input_widths[0] == model.prompt_length
     assert model.input_widths[1:] == [1, 1]
+    _assert_exact_mask_and_cache_position(model)
+
+
+def test_tuple_block_outputs_are_captured_without_replacing_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication import qwen_causal_jlens_runtime as module
+
+    model = _greedy_fixture(tokens=2, tuple_output=True)
+    layers = (19, 22, 25, 26)
+    replacements: list[object] = []
+    original_outputs: list[object] = []
+    extracted: list[torch.Tensor] = []
+    ranked: list[torch.Tensor] = []
+    originals = {
+        layer: model.model.layers[layer].register_forward_hook
+        for layer in layers
+    }
+    original_readout = module.incremental_logits_from_residual
+
+    def spy(lens, bound_model, residual, *, layer):
+        ranked.append(residual.detach().float().reshape(-1).cpu().clone())
+        return original_readout(lens, bound_model, residual, layer=layer)
+
+    def bind(layer: int):
+        original = originals[layer]
+
+        def tracking_register(hook, *args, **kwargs):
+            def wrapped(module, inputs, output):
+                original_outputs.append(output)
+                hidden = output[0]
+                extracted.append(
+                    hidden[:, -1, :].detach().float().reshape(-1).cpu().clone()
+                )
+                result = hook(module, inputs, output)
+                replacements.append(result)
+                return result
+
+            return original(wrapped, *args, **kwargs)
+
+        return tracking_register
+
+    for layer in layers:
+        model.model.layers[layer].register_forward_hook = bind(layer)  # type: ignore[method-assign]
+
+    monkeypatch.setattr(module, "incremental_logits_from_residual", spy)
+    result = stream_causal_generation(
+        model=model,
+        tokenizer=_tokenizer(),
+        readout=_dual_readout(),
+        layers=layers,
+        readout_steps=8,
+        max_new_tokens=64,
+        **_intervention_inputs("baseline"),
+    )
+    assert result.generated_token_ids
+    assert replacements
+    assert all(item is None for item in replacements)
+    assert original_outputs
+    assert all(
+        isinstance(item, tuple) and len(item) >= 2 for item in original_outputs
+    )
+    assert all(torch.is_tensor(item[0]) for item in original_outputs)
+    assert extracted
+    assert len(ranked) == len(extracted) * 2
+    for index, residual in enumerate(extracted):
+        pair = ranked[index * 2 : index * 2 + 2]
+        assert torch.equal(pair[0], residual)
+        assert torch.equal(pair[1], residual)
+    assert model.past_seen[0] is None
+    assert model.past_seen[1] == model.prompt_length
+
+
+def test_dual_lenses_see_the_same_captured_residual_from_one_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication import qwen_causal_jlens_runtime as module
+
+    model = _greedy_fixture(tokens=3)
+    readout = _dual_readout()
+    layers = (19, 22, 25, 26)
+    seen: list[dict[str, Any]] = []
+    original = module.incremental_logits_from_residual
+
+    def spy(lens, bound_model, residual, *, layer):
+        version = next(
+            name for name, item in readout._lenses.items() if item is lens
+        )
+        vector = residual.detach().float().reshape(-1).cpu().clone()
+        seen.append(
+            {
+                "version": version,
+                "layer": int(layer),
+                "residual": vector,
+                "forward_id": int(round(float(vector[0].item()))),
+            }
+        )
+        return original(lens, bound_model, residual, layer=layer)
+
+    monkeypatch.setattr(module, "incremental_logits_from_residual", spy)
+    result = stream_causal_generation(
+        model=model,
+        tokenizer=_tokenizer(),
+        readout=readout,
+        layers=layers,
+        readout_steps=8,
+        max_new_tokens=64,
+        **_intervention_inputs("baseline"),
+    )
+    readout_steps = min(8, len(result.generated_token_ids))
+    assert len(seen) == readout_steps * len(layers) * 2
+    _assert_each_observation_targets_its_generated_token(result)
+    for step in range(1, readout_steps + 1):
+        expected_forward = model.forward_ids[step - 1]
+        for layer in layers:
+            pair = [
+                item
+                for item in seen
+                if item["forward_id"] == expected_forward and item["layer"] == layer
+            ]
+            assert {item["version"] for item in pair} == {"v1", "v2"}
+            assert torch.equal(pair[0]["residual"], pair[1]["residual"])
+            assert int(round(float(pair[0]["residual"][1].item()))) == layer
+
+
+def _assert_exact_mask_and_cache_position(model: GreedyFixture) -> None:
+    prompt_len = int(model.prompt_length)
+    assert len(model.attention_masks) == len(model.cache_positions) == 3
+    first_mask = model.attention_masks[0]
+    first_position = model.cache_positions[0]
+    assert first_mask is not None and first_position is not None
+    assert tuple(first_mask.shape) == (1, prompt_len)
+    assert torch.equal(first_mask, torch.ones_like(first_mask))
+    assert torch.equal(
+        first_position.cpu(),
+        torch.arange(prompt_len, dtype=first_position.dtype),
+    )
+    for index, (mask, position) in enumerate(
+        zip(model.attention_masks[1:], model.cache_positions[1:], strict=True),
+        start=1,
+    ):
+        assert mask is not None and position is not None
+        expected_width = prompt_len + index
+        assert tuple(mask.shape) == (1, expected_width)
+        assert torch.equal(mask, torch.ones_like(mask))
+        assert tuple(position.shape) == (1,)
+        assert int(position.item()) == prompt_len + index - 1
