@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+import weakref
 
 import pytest
 import torch
@@ -150,7 +152,16 @@ def _run(
     probe_seconds: float = 1.0,
     run_id: str | None = "v2-run",
     lens_cls: Any = FakeLens,
+    expected_v1_lens_sha256: Any = "fixture",
 ) -> dict[str, Any]:
+    if expected_v1_lens_sha256 == "fixture":
+        # CPU fixtures pin the hash of the tiny frozen v1 lens they wrote; the
+        # v1 profile has no source lens, so nothing is pinned for it.
+        relative = _json(root / "configs" / profile).get("source_v1_lens")
+        v1_file = root / str(relative) if relative else None
+        expected_v1_lens_sha256 = (
+            _sha256(v1_file) if v1_file is not None and v1_file.is_file() else None
+        )
     return run_qwen_jlens(
         root,
         profile=profile,
@@ -164,6 +175,7 @@ def _run(
         clock=lambda: 0.0,
         probe_clock=_clock_for_seconds(probe_seconds),
         assert_contract=lambda: None,
+        expected_v1_lens_sha256=expected_v1_lens_sha256,
     )
 
 
@@ -573,15 +585,121 @@ def test_runtime_rejects_v1_lens_with_other_layers_without_writing_compare(
     v1_path = _v1_path(tmp_path)
     FakeLens({0: torch.eye(8)}, n_prompts=V1_LENS_N_PROMPTS, d_model=8).save(str(v1_path))
     v1_before = _sha256(v1_path)
+    calls: list[dict[str, Any]] = []
     with pytest.raises(ValueError, match="source_layers"):
         _run(
             tmp_path,
             config.name,
             rows=_rows(6),
-            jacobian_fn=_recording_jacobian([]),
+            jacobian_fn=_recording_jacobian(calls),
         )
-    assert not (tmp_path / V2_RESULTS / "04_jlens_compare.json").exists()
+    _assert_failed_before_probe(tmp_path, calls)
     assert _sha256(v1_path) == v1_before
+
+
+def _assert_failed_before_probe(root: Path, calls: list[dict[str, Any]]) -> None:
+    assert calls == []  # neither the probe nor any fit Jacobian ran
+    assert not (root / V2_RESULTS / "01_jlens_probe.json").exists()
+    assert not (root / V2_RESULTS / "02_jlens_fit.json").exists()
+    assert not (root / V2_RESULTS / "04_jlens_compare.json").exists()
+    assert not (root / V2_ARTIFACTS / "jlens_fit_checkpoint.pt").exists()
+    assert not (root / V2_ARTIFACTS / V2_FINAL_LENS_FILENAME).exists()
+
+
+def _v2_fixture(tmp_path: Path) -> Path:
+    return _write_v2_fixture(
+        tmp_path,
+        candidates=[2, 4],
+        holdout_count=2,
+        max_seq_len=8,
+        max_projected_hours=12,
+    )
+
+
+def test_runtime_rejects_wrong_v1_lens_hash_before_probe(tmp_path: Path) -> None:
+    config = _v2_fixture(tmp_path)
+    v1_path = _v1_path(tmp_path)
+    v1_before = _sha256(v1_path)
+    calls: list[dict[str, Any]] = []
+    with pytest.raises(ValueError, match="sha256"):
+        _run(
+            tmp_path,
+            config.name,
+            rows=_rows(6),
+            jacobian_fn=_recording_jacobian(calls),
+            expected_v1_lens_sha256="0" * 64,
+        )
+    _assert_failed_before_probe(tmp_path, calls)
+    assert _sha256(v1_path) == v1_before
+
+
+def test_production_default_pins_canonical_frozen_lens_hash(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_readout import FROZEN_LENS_SHA256
+
+    assert runtime.FROZEN_LENS_SHA256 is FROZEN_LENS_SHA256
+    config = _v2_fixture(tmp_path)
+    assert _sha256(_v1_path(tmp_path)) != FROZEN_LENS_SHA256  # tiny fixture lens
+    calls: list[dict[str, Any]] = []
+    with pytest.raises(ValueError, match="sha256"):
+        _run(
+            tmp_path,
+            config.name,
+            rows=_rows(6),
+            jacobian_fn=_recording_jacobian(calls),
+            expected_v1_lens_sha256=None,  # no override: canonical hash applies
+        )
+    _assert_failed_before_probe(tmp_path, calls)
+
+
+class _TrackingLens(FakeLens):
+    loaded: list[Any] = []
+
+    @classmethod
+    def load(cls, path: str):
+        instance = super().load(path)
+        cls.loaded.append(weakref.ref(instance))
+        return instance
+
+
+def test_preflight_v1_lens_is_loaded_then_released_before_probe(tmp_path: Path) -> None:
+    config = _v2_fixture(tmp_path)
+    _TrackingLens.loaded = []
+    seen: list[tuple[int, int]] = []
+    inner = _recording_jacobian([])
+
+    def jacobian(model, prompt, source_layers, **kwargs):
+        if not seen:  # first Jacobian call is the probe
+            gc.collect()
+            seen.append(
+                (
+                    len(_TrackingLens.loaded),
+                    sum(ref() is not None for ref in _TrackingLens.loaded),
+                )
+            )
+        return inner(model, prompt, source_layers, **kwargs)
+
+    result = _run(
+        tmp_path,
+        config.name,
+        rows=_rows(6),
+        jacobian_fn=jacobian,
+        lens_cls=_TrackingLens,
+    )
+    assert result["status"] == "pass"
+    assert seen == [(1, 0)]  # loaded once for preflight, already released
+
+
+def test_v1_profile_ignores_pinned_hash_and_needs_no_v1_lens(tmp_path: Path) -> None:
+    write_source_dose(tmp_path)
+    result = _run(
+        tmp_path,
+        JLENS_PROFILE,
+        rows=[_row(index) for index in range(130)],
+        jacobian_fn=_recording_jacobian([]),
+        run_id="v1-run",
+        expected_v1_lens_sha256="0" * 64,
+    )
+    assert result["status"] == "pass"
 
 
 def test_runtime_does_not_write_compare_when_v2_run_aborts(tmp_path: Path) -> None:

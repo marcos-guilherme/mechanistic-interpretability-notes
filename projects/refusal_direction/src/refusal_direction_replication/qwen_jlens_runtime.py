@@ -24,6 +24,7 @@ from .pipeline import (
     release_compute_resources,
 )
 from .qwen_dose import sha256_file
+from .qwen_lab_readout import FROZEN_LENS_SHA256, verify_frozen_lens_hash
 from .qwen_jlens import (
     CHECKPOINT_FILENAME,
     DATASET_CONFIG,
@@ -496,10 +497,37 @@ def run_holdout_readout(
     return records
 
 
+def preflight_frozen_v1_lens(
+    *,
+    lens_cls: Any,
+    v1_lens_path: Path,
+    expected_sha256: str,
+    source_layers: Sequence[int],
+    d_model: int,
+) -> None:
+    """Pin and validate the frozen v1 lens before any probe or fit work.
+
+    The file is only read. The loaded lens is released before returning so it
+    does not occupy memory during the fit.
+    """
+    verify_frozen_lens_hash(v1_lens_path, expected_sha256)
+    v1_lens = lens_cls.load(str(v1_lens_path))
+    try:
+        validate_fitted_lens(
+            v1_lens,
+            source_layers=source_layers,
+            d_model=d_model,
+            n_prompts=int(v1_lens.n_prompts),
+        )
+    finally:
+        del v1_lens
+
+
 def compare_with_frozen_v1(
     *,
     lens_cls: Any,
     v1_lens_path: Path,
+    expected_sha256: str,
     v1_lens_config_path: str,
     v2_records: Sequence[Mapping[str, Any]],
     model: Any,
@@ -516,6 +544,10 @@ def compare_with_frozen_v1(
     result holds only ids, hashes, token ids and integer ranks.
     """
     digest_before = sha256_file(v1_lens_path)
+    if digest_before != expected_sha256:
+        raise ValueError(
+            f"frozen v1 lens sha256 {digest_before!r} != expected {expected_sha256!r}"
+        )
     v1_lens = lens_cls.load(str(v1_lens_path))
     try:
         validate_fitted_lens(
@@ -564,6 +596,7 @@ def run_qwen_jlens(
     clock: Callable[[], float] | None = None,
     probe_clock: Callable[[], float] | None = None,
     assert_contract: Callable[[], None] | None = None,
+    expected_v1_lens_sha256: str | None = None,
 ) -> dict[str, Any]:
     config = load_config(root, profile=profile)
     require_dataset_identity(config)
@@ -661,13 +694,24 @@ def run_qwen_jlens(
     try:
         contract()
         v1_lens_path: Path | None = None
+        pinned_v1_sha256 = expected_v1_lens_sha256 or FROZEN_LENS_SHA256
         if is_v2:
-            # Fail before any multi-hour fit if the frozen v1 lens is absent.
+            # Fail before the model load, probe or any multi-hour fit if the
+            # frozen v1 lens is absent, has the wrong hash, or the wrong shape.
             v1_lens_path = root / str(config["source_v1_lens"])
             if not v1_lens_path.is_file():
                 raise FileNotFoundError(
                     f"frozen v1 lens not found: {config['source_v1_lens']}"
                 )
+            if Lens is None:
+                from jlens.lens import JacobianLens as Lens
+            preflight_frozen_v1_lens(
+                lens_cls=Lens,
+                v1_lens_path=v1_lens_path,
+                expected_sha256=pinned_v1_sha256,
+                source_layers=source_layers,
+                d_model=d_model,
+            )
         # v2 sizes stages from the corpus pool until the probe selects a count.
         enter_stage("prepare", int(config["max_fit_count"]) if is_v2 else FIT_COUNT)
         _, tokenizer = ensure_model()
@@ -1263,6 +1307,7 @@ def run_qwen_jlens(
             comparison = compare_with_frozen_v1(
                 lens_cls=Lens,
                 v1_lens_path=v1_lens_path,
+                expected_sha256=pinned_v1_sha256,
                 v1_lens_config_path=str(config["source_v1_lens"]),
                 v2_records=records,
                 model=bound,
