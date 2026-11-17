@@ -999,6 +999,15 @@ def run_qwen_jlens(
             report_fit = len(corpus.fit)
             digest = write_prepare(corpus)
             identity = make_identity(digest)
+            write_fit_checkpoint(
+                checkpoint_path,
+                jacobian_sum=jacobian_sum,
+                n_done=0,
+                next_idx=0,
+                dim_batch=int(selected_dim_batch),
+                fit_count=len(corpus.fit),
+                **identity,
+            )
         elif not resumed:
             enter_stage("probe", len(corpus.fit))
             store.update_progress(completed_units=0, total_units=len(corpus.fit))

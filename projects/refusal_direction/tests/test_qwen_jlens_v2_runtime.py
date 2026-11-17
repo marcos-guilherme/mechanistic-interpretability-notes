@@ -301,6 +301,49 @@ def test_resume_uses_stored_fit_count_and_finishes_remaining_items(tmp_path: Pat
     assert len(probe_events) == 1
 
 
+def test_resume_after_probe_preserves_fit_count_before_first_fit(
+    tmp_path: Path,
+) -> None:
+    config = _write_v2_fixture(
+        tmp_path,
+        candidates=[2, 4],
+        holdout_count=2,
+        max_seq_len=8,
+        max_projected_hours=12,
+    )
+    rows = _rows(6)
+    first_calls: list[dict[str, Any]] = []
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        _run(
+            tmp_path,
+            config.name,
+            rows=rows,
+            jacobian_fn=_recording_jacobian(first_calls, fail_on_call=2),
+            probe_seconds=1.0,
+        )
+    assert len(first_calls) == 2
+    checkpoint_path = tmp_path / V2_ARTIFACTS / "jlens_fit_checkpoint.pt"
+    seeded = load_fit_checkpoint(checkpoint_path)
+    assert seeded["n_done"] == seeded["next_idx"] == 0
+    assert seeded["fit_count"] == 4
+    assert seeded["dim_batch"] == first_calls[0]["dim_batch"]
+
+    resume_calls: list[dict[str, Any]] = []
+    result = _run(
+        tmp_path,
+        config.name,
+        rows=rows,
+        jacobian_fn=_recording_jacobian(resume_calls),
+        probe_seconds=10_000_000.0,
+        run_id=None,
+    )
+    assert result["status"] == "pass"
+    assert result["n_fit"] == 4
+    assert len(resume_calls) == 4
+    probe_events = [item for item in _events(tmp_path) if item.get("event") == "probe_choice"]
+    assert len(probe_events) == 1
+
+
 def test_resume_without_stored_fit_count_is_rejected(tmp_path: Path) -> None:
     config = _write_v2_fixture(
         tmp_path,
