@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
@@ -45,6 +46,7 @@ from .qwen_causal_jlens import (
     aggregate_fidelity,
     cluster_bootstrap_difference,
     compact_contains_text_leak,
+    observation_key,
     summarize_behavior_changes,
 )
 from .qwen_code_eval import (
@@ -62,7 +64,6 @@ from .qwen_jlens import (
     wrap_hf_model_for_jlens,
 )
 from .qwen_lab_readout import (
-    FROZEN_LENS_SHA256,
     assert_incremental_readout_parity,
     incremental_logits_from_residual,
     verify_frozen_lens_hash,
@@ -107,9 +108,8 @@ CHECKPOINT_FILENAME = "checkpoint.json"
 RESPONSES_FILENAME = "responses.jsonl"
 OBSERVATIONS_FILENAME = "observations.jsonl"
 PILOT_PROMPTS_PER_DATASET = 2
-FROZEN_V2_LENS_SHA256 = (
-    "b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a"
-)
+CANONICAL_V1_EVALUATION = "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
+CANONICAL_V2_EVALUATION = "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json"
 OBSERVATION_KEYS = (
     "dataset",
     "example_id",
@@ -163,6 +163,112 @@ def _require_config_contract(config: Mapping[str, Any]) -> None:
             raise ValueError(f"config {field} must be {value}")
 
 
+def _canonical_evaluation_paths(root: Path, config: Mapping[str, Any]) -> dict[str, Path]:
+    return {
+        "v1_evaluation": root
+        / str(config.get("source_v1_evaluation", CANONICAL_V1_EVALUATION)),
+        "v2_evaluation": root
+        / str(config.get("source_v2_evaluation", CANONICAL_V2_EVALUATION)),
+    }
+
+
+def _agreed_canonical_hash(*values: Any, name: str) -> str:
+    present = [str(value) for value in values if value]
+    if not present:
+        raise ValueError(f"canonical {name} hash missing")
+    unique = set(present)
+    if len(unique) != 1:
+        raise ValueError(f"{name} hash disagreement across canonical manifests")
+    return unique.pop()
+
+
+def _require_current_hash(actual: str, expected: str, name: str) -> None:
+    if actual != expected:
+        raise ValueError(f"{name} hash does not match canonical manifest")
+
+
+def _verify_prepare_frozen_identity(
+    prepare: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> None:
+    results = prepare.get("results") or {}
+    dataset_size = int(config["dataset_size"])
+    for dataset in DATASETS:
+        block = results.get(dataset) or {}
+        ids = list(block.get("example_ids") or [])
+        hashes = list(block.get("content_hashes") or [])
+        indices = list(block.get("source_indices") or [])
+        if not (len(ids) == len(hashes) == len(indices) == dataset_size):
+            raise ValueError(f"{dataset} frozen selection size drifted")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"{dataset} duplicate example ids")
+    source_files = results.get("source_files") or {}
+    expected_identity = {
+        "mitre": (
+            str(config.get("purplellama_repository", PURPLE_LLAMA_REPOSITORY)),
+            str(config.get("purplellama_revision", PURPLE_LLAMA_REVISION)),
+            str(config["mitre_relative_path"]),
+        ),
+        "mitre_frr": (
+            str(config.get("purplellama_repository", PURPLE_LLAMA_REPOSITORY)),
+            str(config.get("purplellama_revision", PURPLE_LLAMA_REVISION)),
+            str(config["mitre_frr_relative_path"]),
+        ),
+    }
+    for dataset, (repository, revision, relative_path) in expected_identity.items():
+        identity = source_files.get(dataset) or {}
+        if not identity:
+            raise ValueError(f"{dataset} PurpleLlama source identity missing")
+        if (
+            str(identity.get("repository")) != repository
+            or str(identity.get("revision")) != revision
+            or str(identity.get("relative_path")) != relative_path
+        ):
+            raise ValueError(f"{dataset} PurpleLlama source identity mismatch")
+
+
+def _verify_canonical_source_hashes(
+    *,
+    root: Path,
+    config: Mapping[str, Any],
+    current_hashes: Mapping[str, str],
+    prepare: Mapping[str, Any],
+    dose: Mapping[str, Any],
+) -> None:
+    evaluations = _canonical_evaluation_paths(root, config)
+    missing = [name for name, path in evaluations.items() if not path.is_file()]
+    if missing:
+        raise ValueError(
+            "canonical lens evaluation missing: " + ", ".join(missing)
+        )
+    v1_eval = _read_json(evaluations["v1_evaluation"])
+    v2_eval = _read_json(evaluations["v2_evaluation"])
+    prepare_hashes = (prepare.get("provenance") or {}).get("source_artifact_hashes") or {}
+    dose_hashes = dose.get("source_artifact_hashes") or {}
+    expected = {
+        "direction": _agreed_canonical_hash(
+            prepare_hashes.get("direction"),
+            dose_hashes.get("selected_direction"),
+            name="direction",
+        ),
+        "dose_evaluation": _agreed_canonical_hash(
+            prepare_hashes.get("dose_evaluation"),
+            name="dose_evaluation",
+        ),
+        "v1_lens": _agreed_canonical_hash(
+            prepare_hashes.get("lens"),
+            v1_eval.get("lens_sha256"),
+            name="v1_lens",
+        ),
+        "v2_lens": _agreed_canonical_hash(
+            v2_eval.get("lens_sha256"),
+            name="v2_lens",
+        ),
+    }
+    for name, expected_hash in expected.items():
+        _require_current_hash(current_hashes[name], expected_hash, name)
+
+
 def source_context(
     root: Path,
     config: Mapping[str, Any],
@@ -189,6 +295,16 @@ def source_context(
         or float(pair.get("addition", -1)) != float(config["addition_coefficient"])
     ):
         raise ValueError("source dose coefficients do not match frozen coefficients")
+    prepare = _read_json(paths["prepare"])
+    _verify_prepare_frozen_identity(prepare, config)
+    current_hashes = {name: sha256_file(path) for name, path in paths.items()}
+    _verify_canonical_source_hashes(
+        root=root,
+        config=config,
+        current_hashes=current_hashes,
+        prepare=prepare,
+        dose=dose,
+    )
     context: dict[str, Any] = {
         "source_dose_status": dose["status"],
         "source_dose_run_id": dose.get("run_id"),
@@ -196,9 +312,7 @@ def source_context(
             "ablation": float(pair["ablation"]),
             "addition": float(pair["addition"]),
         },
-        "source_artifact_hashes": {
-            name: sha256_file(path) for name, path in paths.items()
-        },
+        "source_artifact_hashes": current_hashes,
         "paths": paths,
     }
     if load_direction_payload:
@@ -331,15 +445,14 @@ class DualLensReadout:
         layer: int,
         target_token_id: int,
     ) -> dict[str, int]:
-        return {
-            version: rank_one_based(
-                incremental_logits_from_residual(
-                    lens, self._bound_model, residual, layer=layer
-                ),
-                target_token_id,
+        ranks: dict[str, int] = {}
+        for version, lens in self._lenses.items():
+            logits = incremental_logits_from_residual(
+                lens, self._bound_model, residual, layer=layer
             )
-            for version, lens in self._lenses.items()
-        }
+            require_finite_logits(logits, f"{version} readout logits")
+            ranks[version] = rank_one_based(logits, target_token_id)
+        return ranks
 
 
 def _model_device(model: Any) -> torch.device:
@@ -460,6 +573,7 @@ def stream_causal_generation(
                     )
                     past = getattr(outputs, "past_key_values", None)
                     logits = outputs.logits[:, -1, :].float()
+                    require_finite_logits(logits, "model logits")
                     token_id = int(torch.argmax(logits.reshape(-1)).item())
                     if step <= readout_limit:
                         for layer in requested_layers:
@@ -612,6 +726,131 @@ def checkpoint_identity(
             dataset: list(prepare[dataset]["content_hashes"]) for dataset in DATASETS
         },
     }
+
+
+def _pair_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    return (str(row["dataset"]), str(row["example_id"]), str(row["condition"]))
+
+
+def require_exact_pair_matrix(
+    rows: Sequence[Mapping[str, Any]],
+    expected: Sequence[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    keys = [_pair_key(row) for row in rows]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate pair keys")
+    actual = set(keys)
+    wanted = {
+        (str(dataset), str(example_id), str(condition))
+        for dataset, example_id, condition in expected
+    }
+    if actual != wanted:
+        missing = sorted(wanted - actual)
+        extra = sorted(actual - wanted)
+        raise ValueError(
+            f"pair matrix mismatch missing={missing} extra={extra}"
+        )
+    return keys
+
+
+def _expected_observation_keys(
+    response: Mapping[str, Any],
+) -> set[tuple[str, str, str, int, int, str]]:
+    dataset, example_id, condition = _pair_key(response)
+    actual_steps = min(READOUT_STEPS, int(response["generated_token_count"]))
+    return {
+        (dataset, example_id, condition, step, int(layer), version)
+        for step in range(1, actual_steps + 1)
+        for layer in READOUT_LAYERS
+        for version in LENS_VERSIONS
+    }
+
+
+def _pair_is_complete(
+    responses: Sequence[Mapping[str, Any]],
+    observations: Sequence[Mapping[str, Any]],
+) -> bool:
+    if len(responses) != 1:
+        return False
+    response = responses[0]
+    try:
+        generated = int(response["generated_token_count"])
+        readout_steps = int(response["readout_steps"])
+        terminal = str(response.get("terminal_reason") or "")
+    except (KeyError, TypeError, ValueError):
+        return False
+    actual_steps = min(READOUT_STEPS, generated)
+    if readout_steps != actual_steps or not terminal:
+        return False
+    try:
+        keys = [observation_key(row) for row in observations]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if len(keys) != len(set(keys)):
+        return False
+    return set(keys) == _expected_observation_keys(response)
+
+
+def require_complete_pair_artifacts(
+    responses: Sequence[Mapping[str, Any]],
+    observations: Sequence[Mapping[str, Any]],
+    expected: Sequence[tuple[str, str, str]] | None = None,
+) -> None:
+    matrix = (
+        list(expected)
+        if expected is not None
+        else [_pair_key(row) for row in responses]
+    )
+    require_exact_pair_matrix(responses, matrix)
+    grouped_obs: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in observations:
+        grouped_obs[_pair_key(row)].append(row)
+    grouped_resp: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in responses:
+        grouped_resp[_pair_key(row)].append(row)
+    if set(grouped_obs) != set(grouped_resp):
+        raise ValueError("incomplete observation keys")
+    for key, resp_rows in grouped_resp.items():
+        if not _pair_is_complete(resp_rows, grouped_obs.get(key, [])):
+            raise ValueError(f"incomplete observation keys for pair {key}")
+
+
+def reconcile_generation_artifacts(
+    artifacts_dir: Path,
+    *,
+    matrix: Sequence[tuple[str, str, str]],
+    checkpoint: PanelCheckpoint,
+    checkpoint_path: Path,
+) -> PanelCheckpoint:
+    responses_path = artifacts_dir / RESPONSES_FILENAME
+    observations_path = artifacts_dir / OBSERVATIONS_FILENAME
+    responses = _read_jsonl(responses_path)
+    observations = _read_jsonl(observations_path)
+    grouped_resp: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    grouped_obs: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in responses:
+        grouped_resp[_pair_key(row)].append(row)
+    for row in observations:
+        grouped_obs[_pair_key(row)].append(row)
+    expected = [
+        (str(dataset), str(example_id), str(condition))
+        for dataset, example_id, condition in matrix
+    ]
+    keep_responses: list[dict[str, Any]] = []
+    keep_observations: list[dict[str, Any]] = []
+    completed: list[tuple[str, str, str]] = []
+    for key in expected:
+        resp_rows = grouped_resp.get(key, [])
+        obs_rows = grouped_obs.get(key, [])
+        if _pair_is_complete(resp_rows, obs_rows):
+            keep_responses.append(resp_rows[0])
+            keep_observations.extend(obs_rows)
+            completed.append(key)
+    _write_jsonl(responses_path, keep_responses)
+    _write_jsonl(observations_path, keep_observations)
+    repaired = PanelCheckpoint(checkpoint.identity, completed)
+    repaired.write(checkpoint_path)
+    return repaired
 
 
 def expected_matrix(
@@ -864,12 +1103,19 @@ def _run_generation_matrix(
     parity_check: ParityCheck | None,
     invoke_parity: bool,
 ) -> dict[str, Any]:
-    pending = checkpoint.pending(matrix)
     responses_path = artifacts_dir / RESPONSES_FILENAME
     observations_path = artifacts_dir / OBSERVATIONS_FILENAME
+    checkpoint = reconcile_generation_artifacts(
+        artifacts_dir,
+        matrix=matrix,
+        checkpoint=checkpoint,
+        checkpoint_path=checkpoint_path,
+    )
+    pending = checkpoint.pending(matrix)
     if not pending:
         responses = _read_jsonl(responses_path)
         observations = _read_jsonl(observations_path)
+        require_complete_pair_artifacts(responses, observations, matrix)
         return {
             "response_count": len(responses),
             "observation_count": len(observations),
@@ -878,8 +1124,14 @@ def _run_generation_matrix(
     loader = load_model or _load_model_for_config
     readout_loader = load_readout or _default_load_readout
     if load_readout is None:
-        verify_frozen_lens_hash(source["paths"]["v1_lens"], FROZEN_LENS_SHA256)
-        verify_frozen_lens_hash(source["paths"]["v2_lens"], FROZEN_V2_LENS_SHA256)
+        verify_frozen_lens_hash(
+            source["paths"]["v1_lens"],
+            source["source_artifact_hashes"]["v1_lens"],
+        )
+        verify_frozen_lens_hash(
+            source["paths"]["v2_lens"],
+            source["source_artifact_hashes"]["v2_lens"],
+        )
     model = tokenizer = None
     try:
         loaded = loader(dict(config))
@@ -888,7 +1140,7 @@ def _run_generation_matrix(
         if resolved is not None and resolved != config["model_revision"]:
             raise ValueError("resolved model revision differs from pinned revision")
         readout = readout_loader(model, tokenizer, source, config)
-        direction = source["direction"]
+        direction = source.get("direction") or load_direction(source["paths"]["direction"])
         control = random_direction_control(
             _tensor_direction(direction),
             seed=int(config["random_control_seed"]),
@@ -942,6 +1194,7 @@ def _run_generation_matrix(
             store.update_progress(completed_units=completed, total_units=len(matrix))
         responses = _read_jsonl(responses_path)
         observations = _read_jsonl(observations_path)
+        require_complete_pair_artifacts(responses, observations, matrix)
         return {
             "response_count": len(responses),
             "observation_count": len(observations),
@@ -1010,6 +1263,15 @@ def run_prepare_stage(
             relative_path=str(config["mitre_frr_relative_path"]),
         ),
     }
+    frozen_files = frozen.get("source_files") or {}
+    for dataset in DATASETS:
+        expected = frozen_files.get(dataset) or {}
+        actual = selections["source_files"][dataset]
+        for field in ("repository", "revision", "relative_path"):
+            if expected.get(field) is not None and expected.get(field) != actual.get(field):
+                raise ValueError(f"{dataset} PurpleLlama {field} mismatch")
+        if expected.get("sha256") and expected["sha256"] != actual["sha256"]:
+            raise ValueError(f"{dataset} PurpleLlama source hash mismatch")
     if compact_contains_text_leak(selections):
         raise ValueError("prepare compact results contain raw text")
     return selections
@@ -1061,8 +1323,10 @@ def run_pilot_stage(
         parity_check=parity_check,
         invoke_parity=True,
     )
-    if generated["response_count"] != len(matrix):
-        raise ValueError("pilot did not produce one response per prompt-condition pair")
+    responses = _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
+    observations = _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
+    require_exact_pair_matrix(responses, matrix)
+    require_complete_pair_artifacts(responses, observations, matrix)
     payload = {
         "response_count": generated["response_count"],
         "observation_count": generated["observation_count"],
@@ -1114,6 +1378,10 @@ def run_panel_stage(
         parity_check=parity_check,
         invoke_parity=False,
     )
+    responses = _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
+    observations = _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
+    require_exact_pair_matrix(responses, matrix)
+    require_complete_pair_artifacts(responses, observations, matrix)
     payload = {
         "response_count": generated["response_count"],
         "observation_count": generated["observation_count"],
@@ -1152,13 +1420,14 @@ def run_analysis_stage(
     *,
     config: Mapping[str, Any],
     artifacts_dir: Path,
+    prepare: Mapping[str, Any] | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
+    raw_responses = _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
     observations = _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
-    responses = [
-        _compact_record(record)
-        for record in _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
-    ]
+    expected = expected_matrix(prepare) if prepare is not None else None
+    require_complete_pair_artifacts(raw_responses, observations, expected)
+    responses = [_compact_record(record) for record in raw_responses]
     _verify_observations(observations)
     fidelity = aggregate_fidelity(observations)
     behavior = summarize_behavior_changes(responses, observations)
@@ -1217,8 +1486,16 @@ def run_finalize_stage(
     pilot: Mapping[str, Any] | None = None,
     panel: Mapping[str, Any] | None = None,
     analysis: Mapping[str, Any] | None = None,
+    artifacts_dir: Path | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
+    if artifacts_dir is not None and prepare is not None:
+        responses = _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
+        observations = _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
+        matrix = expected_matrix(prepare)
+        require_complete_pair_artifacts(responses, observations, matrix)
+        if (panel or {}).get("response_count") not in {None, len(matrix)}:
+            raise ValueError("panel response_count does not match pair matrix")
     del config
     analysis = analysis or {}
     bootstrap = analysis.get("bootstrap") or {}
@@ -1352,6 +1629,40 @@ def _stage_total_units(stage: str, *, dataset_size: int) -> int:
     raise ValueError(f"unknown causal J-lens stage: {stage}")
 
 
+def _stage_completed_units(
+    stage: str,
+    *,
+    artifacts_dir: Path,
+    config: Mapping[str, Any],
+    source: Mapping[str, Any],
+    prepare: Mapping[str, Any] | None,
+    run_id: str,
+    implementation_commit: str,
+) -> int:
+    if stage in {"prepare", "analysis", "finalize"} or prepare is None:
+        return 0
+    identity = checkpoint_identity(
+        run_id=run_id,
+        implementation_commit=implementation_commit,
+        config=config,
+        source=source,
+        prepare=prepare,
+    )
+    matrix = expected_matrix(
+        prepare,
+        example_ids=_pilot_ids(prepare) if stage == "pilot" else None,
+    )
+    checkpoint_path = artifacts_dir / CHECKPOINT_FILENAME
+    checkpoint = _load_or_create_checkpoint(checkpoint_path, identity)
+    checkpoint = reconcile_generation_artifacts(
+        artifacts_dir,
+        matrix=matrix,
+        checkpoint=checkpoint,
+        checkpoint_path=checkpoint_path,
+    )
+    return len(matrix) - len(checkpoint.pending(matrix))
+
+
 def _default_stage_runner(stage: str, **kwargs: Any) -> dict[str, Any]:
     functions = {
         "prepare": run_prepare_stage,
@@ -1439,6 +1750,15 @@ def run_qwen_causal_jlens(
                 stage=stage,
                 total_units=_stage_total_units(
                     stage, dataset_size=int(config["dataset_size"])
+                ),
+                completed_units=_stage_completed_units(
+                    stage,
+                    artifacts_dir=artifacts_dir,
+                    config=config,
+                    source=source,
+                    prepare=accumulated.get("prepare"),
+                    run_id=resolved_run,
+                    implementation_commit=commit,
                 ),
             )
             store.begin_running()

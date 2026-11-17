@@ -21,9 +21,11 @@ from refusal_direction_replication.qwen_causal_jlens import (
     CAUSAL_JLENS_PROFILE,
     CONDITIONS,
     DATASETS,
+    LENS_VERSIONS,
     READOUT_LAYERS,
     compact_contains_text_leak,
 )
+from refusal_direction_replication.qwen_dose import sha256_file
 from refusal_direction_replication.qwen_causal_jlens_runtime import (
     DualLensReadout,
     stream_causal_generation,
@@ -738,6 +740,60 @@ def _seed_sources(root: Path) -> None:
             "selected_pair": {"ablation": 0.2, "addition": 0.5},
         },
     )
+    _stamp_canonical_source_manifests(root)
+
+
+def _stamp_canonical_source_manifests(root: Path) -> None:
+    config = _config(root)
+    paths = {
+        "prepare": root / str(config["source_prepare"]),
+        "direction": root / str(config["source_direction"]),
+        "dose_evaluation": root / str(config["source_dose_evaluation"]),
+        "v1_lens": root / str(config["source_v1_lens"]),
+        "v2_lens": root / str(config["source_v2_lens"]),
+    }
+    hashes = {
+        name: sha256_file(path) for name, path in paths.items() if path.is_file()
+    }
+    v1_eval = root / "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
+    v2_eval = root / "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json"
+    v1_eval.parent.mkdir(parents=True, exist_ok=True)
+    v2_eval.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(v1_eval, {"status": "pass", "lens_sha256": hashes["v1_lens"]})
+    atomic_write_json(v2_eval, {"status": "pass", "lens_sha256": hashes["v2_lens"]})
+    dose_payload = json.loads(paths["dose_evaluation"].read_text(encoding="utf-8"))
+    dose_hashes = dict(dose_payload.get("source_artifact_hashes") or {})
+    dose_hashes["selected_direction"] = hashes["direction"]
+    dose_payload["source_artifact_hashes"] = dose_hashes
+    atomic_write_json(paths["dose_evaluation"], dose_payload)
+    dose_hash = sha256_file(paths["dose_evaluation"])
+    prepare_payload = json.loads(paths["prepare"].read_text(encoding="utf-8"))
+    provenance = dict(prepare_payload.get("provenance") or {})
+    provenance["source_artifact_hashes"] = {
+        "direction": hashes["direction"],
+        "dose_evaluation": dose_hash,
+        "lens": hashes["v1_lens"],
+    }
+    prepare_payload["provenance"] = provenance
+    results = dict(prepare_payload.get("results") or {})
+    source_files = dict(results.get("source_files") or {})
+    purple_root = root / "sources" / "PurpleLlama"
+    for dataset, relative in (
+        ("mitre", str(config["mitre_relative_path"])),
+        ("mitre_frr", str(config["mitre_frr_relative_path"])),
+    ):
+        identity = {
+            "repository": config["purplellama_repository"],
+            "revision": config["purplellama_revision"],
+            "relative_path": relative,
+        }
+        candidate = purple_root / relative
+        if candidate.is_file():
+            identity["sha256"] = sha256_file(candidate)
+        source_files[dataset] = identity
+    results["source_files"] = source_files
+    prepare_payload["results"] = results
+    atomic_write_json(paths["prepare"], prepare_payload)
 
 
 def _rewrite_dose(root: Path, *, addition: float) -> None:
@@ -784,7 +840,7 @@ def test_source_context_requires_exact_frozen_inputs(tmp_path: Path) -> None:
     from refusal_direction_replication.qwen_causal_jlens_runtime import source_context
 
     _seed_sources(tmp_path)
-    context = source_context(tmp_path, _config(tmp_path))
+    context = source_context(tmp_path, _config(tmp_path, dataset_size=2))
     assert context["direction_layer"] == 18
     assert context["direction_offset"] == -1
     assert set(context["source_artifact_hashes"]) == {
@@ -796,7 +852,7 @@ def test_source_context_requires_exact_frozen_inputs(tmp_path: Path) -> None:
     }
     _rewrite_dose(tmp_path, addition=0.4)
     with pytest.raises(ValueError, match="coefficient"):
-        source_context(tmp_path, _config(tmp_path))
+        source_context(tmp_path, _config(tmp_path, dataset_size=2))
 
 
 def test_resume_skips_only_complete_matching_pairs(tmp_path: Path) -> None:
@@ -894,6 +950,7 @@ def _seed_causal_project(root: Path, *, dataset_size: int = 2) -> dict[str, Any]
     _write_prepare_source(root, records)
     source_root = _write_purplellama(root, records)
     config = _write_profile(root, dataset_size=dataset_size)
+    _stamp_canonical_source_manifests(root)
     config["_source_root"] = source_root
     config["_records"] = records
     return config
@@ -1120,6 +1177,13 @@ def test_panel_resume_skips_completed_pairs_and_keeps_compact_clean(
     )
     checkpoint = PanelCheckpoint.create(identity)
     first_id = prepare["mitre"]["example_ids"][0]
+    preexisting = _pair_response("mitre", first_id, "baseline")
+    preexisting["response"] = "PREEXISTING_RESPONSE"
+    _write_jsonl(store.artifacts_dir / "responses.jsonl", [preexisting])
+    _write_jsonl(
+        store.artifacts_dir / "observations.jsonl",
+        _pair_observations("mitre", first_id, "baseline"),
+    )
     checkpoint.mark_complete("mitre", first_id, "baseline")
     checkpoint.write(store.artifacts_dir / "checkpoint.json")
     results = run_panel_stage(
@@ -1142,10 +1206,15 @@ def test_panel_resume_skips_completed_pairs_and_keeps_compact_clean(
         ).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert ("mitre", first_id, "baseline") not in {
-        (row["dataset"], row["example_id"], row["condition"]) for row in responses
-    }
-    assert results["response_count"] == 2 * 2 * 4 - 1
+    kept = [
+        row
+        for row in responses
+        if (row["dataset"], row["example_id"], row["condition"])
+        == ("mitre", first_id, "baseline")
+    ]
+    assert len(kept) == 1
+    assert kept[0]["response"] == "PREEXISTING_RESPONSE"
+    assert results["response_count"] == 2 * 2 * 4
     assert {row["condition"] for row in responses} == set(CONDITIONS)
     observations = [
         json.loads(line)
@@ -1296,3 +1365,416 @@ def test_scripts_are_remote_safe_entrypoints() -> None:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         assert callable(getattr(module, "remote_main", None) or getattr(module, "main_with_root"))
+
+
+def _pair_response(
+    dataset: str,
+    example_id: str,
+    condition: str,
+    *,
+    steps: int = 3,
+) -> dict[str, Any]:
+    return {
+        "dataset": dataset,
+        "example_id": example_id,
+        "content_hash": "h",
+        "condition": condition,
+        "prompt": "prompt",
+        "response": "response",
+        "refusal": False,
+        "valid": True,
+        "generated_token_count": steps,
+        "readout_steps": min(8, steps),
+        "terminal_reason": "eos",
+    }
+
+
+def _pair_observations(
+    dataset: str,
+    example_id: str,
+    condition: str,
+    *,
+    steps: int = 3,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "dataset": dataset,
+            "example_id": example_id,
+            "condition": condition,
+            "generation_step": step,
+            "layer": int(layer),
+            "lens_version": version,
+            "rank": 1,
+            "target_token_id": 2,
+        }
+        for step in range(1, min(8, steps) + 1)
+        for layer in READOUT_LAYERS
+        for version in LENS_VERSIONS
+    ]
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def test_reconcile_prunes_partial_crash_and_repairs_lagging_checkpoint(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        PanelCheckpoint,
+        reconcile_generation_artifacts,
+    )
+
+    matrix = _matrix()
+    identity = _identity("run-a")
+    checkpoint = PanelCheckpoint.create(identity)
+    artifacts = tmp_path / "artifacts"
+    complete_response, complete_obs = (
+        _pair_response("mitre", "id-1", "baseline"),
+        _pair_observations("mitre", "id-1", "baseline"),
+    )
+    partial_response = _pair_response("mitre", "id-1", "ablation")
+    duplicate_response = _pair_response("mitre", "id-2", "baseline")
+    _write_jsonl(
+        artifacts / "responses.jsonl",
+        [complete_response, partial_response, duplicate_response, duplicate_response],
+    )
+    _write_jsonl(
+        artifacts / "observations.jsonl",
+        [
+            *complete_obs,
+            *_pair_observations("mitre", "id-1", "ablation")[:3],
+            *_pair_observations("mitre", "id-2", "baseline"),
+            *_pair_observations("mitre", "id-2", "baseline"),
+        ],
+    )
+    repaired = reconcile_generation_artifacts(
+        artifacts,
+        matrix=matrix,
+        checkpoint=checkpoint,
+        checkpoint_path=tmp_path / "checkpoint.json",
+    )
+    responses = [
+        json.loads(line)
+        for line in (artifacts / "responses.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    observations = [
+        json.loads(line)
+        for line in (artifacts / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [(row["dataset"], row["example_id"], row["condition"]) for row in responses] == [
+        ("mitre", "id-1", "baseline")
+    ]
+    assert len(observations) == 3 * 4 * 2
+    assert repaired.pending(matrix) == matrix[1:]
+    assert repaired._completed == [("mitre", "id-1", "baseline")]
+
+
+def test_resume_regenerates_partial_pair_exactly_once(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        PanelCheckpoint,
+        checkpoint_identity,
+        run_panel_stage,
+        run_prepare_stage,
+        source_context,
+    )
+
+    config = _seed_causal_project(tmp_path)
+    source = source_context(tmp_path, config)
+    store = _progress_store(tmp_path)
+    prepare = run_prepare_stage(
+        root=tmp_path,
+        config=config,
+        artifacts_dir=store.artifacts_dir,
+        store=store,
+        source=source,
+        source_root=config["_source_root"],
+    )
+    identity = checkpoint_identity(
+        run_id="causal-run",
+        implementation_commit="a" * 40,
+        config=config,
+        source=source,
+        prepare=prepare,
+    )
+    first_id = prepare["mitre"]["example_ids"][0]
+    partial = _pair_response("mitre", first_id, "baseline", steps=3)
+    _write_jsonl(store.artifacts_dir / "responses.jsonl", [partial])
+    _write_jsonl(
+        store.artifacts_dir / "observations.jsonl",
+        _pair_observations("mitre", first_id, "baseline", steps=3)[:4],
+    )
+    PanelCheckpoint.create(identity).write(store.artifacts_dir / "checkpoint.json")
+    results = run_panel_stage(
+        root=tmp_path,
+        config=config,
+        artifacts_dir=store.artifacts_dir,
+        store=store,
+        source=source,
+        prepare=prepare,
+        run_id="causal-run",
+        implementation_commit="a" * 40,
+        load_model=_load_model,
+        load_readout=_load_readout,
+        parity_check=lambda **_kwargs: None,
+    )
+    responses = [
+        json.loads(line)
+        for line in (store.artifacts_dir / "responses.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    keys = [(row["dataset"], row["example_id"], row["condition"]) for row in responses]
+    assert keys.count(("mitre", first_id, "baseline")) == 1
+    assert len(set(keys)) == len(keys) == 16
+    assert results["response_count"] == 16
+
+
+def test_pilot_and_panel_require_exact_unique_key_matrix(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        require_exact_pair_matrix,
+        run_analysis_stage,
+        run_finalize_stage,
+    )
+
+    assert len(DATASETS) * 32 * len(CONDITIONS) == 256
+    expected = [
+        (dataset, f"{dataset}-{index}", condition)
+        for dataset in DATASETS
+        for index in range(2)
+        for condition in CONDITIONS
+    ]
+    rows = [
+        _pair_response(dataset, example_id, condition)
+        for dataset, example_id, condition in expected
+    ]
+    require_exact_pair_matrix(rows, expected)
+    with pytest.raises(ValueError, match="duplicate"):
+        require_exact_pair_matrix([rows[0], *rows], expected)
+    with pytest.raises(ValueError, match="matrix|extra|missing"):
+        require_exact_pair_matrix(rows[:-1], expected)
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    _write_jsonl(artifacts / "responses.jsonl", [rows[0], rows[0]])
+    _write_jsonl(
+        artifacts / "observations.jsonl",
+        _pair_observations(rows[0]["dataset"], rows[0]["example_id"], rows[0]["condition"]),
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        run_analysis_stage(config=_config(tmp_path, dataset_size=2), artifacts_dir=artifacts)
+    with pytest.raises(ValueError, match="duplicate|incomplete|matrix"):
+        run_finalize_stage(
+            config=_config(tmp_path, dataset_size=2),
+            artifacts_dir=artifacts,
+            prepare={
+                "mitre": {"example_ids": ["mitre-0", "mitre-1"]},
+                "mitre_frr": {"example_ids": ["mitre_frr-0", "mitre_frr-1"]},
+            },
+            panel={"response_count": 2},
+        )
+
+
+def test_stream_and_rank_target_reject_nonfinite_logits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from refusal_direction_replication import qwen_causal_jlens_runtime as module
+
+    readout = _dual_readout()
+    original = module.incremental_logits_from_residual
+
+    def nan_logits(lens, bound_model, residual, *, layer):
+        logits = original(lens, bound_model, residual, layer=layer)
+        logits = logits.clone()
+        logits[0] = float("nan")
+        return logits
+
+    monkeypatch.setattr(module, "incremental_logits_from_residual", nan_logits)
+    with pytest.raises(ValueError, match="finite"):
+        readout.rank_target(torch.tensor([1.0] * READOUT_D_MODEL), layer=25, target_token_id=3)
+
+    class NanModel(GreedyFixture):
+        def forward(self, *args, **kwargs):
+            outputs = super().forward(*args, **kwargs)
+            outputs.logits[:] = float("nan")
+            return outputs
+
+    with pytest.raises(ValueError, match="finite"):
+        stream_causal_generation(
+            model=NanModel(tokens=2),
+            tokenizer=_tokenizer(),
+            readout=_dual_readout(),
+            layers=READOUT_LAYERS,
+            readout_steps=8,
+            max_new_tokens=64,
+            **_intervention_inputs("baseline"),
+        )
+
+
+def test_pilot_checks_finite_logits_on_every_ranked_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from refusal_direction_replication import qwen_causal_jlens_runtime as module
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        run_pilot_stage,
+        run_prepare_stage,
+        source_context,
+    )
+
+    config = _seed_causal_project(tmp_path)
+    source = source_context(tmp_path, config)
+    store = _progress_store(tmp_path)
+    prepare = run_prepare_stage(
+        root=tmp_path,
+        config=config,
+        artifacts_dir=store.artifacts_dir,
+        store=store,
+        source=source,
+        source_root=config["_source_root"],
+    )
+    names: list[str] = []
+    original = module.require_finite_logits
+
+    def spy(tensor, name):
+        names.append(str(name))
+        return original(tensor, name)
+
+    monkeypatch.setattr(module, "require_finite_logits", spy)
+    run_pilot_stage(
+        root=tmp_path,
+        config=config,
+        artifacts_dir=store.artifacts_dir,
+        store=store,
+        source=source,
+        prepare=prepare,
+        run_id="causal-run",
+        implementation_commit="a" * 40,
+        load_model=_load_model,
+        load_readout=_load_readout,
+        parity_check=lambda **_kwargs: None,
+    )
+    model_checks = [name for name in names if "model" in name.casefold()]
+    v1_checks = [name for name in names if "v1 readout" in name.casefold()]
+    v2_checks = [name for name in names if "v2 readout" in name.casefold()]
+    assert len(model_checks) == 16 * 3
+    assert len(v1_checks) == 16 * 3 * 4
+    assert len(v2_checks) == 16 * 3 * 4
+
+
+def test_source_context_requires_canonical_manifest_agreement(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import source_context
+
+    _seed_sources(tmp_path)
+    config = _config(tmp_path, dataset_size=2)
+    v1 = tmp_path / str(config["source_v1_lens"])
+    v1.write_bytes(b"tampered-v1")
+    with pytest.raises(ValueError, match="hash"):
+        source_context(tmp_path, config)
+
+
+def test_resume_initialize_does_not_regress_completed_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from refusal_direction_replication import qwen_causal_jlens_runtime as module
+    from refusal_direction_replication.run_progress import RunProgressStore
+
+    config = _seed_causal_project(tmp_path)
+    seen: list[tuple[str, int]] = []
+    original = RunProgressStore.initialize
+
+    def wrapped(self, *args, **kwargs):
+        seen.append((str(kwargs.get("stage")), int(kwargs.get("completed_units", 0))))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RunProgressStore, "initialize", wrapped)
+    completed_prepare = {
+        dataset: {
+            "example_ids": [item["example_id"] for item in config["_records"][dataset]],
+            "content_hashes": [item["content_hash"] for item in config["_records"][dataset]],
+            "source_indices": [item["source_index"] for item in config["_records"][dataset]],
+        }
+        for dataset in DATASETS
+    }
+    source = module.source_context(tmp_path, config, load_direction_payload=False)
+    identity = module.checkpoint_identity(
+        run_id="causal-run",
+        implementation_commit="a" * 40,
+        config=config,
+        source=source,
+        prepare=completed_prepare,
+    )
+    first_id = completed_prepare["mitre"]["example_ids"][0]
+    response, observations = (
+        _pair_response("mitre", first_id, "baseline"),
+        _pair_observations("mitre", first_id, "baseline"),
+    )
+    artifacts = tmp_path / "artifacts/qwen25_coder_7b_causal_jlens"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(artifacts / "responses.jsonl", [response])
+    _write_jsonl(artifacts / "observations.jsonl", observations)
+    checkpoint = module.PanelCheckpoint.create(identity)
+    checkpoint.mark_complete("mitre", first_id, "baseline")
+    checkpoint.write(artifacts / "checkpoint.json")
+    results_dir = tmp_path / "results/qwen25_coder_7b_causal_jlens"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    provenance = {
+        "run_id": "causal-run",
+        "implementation_commit": "a" * 40,
+        "config_sha256": module._config_hash(config),
+        "source_artifact_hashes": source["source_artifact_hashes"],
+    }
+    module._write_stage(
+        results_dir / "00_prepare.json",
+        stage="prepare",
+        config=config,
+        results=completed_prepare,
+        provenance=provenance,
+    )
+
+    def runner(stage: str, **kwargs: Any) -> dict[str, Any]:
+        if stage == "prepare":
+            raise AssertionError("prepare should be skipped")
+        if stage == "pilot":
+            return {
+                "response_count": 16,
+                "pilot_status": "pass",
+                "conditions": list(CONDITIONS),
+                "pilot_ids": {
+                    dataset: completed_prepare[dataset]["example_ids"][:2]
+                    for dataset in DATASETS
+                },
+            }
+        if stage == "panel":
+            return {
+                "response_count": 16,
+                "observation_count": 24,
+                "conditions": list(CONDITIONS),
+            }
+        if stage == "analysis":
+            return {"fidelity": {}, "bootstrap": {}, "behavior_changes": {}, "refusal_rates": {}}
+        if stage == "finalize":
+            return {"status": "pass", "pilot_status": "pass"}
+        raise AssertionError(stage)
+
+    module.run_qwen_causal_jlens(
+        tmp_path,
+        profile=CAUSAL_JLENS_PROFILE,
+        run_id="causal-run",
+        implementation_commit="a" * 40,
+        stage_runner=runner,
+        gpu_probe=_a100_probe,
+        load_model=_load_model,
+        load_readout=_load_readout,
+        parity_check=lambda **_kwargs: None,
+        source_root=config["_source_root"],
+    )
+    by_stage = {stage: completed for stage, completed in seen}
+    assert by_stage["pilot"] == 1
+    assert by_stage["panel"] == 1
+    generation = [completed for stage, completed in seen if stage in {"pilot", "panel"}]
+    assert generation == sorted(generation)
