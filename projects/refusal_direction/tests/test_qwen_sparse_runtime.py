@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 import torch
 
+import refusal_direction_replication.qwen_sparse_runtime as sparse_runtime
 from refusal_direction_replication.qwen_sparse_runtime import (
     CONDITIONS,
     SCIENTIFIC_STATUSES,
@@ -29,6 +31,84 @@ def _config() -> dict[str, object]:
     }
 
 
+def _sha(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _file_sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _frozen_test_pairs() -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "pair_id": f"pair-{index:04d}",
+            "offensive_sha256": _sha(f"offensive-{index}"),
+            "defensive_sha256": _sha(f"defensive-{index}"),
+        }
+        for index in range(64)
+    )
+
+
+def _write_panel_prepare(path: Path) -> Path:
+    results = {}
+    for dataset in ("mitre", "mitre_frr", "humaneval_plus"):
+        results[dataset] = {
+            "example_ids": [f"{dataset}-{index}" for index in range(32)],
+            "content_hashes": [_sha(f"{dataset}-{index}") for index in range(32)],
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"results": results}), encoding="utf-8")
+    return path
+
+
+def _freeze_fixture(
+    vectors: dict[str, torch.Tensor] | None = None,
+) -> dict[str, object]:
+    aliases = {
+        "sparse_unfiltered": "unfiltered",
+        "sparse_filtered": "filtered",
+        "sparse_random_control": "random",
+    }
+    rows = []
+    for vector, alias in aliases.items():
+        vector_hash = (
+            sparse_runtime.tensor_sha256(vectors[alias])
+            if vectors
+            else _sha(vector)
+        )
+        vector_norm = float(vectors[alias].norm()) if vectors else 1.0
+        for intervention in ("addition", "ablation"):
+            for cardinality in (8, 16, 32, 64):
+                for dose in (0.1, 0.2, 0.35, 0.5, 0.75, 1.0):
+                    rows.append(
+                        {
+                            "vector": vector,
+                            "intervention": intervention,
+                            "cardinality": cardinality,
+                            "dose": dose,
+                            "dense_desired_effect": 0.8,
+                            "desired_effect": 0.74 if dose == 0.1 else 0.76,
+                            "defensive_false_refusal": cardinality / 1000,
+                            "defensive_kl": cardinality / 100,
+                            "feature_indices": list(range(cardinality)),
+                            "coefficients": [1.0] * cardinality,
+                            "vector_sha256": vector_hash,
+                            "vector_norm": vector_norm,
+                            "dense_vector_sha256": (
+                                sparse_runtime.tensor_sha256(vectors["dense"])
+                                if vectors
+                                else "d" * 64
+                            ),
+                            "dense_vector_norm": (
+                                float(vectors["dense"].norm()) if vectors else 1.0
+                            ),
+                            "dense_dose": 0.5,
+                        }
+                    )
+    return freeze_selection(rows)
+
+
 def _store(tmp_path: Path) -> SparseStageStore:
     return SparseStageStore(
         tmp_path / "results",
@@ -37,19 +117,14 @@ def _store(tmp_path: Path) -> SparseStageStore:
         implementation_commit="impl-1",
         corpus_sha256="c" * 64,
         pair_split_sha256="p" * 64,
+        test_pairs=_frozen_test_pairs(),
     )
 
 
 def _complete_through_select(store: SparseStageStore) -> None:
     for stage in SPARSE_STAGES[:6]:
         store.write_stage(stage, {"status": "completed"})
-    store.write_stage(
-        "select",
-        {
-            "status": "selection_frozen",
-            "selection_freeze_sha256": "f" * 64,
-        },
-    )
+    store.write_stage("select", _freeze_fixture())
     assert store.selection_freeze_path.is_file()
 
 
@@ -126,7 +201,11 @@ def test_selection_freezes_full_grid_with_frozen_tie_breaks() -> None:
                             "defensive_kl": cardinality / 100,
                             "feature_indices": list(range(actual_cardinality)),
                             "coefficients": [1.0] * actual_cardinality,
-                            "vector_sha256": f"{vector}:{cardinality}",
+                            "vector_sha256": _sha(f"{vector}:{cardinality}"),
+                            "vector_norm": 1.0,
+                            "dense_vector_sha256": "d" * 64,
+                            "dense_vector_norm": 1.0,
+                            "dense_dose": 0.5,
                         }
                     )
     frozen = freeze_selection(rows)
@@ -159,6 +238,7 @@ def test_hooks_preserve_dense_intervention_semantics() -> None:
         name: {"addition": 0.2, "ablation": 0.35}
         for name in vectors
     }
+    freeze = _freeze_fixture(vectors)
 
     pre, forward = sparse_condition_hook_specs(
         condition="filtered_addition",
@@ -166,7 +246,7 @@ def test_hooks_preserve_dense_intervention_semantics() -> None:
         attentions=attentions,
         mlps=mlps,
         vectors=vectors,
-        doses=doses,
+        freeze=freeze,
     )
     assert len(pre) == 1 and pre[0][0] is blocks[18]
     assert forward == []
@@ -179,7 +259,7 @@ def test_hooks_preserve_dense_intervention_semantics() -> None:
         attentions=attentions,
         mlps=mlps,
         vectors=vectors,
-        doses=doses,
+        freeze=freeze,
     )
     assert len(pre) == 24
     assert len(forward) == 48
@@ -190,12 +270,13 @@ def test_compact_test_matrix_has_all_nine_conditions_without_leaks(
 ) -> None:
     store = _store(tmp_path)
     _complete_through_select(store)
-    pair_ids = [f"pair-{index:04d}" for index in range(64)]
-    observations = expected_test_matrix(pair_ids)
+    observations = expected_test_matrix(_frozen_test_pairs())
     payload = SparseRuntime(store).run_stage(
         "test",
         lambda **_kwargs: {
             "status": "completed",
+            "selection_freeze_sha256": store.selection_freeze_sha256(),
+            "test_split_sha256": store.test_split_sha256,
             "observations": observations,
         },
     )
@@ -206,6 +287,199 @@ def test_compact_test_matrix_has_all_nine_conditions_without_leaks(
     assert len(keys) == 64 * 2 * 9
     assert {row["condition"] for row in observations} == set(CONDITIONS)
     assert not compact_contains_leak(payload)
+
+
+def test_test_matrix_rejects_same_sized_wrong_frozen_ids_and_hashes(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _complete_through_select(store)
+    wrong = list(expected_test_matrix(_frozen_test_pairs()))
+    wrong[0] = {**wrong[0], "pair_id": "other-pair"}
+    with pytest.raises(ValueError, match="frozen test split"):
+        SparseRuntime(store).run_stage(
+            "test",
+            lambda **_kwargs: {
+                "status": "completed",
+                "selection_freeze_sha256": store.selection_freeze_sha256(),
+                "test_split_sha256": store.test_split_sha256,
+                "observations": wrong,
+            },
+        )
+
+
+def test_selection_digest_and_hook_vectors_are_governed_by_freeze(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _complete_through_select(store)
+    freeze = json.loads(store.selection_freeze_path.read_text(encoding="utf-8"))
+    freeze["selections"]["sparse_filtered"]["addition"]["dose"] = 1.0
+    store.selection_freeze_path.write_text(json.dumps(freeze), encoding="utf-8")
+    with pytest.raises(ValueError, match="selection_freeze_sha256"):
+        store.load_stage("select")
+
+
+def test_stage_allowlist_rejects_unknown_non_blacklisted_field(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="prepare schema"):
+        store.write_stage(
+            "prepare",
+            {"status": "completed", "secret_payload": "not raw-key named"},
+        )
+
+
+def test_operational_result_and_precondition_errors_are_terminal_and_provenanced(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    result = SparseRuntime(store).run_stage(
+        "prepare",
+        lambda **_kwargs: {
+            "status": "operational_error",
+            "error_code": "fixture",
+        },
+    )
+    assert result["status"] == "operational_error"
+    assert not store.stage_path("prepare").exists()
+    error = json.loads(store.operational_error_path.read_text(encoding="utf-8"))
+    assert set(error["provenance"]) == {
+        "run_id",
+        "implementation_commit",
+        "config_sha256",
+        "model_revision",
+        "direction_sha256",
+        "corpus_sha256",
+        "pair_split_sha256",
+        "test_split_sha256",
+        "prior_stage_sha256",
+    }
+
+    blocked = _store(tmp_path / "blocked")
+    with pytest.raises(ValueError, match="selection must be frozen"):
+        SparseRuntime(blocked).run_stage("test", lambda **_kwargs: {})
+    assert blocked.operational_error_path.is_file()
+
+
+def test_external_transfer_requires_frozen_bijection_and_full_coverage(
+    tmp_path: Path,
+) -> None:
+    prepare = _write_panel_prepare(tmp_path / "00_prepare.json")
+    identity = sparse_runtime.frozen_external_transfer_identity(
+        prepare,
+        expected_prepare_sha256=_file_sha(prepare),
+    )
+    freeze = _freeze_fixture()
+    observations = []
+    for dataset in ("mitre", "mitre_frr"):
+        for item in identity["datasets"][dataset]:
+            for condition in sparse_runtime.EXTERNAL_CONDITIONS:
+                observations.append(
+                    {
+                        "dataset": dataset,
+                        **item,
+                        "condition": condition,
+                        "dose": sparse_runtime.condition_dose(condition, freeze),
+                    }
+                )
+    receipt = {
+        "status": "completed",
+        "prepare_sha256": identity["prepare_sha256"],
+        "selection_freeze_sha256": freeze["selection_freeze_sha256"],
+        "observations": observations,
+    }
+    sparse_runtime.validate_external_transfer_receipt(receipt, identity, freeze)
+    receipt["observations"].pop()
+    with pytest.raises(ValueError, match="external transfer coverage"):
+        sparse_runtime.validate_external_transfer_receipt(receipt, identity, freeze)
+
+
+def test_humaneval_stage_validates_frozen_ids_doses_limits_and_worker_outputs(
+    tmp_path: Path,
+) -> None:
+    prepare = _write_panel_prepare(tmp_path / "00_prepare.json")
+    identity = sparse_runtime.frozen_humaneval_identity(
+        prepare,
+        expected_prepare_sha256=_file_sha(prepare),
+    )
+    freeze = _freeze_fixture()
+    jobs = build_code_preservation_jobs(
+        worker=tmp_path / "worker.py",
+        problems=tmp_path / "problems.jsonl",
+        sample_paths={
+            condition: tmp_path / f"{condition}.jsonl"
+            for condition in ("baseline", "dense", "filtered")
+        },
+        output_dir=tmp_path / "output",
+        identity_dir=tmp_path / "identity",
+        temp_root=tmp_path / "temp",
+        timeout_seconds=60,
+        remote_vm=True,
+        identity=identity,
+        freeze=freeze,
+    )
+    outputs = {
+        condition: [
+            {
+                **item,
+                "plus_pass": True,
+            }
+            for item in identity["items"]
+        ]
+        for condition in ("baseline", "dense", "filtered")
+    }
+    receipt = {
+        "status": "completed",
+        "prepare_sha256": identity["prepare_sha256"],
+        "selection_freeze_sha256": freeze["selection_freeze_sha256"],
+        "conditions": ["baseline", "dense", "filtered"],
+        "doses": {
+            "baseline": 0.0,
+            "dense": 0.5,
+            "filtered": 0.2,
+        },
+        "memory_bytes": 1024**3,
+        "timeout_seconds": 60,
+        "parallelism": 1,
+        "remote_vm": True,
+        "evalplus_revision": "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e",
+        "job_manifest_sha256": jobs["job_manifest_sha256"],
+        "worker_outputs": outputs,
+    }
+    sparse_runtime.validate_code_preservation_receipt(
+        receipt,
+        identity=identity,
+        freeze=freeze,
+    )
+    receipt["worker_outputs"]["filtered"].pop()
+    with pytest.raises(ValueError, match="HumanEval\\+ coverage"):
+        sparse_runtime.validate_code_preservation_receipt(
+            receipt,
+            identity=identity,
+            freeze=freeze,
+        )
+
+
+def test_alternate_profile_without_allowlisted_digest_is_rejected(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "alternate.json").write_text(
+        json.dumps(_config()),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="approved sparse profile"):
+        sparse_runtime.run_qwen_sparse_refusal(
+            tmp_path,
+            "alternate.json",
+            run_id="run",
+            implementation_commit="impl",
+            corpus_sha256="c" * 64,
+            pair_split_sha256="p" * 64,
+        )
 
 
 def test_scientific_halts_and_operational_errors_remain_distinct(
@@ -238,9 +512,31 @@ def test_external_and_code_evaluation_require_complete_blind_review(
 ) -> None:
     store = _store(tmp_path)
     _complete_through_select(store)
-    store.write_stage("test", {"status": "completed", "observations": []})
-    store.write_stage("review_export", {"status": "review_pending", "review_count": 512})
-    store.write_stage("review_merge", {"status": "inconclusive_review"})
+    store.write_stage(
+        "test",
+        {
+            "status": "completed",
+            "selection_freeze_sha256": store.selection_freeze_sha256(),
+            "test_split_sha256": store.test_split_sha256,
+            "observations": expected_test_matrix(_frozen_test_pairs()),
+        },
+    )
+    store.write_stage(
+        "review_export",
+        {
+            "status": "review_pending",
+            "review_count": 512,
+            "test_split_sha256": store.test_split_sha256,
+            "blind_review_sha256": "b" * 64,
+        },
+    )
+    store.write_stage(
+        "review_merge",
+        {
+            "status": "inconclusive_review",
+            "test_split_sha256": store.test_split_sha256,
+        },
+    )
     runtime = SparseRuntime(store)
     with pytest.raises(ValueError, match="complete blind review"):
         runtime.run_stage("external_transfer", lambda **_kwargs: {})
@@ -262,8 +558,19 @@ def test_humaneval_plus_reuses_remote_limited_worker_for_frozen_conditions(
         output_dir=tmp_path / "output",
         identity_dir=tmp_path / "identity",
         temp_root=tmp_path / "temp",
-        timeout_seconds=10,
+        timeout_seconds=60,
         remote_vm=True,
+        identity={
+            "prepare_sha256": "a" * 64,
+            "items": tuple(
+                {
+                    "example_id": f"id-{index}",
+                    "content_sha256": _sha(f"id-{index}"),
+                }
+                for index in range(32)
+            ),
+        },
+        freeze=_freeze_fixture(),
     )
     assert jobs["conditions"] == ("baseline", "dense", "filtered")
     assert jobs["parallelism"] == 1
@@ -281,6 +588,17 @@ def test_humaneval_plus_reuses_remote_limited_worker_for_frozen_conditions(
             output_dir=tmp_path / "output",
             identity_dir=tmp_path / "identity",
             temp_root=tmp_path / "temp",
-            timeout_seconds=10,
+            timeout_seconds=60,
             remote_vm=False,
+            identity={
+                "prepare_sha256": "a" * 64,
+                "items": tuple(
+                    {
+                        "example_id": f"id-{index}",
+                        "content_sha256": _sha(f"id-{index}"),
+                    }
+                    for index in range(32)
+                ),
+            },
+            freeze=_freeze_fixture(),
         )

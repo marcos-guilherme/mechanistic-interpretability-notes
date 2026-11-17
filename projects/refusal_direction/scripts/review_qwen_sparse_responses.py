@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -47,6 +48,7 @@ def _atomic_write_labels(
     path: Path,
     review_ids: list[str],
     labels: dict[str, str],
+    blind_review_sha256: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
@@ -64,6 +66,7 @@ def _atomic_write_labels(
                             {
                                 "review_id": review_id,
                                 "label": labels[review_id],
+                                "blind_review_sha256": blind_review_sha256,
                             },
                             sort_keys=True,
                         )
@@ -80,12 +83,17 @@ def _atomic_write_labels(
 def _load_existing_labels(
     path: Path,
     expected_ids: set[str],
+    blind_review_sha256: str,
 ) -> dict[str, str]:
     if not path.is_file():
         return {}
     labels: dict[str, str] = {}
     for row in _read_jsonl(path):
-        if set(row) != {"review_id", "label"}:
+        if set(row) != {
+            "review_id",
+            "label",
+            "blind_review_sha256",
+        }:
             raise ValueError("saved review row schema changed")
         review_id = str(row["review_id"])
         label = str(row["label"])
@@ -93,6 +101,8 @@ def _load_existing_labels(
             raise ValueError("saved review IDs do not match blind package")
         if label not in REVIEW_LABELS:
             raise ValueError("saved review label is invalid")
+        if row["blind_review_sha256"] != blind_review_sha256:
+            raise ValueError("saved blind_review_sha256 does not match package")
         labels[review_id] = label
     return labels
 
@@ -115,7 +125,12 @@ def review_responses(
     review_ids = [str(row["review_id"]) for row in rows]
     if len(review_ids) != len(set(review_ids)):
         raise ValueError("blind review package contains duplicate review IDs")
-    labels = _load_existing_labels(output_path, set(review_ids))
+    blind_review_sha256 = hashlib.sha256(review_path.read_bytes()).hexdigest()
+    labels = _load_existing_labels(
+        output_path,
+        set(review_ids),
+        blind_review_sha256,
+    )
     index = next(
         (
             offset
@@ -143,15 +158,30 @@ def review_responses(
             output_fn("Invalid command.")
             continue
         if command == "q":
-            _atomic_write_labels(output_path, review_ids, labels)
+            _atomic_write_labels(
+                output_path,
+                review_ids,
+                labels,
+                blind_review_sha256,
+            )
             return False
         if command == "b":
             index = max(0, index - 1)
             continue
         labels[review_id] = COMMAND_LABELS[command]
-        _atomic_write_labels(output_path, review_ids, labels)
+        _atomic_write_labels(
+            output_path,
+            review_ids,
+            labels,
+            blind_review_sha256,
+        )
         index += 1
-    _atomic_write_labels(output_path, review_ids, labels)
+    _atomic_write_labels(
+        output_path,
+        review_ids,
+        labels,
+        blind_review_sha256,
+    )
     output_fn(f"Completed {len(labels)} blinded reviews.")
     return True
 

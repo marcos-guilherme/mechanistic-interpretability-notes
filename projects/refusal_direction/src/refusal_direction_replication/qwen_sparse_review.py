@@ -128,8 +128,46 @@ def _review_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _frozen_side_hashes(
+    frozen_test_pairs: Sequence[Mapping[str, str]],
+) -> dict[tuple[str, str], str]:
+    if len(frozen_test_pairs) != 64:
+        raise ValueError("frozen test split must contain exactly 64 pairs")
+    output: dict[tuple[str, str], str] = {}
+    for row in frozen_test_pairs:
+        if set(row) != {
+            "pair_id",
+            "offensive_sha256",
+            "defensive_sha256",
+        }:
+            raise ValueError("frozen test split schema changed")
+        pair_id = _required_text(row, "pair_id", "<frozen-test>")
+        for side in ("offensive", "defensive"):
+            digest = _required_text(row, f"{side}_sha256", pair_id)
+            if len(digest) != 64:
+                raise ValueError("frozen test split hash must be SHA-256")
+            key = (pair_id, side)
+            if key in output:
+                raise ValueError("frozen test split contains duplicate pairs")
+            output[key] = digest
+    if len(output) != 128:
+        raise ValueError("frozen test split identities are incomplete")
+    return output
+
+
 def _validated_response_rows(
     response_paths: Sequence[Path],
+    frozen_test_pairs: Sequence[Mapping[str, str]],
 ) -> list[dict[str, Any]]:
     rows = [
         row
@@ -137,7 +175,8 @@ def _validated_response_rows(
         for row in _read_jsonl(Path(path))
     ]
     keys = [_review_key(row) for row in rows]
-    pair_ids = {pair_id for pair_id, _side, _condition in keys}
+    frozen_hashes = _frozen_side_hashes(frozen_test_pairs)
+    pair_ids = {pair_id for pair_id, _side in frozen_hashes}
     actual_shape = {
         (pair_id, side, condition)
         for pair_id in pair_ids
@@ -162,6 +201,9 @@ def _validated_response_rows(
         if condition not in PRIMARY_REVIEW_CONDITIONS:
             raise ValueError("review coverage contains a non-primary condition")
         prompt = _required_text(row, "prompt", pair_id)
+        prompt_sha256 = _required_text(row, "prompt_sha256", pair_id)
+        if prompt_sha256 != frozen_hashes.get((pair_id, side)):
+            raise ValueError("review responses differ from frozen test split")
         generation = row.get("generation")
         if not isinstance(generation, str):
             raise ValueError(f"{pair_id}: generation must be a string")
@@ -176,7 +218,11 @@ def _validated_response_rows(
                 "side": side,
                 "condition": condition,
                 "prompt": prompt,
+                "prompt_sha256": prompt_sha256,
                 "generation": generation,
+                "generation_sha256": hashlib.sha256(
+                    generation.encode("utf-8")
+                ).hexdigest(),
                 "automatic_refusal": automatic,
             }
         )
@@ -187,11 +233,13 @@ def build_blind_review(
     response_paths: Sequence[Path],
     output_dir: Path,
     seed: int = 2031,
+    *,
+    frozen_test_pairs: Sequence[Mapping[str, str]],
 ) -> Path:
     """Export exactly 512 primary responses with assignment data separated."""
     if len(response_paths) == 0:
         raise ValueError("response_paths must be nonempty")
-    rows = _validated_response_rows(response_paths)
+    rows = _validated_response_rows(response_paths, frozen_test_pairs)
     ordered = sorted(
         rows,
         key=lambda row: (
@@ -205,7 +253,8 @@ def build_blind_review(
     for index, row in enumerate(ordered):
         material = (
             f"{int(seed)}:{index}:{row['pair_id']}:{row['side']}:"
-            f"{row['condition']}"
+            f"{row['condition']}:{row['prompt_sha256']}:"
+            f"{row['generation_sha256']}"
         )
         review_id = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
         public.append(
@@ -221,6 +270,8 @@ def build_blind_review(
                 "pair_id": row["pair_id"],
                 "side": row["side"],
                 "condition": row["condition"],
+                "prompt_sha256": row["prompt_sha256"],
+                "generation_sha256": row["generation_sha256"],
                 "automatic_refusal": row["automatic_refusal"],
             }
         )
@@ -235,6 +286,9 @@ def build_blind_review(
             "seed": int(seed),
             "review_count": REVIEW_ROW_COUNT,
             "blind_review_sha256": _sha256_file(public_path),
+            "test_split_sha256": _canonical_sha256(
+                list(frozen_test_pairs)
+            ),
             "assignments": assignments,
         },
     )
@@ -263,12 +317,17 @@ def _validate_manifest(
             "pair_id",
             "side",
             "condition",
+            "prompt_sha256",
+            "generation_sha256",
             "automatic_refusal",
         }:
             raise ValueError("private manifest assignment schema changed")
         pair_id = _required_text(assignment, "pair_id", review_id)
         side = _required_text(assignment, "side", review_id)
         condition = _required_text(assignment, "condition", review_id)
+        for field in ("prompt_sha256", "generation_sha256"):
+            if len(_required_text(assignment, field, review_id)) != 64:
+                raise ValueError("private assignment hash must be SHA-256")
         if side not in {"offensive", "defensive"}:
             raise ValueError("private review coverage has an invalid side")
         if condition not in PRIMARY_REVIEW_CONDITIONS:
@@ -299,16 +358,22 @@ def merge_blind_review(
 ) -> dict[str, Any]:
     """Strictly merge one valid human label for every blinded review ID."""
     manifest, assignments = _validate_manifest(Path(private_manifest))
+    blind_path = Path(private_manifest).parent / BLIND_REVIEW_FILENAME
+    actual_blind_sha256 = _sha256_file(blind_path)
+    if manifest.get("blind_review_sha256") != actual_blind_sha256:
+        raise ValueError("blind_review_sha256 does not match blind review file")
     reviewed = _read_jsonl(Path(reviewed_jsonl))
     ids: list[str] = []
     labels: dict[str, str] = {}
     for row in reviewed:
-        if set(row) != {"review_id", "label"}:
+        if set(row) != {"review_id", "label", "blind_review_sha256"}:
             raise ValueError(
                 "review rows must contain only review_id and review label"
             )
         review_id = _required_text(row, "review_id", "<review>")
         label = _required_text(row, "label", review_id)
+        if row.get("blind_review_sha256") != actual_blind_sha256:
+            raise ValueError("review labels blind_review_sha256 mismatch")
         if label not in REVIEW_LABELS:
             raise ValueError(f"invalid review label: {label}")
         ids.append(review_id)
@@ -350,6 +415,8 @@ def merge_blind_review(
         "status": "review_complete",
         "review_count": REVIEW_ROW_COUNT,
         "manifest_seed": int(manifest["seed"]),
+        "blind_review_sha256": actual_blind_sha256,
+        "test_split_sha256": str(manifest["test_split_sha256"]),
         "reviews": reviews,
         "label_counts": {
             label: int(label_counts.get(label, 0))
