@@ -22,6 +22,7 @@ from .qwen_jlens import (
     jlens_metadata_contains_leak,
     load_fit_checkpoint,
     validate_checkpoint_structure,
+    V2_FIT_COUNT_CANDIDATES,
 )
 
 QWEN_RESULTS_DIR = "results/qwen25_coder_7b"
@@ -112,6 +113,47 @@ JLENS_FETCH_ALLOWLIST = frozenset(
         f"{JLENS_ARTIFACTS_DIR}/jlens_fit_checkpoint.pt",
         f"{JLENS_ARTIFACTS_DIR}/qwen25_coder_7b_jacobian_lens.pt",
         f"{JLENS_ARTIFACTS_DIR}/jlens_resume_bundle.json",
+    }
+)
+JLENS_V2_RESULTS_DIR = "results/qwen25_coder_7b_jlens_v2"
+JLENS_V2_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b_jlens_v2"
+JLENS_V2_REMOTE_ARCHIVE = Path("/content/qwen_jlens_v2_results.tar.gz")
+REMOTE_JLENS_V2_CHECKPOINT_STAGING = "/content/jlens_v2_fit_checkpoint.pt"
+REMOTE_JLENS_V2_STATUS_STAGING = "/content/jlens_v2_status.json"
+REMOTE_JLENS_V2_EVENTS_STAGING = "/content/jlens_v2_events.jsonl"
+JLENS_V2_FINAL_LENS_NAME = "qwen25_coder_7b_jacobian_lens_v2.pt"
+JLENS_V2_CHECKPOINT_RELATIVE = (
+    Path("artifacts") / "qwen25_coder_7b_jlens_v2" / "jlens_fit_checkpoint.pt"
+)
+JLENS_V2_STATUS_RELATIVE = Path("artifacts") / "qwen25_coder_7b_jlens_v2" / "status.json"
+JLENS_V2_EVENTS_RELATIVE = Path("artifacts") / "qwen25_coder_7b_jlens_v2" / "events.jsonl"
+JLENS_V2_RESUME_MARKER_RELATIVE = (
+    Path("artifacts") / "qwen25_coder_7b_jlens_v2" / "jlens_resume_bundle.json"
+)
+JLENS_V2_FETCH_ALLOWLIST = frozenset(
+    {
+        *(
+            f"{JLENS_V2_RESULTS_DIR}/{name}"
+            for name in (
+                "00_jlens_prepare.json",
+                "01_jlens_probe.json",
+                "02_jlens_fit.json",
+                "03_jlens_holdout.json",
+                "04_jlens_compare.json",
+                "jlens_evaluation.json",
+                "execution_manifest.json",
+            )
+        ),
+        *(
+            f"{JLENS_V2_ARTIFACTS_DIR}/{name}"
+            for name in (
+                "status.json",
+                "events.jsonl",
+                "jlens_fit_checkpoint.pt",
+                JLENS_V2_FINAL_LENS_NAME,
+                "jlens_resume_bundle.json",
+            )
+        ),
     }
 )
 JLENS_EVALUATION_SCHEMA_FIELDS = (
@@ -925,43 +967,137 @@ def _validate_regular_jlens_checkpoint(path: Path, *, origin: str) -> None:
         )
 
 
-def _assert_confined_jlens_checkpoint(project: Path, destination: Path) -> Path:
+def _assert_confined_checkpoint(
+    project: Path, destination: Path, relative: Path
+) -> Path:
+    shown = relative.as_posix()
     project_root = project.resolve()
-    expected = (project_root / JLENS_CHECKPOINT_RELATIVE).resolve()
+    expected = (project_root / relative).resolve()
     current = destination
     for _ in range(len(destination.parts) + 1):
         if path_is_link_or_junction(current):
-            raise ValueError(
-                "jlens checkpoint destination escaped "
-                "artifacts/qwen25_coder_7b_jlens/jlens_fit_checkpoint.pt"
-            )
+            raise ValueError(f"jlens checkpoint destination escaped {shown}")
         if current == project or current.parent == current:
             break
         current = current.parent
     resolved = destination.resolve()
     if resolved != expected or resolved.name != "jlens_fit_checkpoint.pt":
-        raise ValueError(
-            "jlens checkpoint destination must remain "
-            "artifacts/qwen25_coder_7b_jlens/jlens_fit_checkpoint.pt"
-        )
+        raise ValueError(f"jlens checkpoint destination must remain {shown}")
     try:
-        resolved.relative_to(project_root / "artifacts" / "qwen25_coder_7b_jlens")
+        resolved.relative_to(project_root / relative.parent)
     except ValueError as error:
-        raise ValueError(
-            "jlens checkpoint destination escaped "
-            "artifacts/qwen25_coder_7b_jlens/jlens_fit_checkpoint.pt"
-        ) from error
+        raise ValueError(f"jlens checkpoint destination escaped {shown}") from error
     return destination
 
 
-def optional_local_jlens_checkpoint(project: Path) -> Path | None:
-    path = jlens_checkpoint_path(project)
+def _assert_confined_jlens_checkpoint(project: Path, destination: Path) -> Path:
+    return _assert_confined_checkpoint(project, destination, JLENS_CHECKPOINT_RELATIVE)
+
+
+def validate_jlens_v2_checkpoint_payload(payload: Mapping[str, Any]) -> int:
+    """Validate a v2 checkpoint against its own stored selected fit count."""
+
+    if "fit_count" not in payload:
+        raise ValueError("v2 checkpoint is missing fit_count")
+    try:
+        stored_count = int(payload["fit_count"])
+    except (TypeError, ValueError) as error:
+        raise ValueError("v2 checkpoint fit_count is not an integer") from error
+    if stored_count not in V2_FIT_COUNT_CANDIDATES:
+        raise ValueError(
+            f"v2 checkpoint fit_count {stored_count} is not one of "
+            f"{V2_FIT_COUNT_CANDIDATES}"
+        )
+    validate_checkpoint_structure(payload, fit_count=stored_count)
+    return stored_count
+
+
+@dataclass(frozen=True)
+class _JLensTransportProfile:
+    checkpoint: Path
+    status: Path
+    events: Path
+    marker: Path
+    validate_payload: Callable[[Mapping[str, Any]], Any]
+    v2: bool
+
+
+_JLENS_V1_TRANSPORT = _JLensTransportProfile(
+    checkpoint=JLENS_CHECKPOINT_RELATIVE,
+    status=JLENS_STATUS_RELATIVE,
+    events=JLENS_EVENTS_RELATIVE,
+    marker=JLENS_RESUME_MARKER_RELATIVE,
+    validate_payload=validate_checkpoint_structure,
+    v2=False,
+)
+_JLENS_V2_TRANSPORT = _JLensTransportProfile(
+    checkpoint=JLENS_V2_CHECKPOINT_RELATIVE,
+    status=JLENS_V2_STATUS_RELATIVE,
+    events=JLENS_V2_EVENTS_RELATIVE,
+    marker=JLENS_V2_RESUME_MARKER_RELATIVE,
+    validate_payload=validate_jlens_v2_checkpoint_payload,
+    v2=True,
+)
+
+
+def _posix(path: Path) -> str:
+    return str(path).replace("\\", "/")
+
+
+def _optional_local_checkpoint(
+    profile: _JLensTransportProfile, project: Path
+) -> Path | None:
+    path = project / profile.checkpoint
     if not os.path.lexists(path):
         return None
     _validate_regular_jlens_checkpoint(path, origin="local")
-    payload = load_fit_checkpoint(path)
-    validate_checkpoint_structure(payload)
-    return _assert_confined_jlens_checkpoint(project, path)
+    profile.validate_payload(load_fit_checkpoint(path))
+    return _assert_confined_checkpoint(project, path, profile.checkpoint)
+
+
+def optional_local_jlens_checkpoint(project: Path) -> Path | None:
+    return _optional_local_checkpoint(_JLENS_V1_TRANSPORT, project)
+
+
+def _atomic_install_checkpoint(
+    profile: _JLensTransportProfile,
+    *,
+    staged: Path,
+    project: Path,
+    missing_ok: bool = False,
+) -> Path | None:
+    if not os.path.lexists(staged):
+        if missing_ok:
+            return None
+        raise FileNotFoundError(f"jlens checkpoint missing (staging: {staged})")
+    _validate_regular_jlens_checkpoint(staged, origin="staging")
+    payload = load_fit_checkpoint(staged)
+    profile.validate_payload(payload)
+    destination = project / profile.checkpoint
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _assert_confined_checkpoint(project, destination, profile.checkpoint)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".jlens_fit_checkpoint.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            with staged.open("rb") as incoming:
+                shutil.copyfileobj(incoming, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if tmp_path.stat().st_size > MAX_JLENS_CHECKPOINT_BYTES:
+            raise ValueError("jlens checkpoint size exceeds limit after copy")
+        os.replace(tmp_path, destination)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    _validate_regular_jlens_checkpoint(destination, origin="destination")
+    profile.validate_payload(load_fit_checkpoint(destination))
+    return _assert_confined_checkpoint(project, destination, profile.checkpoint)
 
 
 def atomic_install_jlens_checkpoint(
@@ -970,6 +1106,8 @@ def atomic_install_jlens_checkpoint(
     project: Path,
     missing_ok: bool = False,
 ) -> Path | None:
+    # Kept verbatim from v1: its streaming contract is asserted by source
+    # inspection in test_qwen_jlens_transport.py. v2 uses the profile helper.
     if not os.path.lexists(staged):
         if missing_ok:
             return None
@@ -1040,12 +1178,16 @@ def _stream_install_regular_file(
     return destination
 
 
-def optional_local_jlens_resume_bundle(project: Path) -> list[tuple[Path, str]]:
-    checkpoint = optional_local_jlens_checkpoint(project)
+def _optional_local_resume_bundle(
+    profile: _JLensTransportProfile,
+    project: Path,
+    staging_names: tuple[str, str, str],
+) -> list[tuple[Path, str]]:
+    checkpoint = _optional_local_checkpoint(profile, project)
     if checkpoint is None:
         return []
-    status = project / JLENS_STATUS_RELATIVE
-    events = project / JLENS_EVENTS_RELATIVE
+    status = project / profile.status
+    events = project / profile.events
     if not status.is_file():
         raise ValueError("jlens resume requires status.json with the checkpoint")
     if not events.is_file():
@@ -1056,15 +1198,41 @@ def optional_local_jlens_resume_bundle(project: Path) -> list[tuple[Path, str]]:
         raise ValueError("jlens status.json exceeds size limit")
     if events.stat().st_size > MAX_JLENS_JSONL_BYTES:
         raise ValueError("jlens events.jsonl exceeds size limit")
-    validate_jlens_resume_bundle(checkpoint=checkpoint, status=status, events=events)
+    _validate_resume_bundle(
+        profile, checkpoint=checkpoint, status=status, events=events
+    )
     return [
-        (checkpoint, REMOTE_JLENS_CHECKPOINT_STAGING),
-        (status, REMOTE_JLENS_STATUS_STAGING),
-        (events, REMOTE_JLENS_EVENTS_STAGING),
+        (checkpoint, staging_names[0]),
+        (status, staging_names[1]),
+        (events, staging_names[2]),
     ]
 
 
+def optional_local_jlens_resume_bundle(project: Path) -> list[tuple[Path, str]]:
+    return _optional_local_resume_bundle(
+        _JLENS_V1_TRANSPORT,
+        project,
+        (
+            REMOTE_JLENS_CHECKPOINT_STAGING,
+            REMOTE_JLENS_STATUS_STAGING,
+            REMOTE_JLENS_EVENTS_STAGING,
+        ),
+    )
+
+
 def validate_jlens_resume_bundle(
+    *,
+    checkpoint: Path,
+    status: Path,
+    events: Path,
+) -> dict[str, Any]:
+    return _validate_resume_bundle(
+        _JLENS_V1_TRANSPORT, checkpoint=checkpoint, status=status, events=events
+    )
+
+
+def _validate_resume_bundle(
+    profile: _JLensTransportProfile,
     *,
     checkpoint: Path,
     status: Path,
@@ -1080,9 +1248,9 @@ def validate_jlens_resume_bundle(
         raise ValueError("jlens events.jsonl exceeds size limit")
     _validate_regular_jlens_checkpoint(checkpoint, origin="resume")
     payload = load_fit_checkpoint(checkpoint)
-    validate_checkpoint_structure(payload)
-    validate_jlens_pack_json(status, str(JLENS_STATUS_RELATIVE).replace("\\", "/"))
-    validate_jlens_pack_json(events, str(JLENS_EVENTS_RELATIVE).replace("\\", "/"))
+    profile.validate_payload(payload)
+    validate_jlens_pack_json(status, _posix(profile.status))
+    validate_jlens_pack_json(events, _posix(profile.events))
     status_payload = json.loads(status.read_text(encoding="utf-8"))
     run_id = payload.get("run_id")
     if not run_id or status_payload.get("run_id") != run_id:
@@ -1104,14 +1272,38 @@ def validate_jlens_resume_bundle(
             event_done = max(event_done, int(event["n_done"]))
     if event_done > n_done:
         raise ValueError("jlens resume events are ahead of checkpoint")
-    return {
+    meta: dict[str, Any] = {
         "run_id": str(run_id),
         "n_done": n_done,
         "dim_batch": int(payload["dim_batch"]),
     }
+    if profile.v2:
+        meta["fit_count"] = int(payload["fit_count"])
+    return meta
 
 
 def atomic_install_jlens_resume(
+    *,
+    checkpoint: Path,
+    status: Path,
+    events: Path,
+    project: Path,
+    missing_ok: bool = False,
+    consume_staging: bool = True,
+) -> Path | None:
+    return _atomic_install_resume(
+        _JLENS_V1_TRANSPORT,
+        checkpoint=checkpoint,
+        status=status,
+        events=events,
+        project=project,
+        missing_ok=missing_ok,
+        consume_staging=consume_staging,
+    )
+
+
+def _atomic_install_resume(
+    profile: _JLensTransportProfile,
     *,
     checkpoint: Path,
     status: Path,
@@ -1126,18 +1318,18 @@ def atomic_install_jlens_resume(
         raise FileNotFoundError(f"jlens checkpoint missing (staging: {checkpoint})")
     if not os.path.lexists(status) or not os.path.lexists(events):
         raise ValueError("jlens resume requires status.json and events.jsonl")
-    meta = validate_jlens_resume_bundle(
-        checkpoint=checkpoint, status=status, events=events
+    meta = _validate_resume_bundle(
+        profile, checkpoint=checkpoint, status=status, events=events
     )
     destinations = {
-        "checkpoint": project / JLENS_CHECKPOINT_RELATIVE,
-        "status": project / JLENS_STATUS_RELATIVE,
-        "events": project / JLENS_EVENTS_RELATIVE,
-        "marker": project / JLENS_RESUME_MARKER_RELATIVE,
+        "checkpoint": project / profile.checkpoint,
+        "status": project / profile.status,
+        "events": project / profile.events,
+        "marker": project / profile.marker,
     }
     for destination in destinations.values():
         destination.parent.mkdir(parents=True, exist_ok=True)
-    _assert_confined_jlens_checkpoint(project, destinations["checkpoint"])
+    _assert_confined_checkpoint(project, destinations["checkpoint"], profile.checkpoint)
     backup_root = Path(
         tempfile.mkdtemp(
             prefix=".jlens_resume_backup.",
@@ -1157,41 +1349,38 @@ def atomic_install_jlens_resume(
                     target=destination, backup=backup, had_original=had_original
                 )
             )
-        installed = atomic_install_jlens_checkpoint(staged=checkpoint, project=project)
+        installed = _atomic_install_checkpoint(
+            profile, staged=checkpoint, project=project
+        )
         _stream_install_regular_file(
             staged=status,
             destination=destinations["status"],
             max_bytes=MAX_JLENS_JSON_BYTES,
             prefix=".jlens_status.",
         )
-        validate_jlens_pack_json(
-            destinations["status"], str(JLENS_STATUS_RELATIVE).replace("\\", "/")
-        )
+        validate_jlens_pack_json(destinations["status"], _posix(profile.status))
         _stream_install_regular_file(
             staged=events,
             destination=destinations["events"],
             max_bytes=MAX_JLENS_JSONL_BYTES,
             prefix=".jlens_events.",
         )
-        validate_jlens_pack_json(
-            destinations["events"], str(JLENS_EVENTS_RELATIVE).replace("\\", "/")
-        )
+        validate_jlens_pack_json(destinations["events"], _posix(profile.events))
         marker_payload = {
             "run_id": meta["run_id"],
             "n_done": meta["n_done"],
             "dim_batch": meta["dim_batch"],
-            "checkpoint": str(JLENS_CHECKPOINT_RELATIVE).replace("\\", "/"),
-            "status": str(JLENS_STATUS_RELATIVE).replace("\\", "/"),
-            "events": str(JLENS_EVENTS_RELATIVE).replace("\\", "/"),
+            "checkpoint": _posix(profile.checkpoint),
+            "status": _posix(profile.status),
+            "events": _posix(profile.events),
         }
+        if profile.v2:
+            marker_payload["fit_count"] = meta["fit_count"]
         destinations["marker"].write_text(
             json.dumps(marker_payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        validate_jlens_pack_json(
-            destinations["marker"],
-            str(JLENS_RESUME_MARKER_RELATIVE).replace("\\", "/"),
-        )
+        validate_jlens_pack_json(destinations["marker"], _posix(profile.marker))
         if consume_staging:
             for staged in (checkpoint, status, events):
                 if staged.exists() and staged.is_file():
@@ -1567,6 +1756,171 @@ def extract_qwen_jlens_archive(archive: Path, project: Path) -> None:
         project,
         validator=validate_qwen_jlens_archive,
         prefix="qwen-jlens-fetch-",
+        post_stage_validate=_revalidate_staged_jlens_members,
+    )
+
+
+def jlens_v2_checkpoint_path(project: Path) -> Path:
+    return project / JLENS_V2_CHECKPOINT_RELATIVE
+
+
+def optional_local_jlens_v2_checkpoint(project: Path) -> Path | None:
+    return _optional_local_checkpoint(_JLENS_V2_TRANSPORT, project)
+
+
+def atomic_install_jlens_v2_checkpoint(
+    *,
+    staged: Path,
+    project: Path,
+    missing_ok: bool = False,
+) -> Path | None:
+    return _atomic_install_checkpoint(
+        _JLENS_V2_TRANSPORT, staged=staged, project=project, missing_ok=missing_ok
+    )
+
+
+def optional_local_jlens_v2_resume_bundle(project: Path) -> list[tuple[Path, str]]:
+    return _optional_local_resume_bundle(
+        _JLENS_V2_TRANSPORT,
+        project,
+        (
+            REMOTE_JLENS_V2_CHECKPOINT_STAGING,
+            REMOTE_JLENS_V2_STATUS_STAGING,
+            REMOTE_JLENS_V2_EVENTS_STAGING,
+        ),
+    )
+
+
+def validate_jlens_v2_resume_bundle(
+    *,
+    checkpoint: Path,
+    status: Path,
+    events: Path,
+) -> dict[str, Any]:
+    return _validate_resume_bundle(
+        _JLENS_V2_TRANSPORT, checkpoint=checkpoint, status=status, events=events
+    )
+
+
+def atomic_install_jlens_v2_resume(
+    *,
+    checkpoint: Path,
+    status: Path,
+    events: Path,
+    project: Path,
+    missing_ok: bool = False,
+    consume_staging: bool = True,
+) -> Path | None:
+    return _atomic_install_resume(
+        _JLENS_V2_TRANSPORT,
+        checkpoint=checkpoint,
+        status=status,
+        events=events,
+        project=project,
+        missing_ok=missing_ok,
+        consume_staging=consume_staging,
+    )
+
+
+def atomic_replace_validated_jlens_v2_backup(staged: Path, destination: Path) -> Path:
+    """Replace ``destination`` with ``staged`` only after full validation.
+
+    The previous destination is never touched until a complete, fsynced,
+    re-verified copy sits next to it; the swap is a single ``os.replace``.
+    """
+
+    _validate_regular_jlens_checkpoint(staged, origin="backup staging")
+    validate_jlens_v2_checkpoint_payload(load_fit_checkpoint(staged))
+    if os.path.lexists(destination) and (
+        path_is_link_or_junction(destination) or not destination.is_file()
+    ):
+        raise ValueError(f"jlens backup destination must be a regular file: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".jlens_v2_backup.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            with staged.open("rb") as incoming:
+                shutil.copyfileobj(incoming, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if (
+            tmp_path.stat().st_size != staged.stat().st_size
+            or sha256_file(tmp_path) != sha256_file(staged)
+        ):
+            raise ValueError("jlens backup copy does not match validated staging")
+        os.replace(tmp_path, destination)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+    return destination
+
+
+def is_jlens_v2_unsafe_member_name(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return True
+    return not normalized.startswith(
+        (f"{JLENS_V2_RESULTS_DIR}/", f"{JLENS_V2_ARTIFACTS_DIR}/")
+    )
+
+
+def is_allowed_jlens_v2_fetch_member(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return False
+    if is_jlens_v2_unsafe_member_name(normalized):
+        return False
+    return normalized in JLENS_V2_FETCH_ALLOWLIST
+
+
+def collect_qwen_jlens_v2_pack_entries(root: Path) -> list[Path]:
+    entries: list[Path] = []
+    for relative in sorted(JLENS_V2_FETCH_ALLOWLIST):
+        path = root / Path(relative)
+        if not path.is_file() or path.is_symlink() or path_is_link_or_junction(path):
+            continue
+        _assert_pack_path_safe(root, path)
+        if relative.endswith((".json", ".jsonl")):
+            validate_jlens_pack_json(path, relative)
+        entries.append(path)
+    return entries
+
+
+def pack_qwen_jlens_v2_results(root: Path, archive: Path) -> None:
+    _pack_entries(
+        collect_qwen_jlens_v2_pack_entries(root),
+        root,
+        archive,
+        kind="Qwen jlens v2",
+    )
+
+
+def validate_qwen_jlens_v2_archive(
+    members: list[tarfile.TarInfo],
+) -> list[tarfile.TarInfo]:
+    return _validate_archive(
+        members,
+        is_unsafe=is_jlens_v2_unsafe_member_name,
+        is_allowed=is_allowed_jlens_v2_fetch_member,
+        max_total=MAX_JLENS_TOTAL_UNCOMPRESSED_BYTES,
+        member_limit_for=jlens_member_byte_limit,
+    )
+
+
+def extract_qwen_jlens_v2_archive(archive: Path, project: Path) -> None:
+    _extract_allowlisted_archive(
+        archive,
+        project,
+        validator=validate_qwen_jlens_v2_archive,
+        prefix="qwen-jlens-v2-fetch-",
         post_stage_validate=_revalidate_staged_jlens_members,
     )
 
