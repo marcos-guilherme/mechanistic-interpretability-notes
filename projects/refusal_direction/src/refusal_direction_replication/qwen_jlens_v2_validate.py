@@ -26,7 +26,7 @@ from typing import Any
 
 import torch
 
-from .pipeline import load_config, project_paths
+from .pipeline import load_config
 from .qwen_dose import sha256_file
 from .qwen_jlens import (
     DATASET_CONFIG,
@@ -108,7 +108,34 @@ _CODE_MARKERS = re.compile(
     r"|\bself\.",
     re.MULTILINE,
 )
-_MIN_CORPUS_MATCH_CHARS = 12
+_MIN_CORPUS_FRAGMENT_CHARS = 32
+_MIN_CORPUS_FRAGMENT_TOKENS = 4
+# Closed vocabularies written by the runtime; never raw text.
+_ENUM_VALUES = frozenset(
+    {
+        "pass",
+        "aborted",
+        "completed",
+        "running",
+        "pending",
+        "failed",
+        "ok",
+        "cuda_oom",
+        "projected_runtime",
+        "dim_batch_oom",
+        "prepare",
+        "probe",
+        "fit",
+        "holdout",
+        "initialized",
+        "state_changed",
+        "progress",
+        "probe_choice",
+        "checkpoint",
+        "stage_completed",
+        "resume_recovered",
+    }
+)
 
 # Stage initialization order. Resume re-enters ``prepare`` and then ``fit``;
 # a restart before any selection may re-enter ``prepare`` from ``prepare`` or
@@ -177,10 +204,6 @@ def _close(left: float, right: float) -> bool:
     return abs(float(left) - float(right)) <= FLOAT_TOLERANCE
 
 
-def _basename(value: Any) -> str:
-    return re.split(r"[\\/]", str(value))[-1]
-
-
 def _layers(config: Mapping[str, Any]) -> list[int]:
     return [int(layer) for layer in config["source_layers"]]
 
@@ -228,15 +251,29 @@ class _LeakScanner:
         self._texts = list(corpus_texts)
         self._blob = "\n".join(self._texts)
         self._shortest = min((len(text) for text in self._texts), default=0)
-        self._memo: dict[tuple[str, bool], str | None] = {}
+        self._memo: dict[tuple[str, bool, bool], str | None] = {}
 
-    def _string_leaks(self, value: str, *, heuristics: bool) -> str | None:
-        key = (value, heuristics)
+    def _string_leaks(
+        self, value: str, *, heuristics: bool, corpus: bool
+    ) -> str | None:
+        key = (value, heuristics, corpus)
         if key not in self._memo:
-            self._memo[key] = self._classify(value, heuristics=heuristics)
+            self._memo[key] = self._classify(
+                value, heuristics=heuristics, corpus=corpus
+            )
         return self._memo[key]
 
-    def _classify(self, value: str, *, heuristics: bool) -> str | None:
+    @staticmethod
+    def _is_long_fragment(value: str) -> bool:
+        """Prose-like and long enough that a corpus match cannot be a coincidence."""
+        return (
+            len(value) >= _MIN_CORPUS_FRAGMENT_CHARS
+            and len(value.split()) >= _MIN_CORPUS_FRAGMENT_TOKENS
+        )
+
+    def _classify(
+        self, value: str, *, heuristics: bool, corpus: bool
+    ) -> str | None:
         if value in self._allowed or any(
             pattern.fullmatch(value) for pattern in _SAFE_STRING_PATTERNS
         ):
@@ -246,11 +283,14 @@ class _LeakScanner:
                 return "multi-line string"
             if _CODE_MARKERS.search(value):
                 return "code-like string"
-        if len(value) >= _MIN_CORPUS_MATCH_CHARS and self._texts:
+        # Schema keys and short identifiers (``error_message``, ``content_hash``)
+        # occur in ordinary code, so only long multi-token VALUES are compared
+        # with the raw corpus. Keys are never compared with it.
+        if corpus and self._texts and self._is_long_fragment(value):
             if value in self._blob:
                 return "string copied from the raw corpus"
-            if len(value) >= max(self._shortest, _MIN_CORPUS_MATCH_CHARS) and any(
-                len(text) >= _MIN_CORPUS_MATCH_CHARS and text in value
+            if len(value) >= self._shortest and any(
+                len(text) >= _MIN_CORPUS_FRAGMENT_CHARS and text in value
                 for text in self._texts
             ):
                 return "string copied from the raw corpus"
@@ -264,14 +304,16 @@ class _LeakScanner:
                 location = f"{where}.{key_text[:40]}"
                 if key_text.casefold() in JLENS_LEAK_KEYS:
                     return f"forbidden key at {where}: {key_text}"
-                reason = self._string_leaks(key_text, heuristics=True)
+                reason = self._string_leaks(key_text, heuristics=True, corpus=False)
                 if reason:
                     return f"{reason} used as a key at {where}"
                 if isinstance(value, str):
                     # CUDA OOM messages are free-form framework text. They keep
                     # the corpus-copy check but not the structural heuristics.
                     heuristics = not (skip_message and key_text == "error_message")
-                    reason = self._string_leaks(value, heuristics=heuristics)
+                    reason = self._string_leaks(
+                        value, heuristics=heuristics, corpus=True
+                    )
                     if reason:
                         return f"{reason} at {location}"
                 else:
@@ -282,7 +324,7 @@ class _LeakScanner:
         if isinstance(obj, (list, tuple)):
             for index, item in enumerate(obj):
                 if isinstance(item, str):
-                    reason = self._string_leaks(item, heuristics=True)
+                    reason = self._string_leaks(item, heuristics=True, corpus=True)
                     if reason:
                         return f"{reason} at {where}[{index}]"
                 else:
@@ -291,7 +333,7 @@ class _LeakScanner:
                         return found
             return None
         if isinstance(obj, str):
-            reason = self._string_leaks(obj, heuristics=True)
+            reason = self._string_leaks(obj, heuristics=True, corpus=True)
             return f"{reason} at {where}" if reason else None
         return None
 
@@ -302,7 +344,7 @@ def _check_no_raw_text(
     config: Mapping[str, Any],
     artifacts_dir: Path,
 ) -> None:
-    allowed = set(_flatten_strings(config)) | {
+    allowed = set(_flatten_strings(config)) | _ENUM_VALUES | {
         QWEN_MODEL,
         QWEN_REVISION,
         JLENS_UPSTREAM_COMMIT,
@@ -378,12 +420,69 @@ def _check_profile(config: Mapping[str, Any]) -> None:
     )
 
 
-def _check_production_contract() -> None:
+def _packaged_profile() -> dict[str, Any]:
     package_path = (
         Path(__file__).resolve().parents[2] / "configs" / JLENS_V2_PROFILE
     )
     _require(package_path.is_file(), "packaged v2 profile is missing")
-    package = json.loads(package_path.read_text(encoding="utf-8"))
+    return dict(json.loads(package_path.read_text(encoding="utf-8")))
+
+
+def _check_root_profile_is_production(config: Mapping[str, Any]) -> None:
+    """Strict mode: the run root profile must equal the packaged canonical profile.
+
+    This covers the layer contract (n_layers, d_model, source_layers,
+    target_layer, skip_first, max_seq_len, min tokens), every pin, the
+    candidate list, and the profile-relative result, artifact and v1 lens paths.
+    """
+    package = _packaged_profile()
+    for key in sorted(set(package) | set(config)):
+        if key not in config:
+            raise ValueError(f"production contract: root profile is missing {key}")
+        if key not in package:
+            raise ValueError(
+                f"production contract: root profile has unexpected key {key}"
+            )
+        if config[key] != package[key]:
+            raise ValueError(
+                f"production contract: root profile {key} {config[key]!r} "
+                f"differs from the packaged v2 profile {package[key]!r}"
+            )
+
+
+def _confined_path(root: Path, value: Any, label: str) -> Path:
+    """Resolve a profile/artifact path under ``root``; reject escapes."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty relative path string")
+    parts = [part for part in re.split(r"[\\/]+", value) if part not in ("", ".")]
+    absolute = (
+        value.startswith(("/", "\\"))
+        or bool(re.match(r"^[A-Za-z]:", value))
+        or Path(value).is_absolute()
+    )
+    if absolute:
+        raise ValueError(
+            f"{label} must be relative to the run root: absolute path rejected"
+        )
+    if ".." in parts:
+        raise ValueError(
+            f"{label} must stay inside the run root: parent traversal rejected"
+        )
+    if not parts:
+        raise ValueError(f"{label} must name a path inside the run root")
+    resolved_root = root.resolve()
+    joined = root.joinpath(*parts)
+    try:
+        joined.resolve().relative_to(resolved_root)
+    except ValueError:
+        raise ValueError(
+            f"{label} must stay inside the run root: path resolves outside it"
+        ) from None
+    return joined
+
+
+def _check_production_contract() -> None:
+    package = _packaged_profile()
     _require(
         int(package.get("n_layers", -1)) == EXPECTED_N_LAYERS
         and int(package.get("d_model", -1)) == EXPECTED_D_MODEL
@@ -681,6 +780,7 @@ class _LoadedLens:
 
 
 def _check_v2_lens(
+    root: Path,
     artifacts_dir: Path,
     *,
     config: Mapping[str, Any],
@@ -690,9 +790,14 @@ def _check_v2_lens(
 ) -> None:
     path = artifacts_dir / V2_FINAL_LENS_FILENAME
     _require(path.is_file(), f"v2 lens {V2_FINAL_LENS_FILENAME} is missing")
+    try:
+        recorded = _confined_path(root, fit.get("lens"), "v2 lens path in 02_jlens_fit.json")
+    except ValueError as exc:
+        raise ValueError(f"v2 lens: {exc}") from None
     _require(
-        _basename(fit.get("lens")) == V2_FINAL_LENS_FILENAME,
-        f"v2 lens filename in 02_jlens_fit.json is not {V2_FINAL_LENS_FILENAME}",
+        recorded == path,
+        "v2 lens path in 02_jlens_fit.json is not exactly the artifacts_dir "
+        f"path of {V2_FINAL_LENS_FILENAME}",
     )
     size = path.stat().st_size
     digest = sha256_file(path)
@@ -1219,10 +1324,34 @@ def _require_agreement(label: str, values: Mapping[str, Any], expected: int) -> 
 # ---------------------------------------------------------------------------
 
 
-def validate_qwen_jlens_v2(root: Path) -> dict[str, bool]:
-    """Validate the v2 results under ``root``; raise ``ValueError`` on the first problem."""
+def validate_qwen_jlens_v2(
+    root: Path, *, allow_fixture_contract: bool = False
+) -> dict[str, bool]:
+    """Validate the v2 results under ``root``; raise ``ValueError`` on the first problem.
+
+    Strict production is the default: the run root profile must equal the
+    packaged canonical v2 profile. ``allow_fixture_contract=True`` is only for
+    CPU fixtures that intentionally use a tiny layer contract and a different
+    directory layout; it relaxes that profile equality (the pins, candidate
+    list, holdout count and path confinement are still enforced).
+    """
+    try:
+        return _validate(root, allow_fixture_contract=allow_fixture_contract)
+    except (TypeError, KeyError, AttributeError) as exc:
+        raise ValueError(
+            f"malformed v2 profile or artifact: {type(exc).__name__}: {str(exc)[:120]}"
+        ) from None
+
+
+def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
     config = _load_profile(root)
-    results_dir, artifacts_dir = project_paths(root, config)
+    results_dir = _confined_path(root, config.get("results_dir"), "profile results_dir")
+    artifacts_dir = _confined_path(
+        root, config.get("artifacts_dir"), "profile artifacts_dir"
+    )
+    _confined_path(root, config.get("source_v1_lens"), "profile source_v1_lens")
+    if not allow_fixture_contract:
+        _check_root_profile_is_production(config)
     evaluation = _read_json(results_dir / "jlens_evaluation.json")
     status = evaluation.get("status")
     if status == "aborted":
@@ -1233,10 +1362,11 @@ def validate_qwen_jlens_v2(root: Path) -> dict[str, bool]:
         status == "pass",
         f"v2 evaluation status {status!r} is neither 'pass' nor 'aborted'",
     )
-    return _validate_pass(config, results_dir, artifacts_dir, evaluation)
+    return _validate_pass(root, config, results_dir, artifacts_dir, evaluation)
 
 
 def _validate_pass(
+    root: Path,
     config: dict[str, Any],
     results_dir: Path,
     artifacts_dir: Path,
@@ -1403,7 +1533,7 @@ def _validate_pass(
     checks["checkpoint_identity"] = True
 
     _check_v2_lens(
-        artifacts_dir, config=config, n_fit=n_fit, evaluation=evaluation, fit=fit
+        root, artifacts_dir, config=config, n_fit=n_fit, evaluation=evaluation, fit=fit
     )
     checks["v2_lens_identity"] = True
 

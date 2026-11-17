@@ -10,10 +10,12 @@ from refusal_direction_replication.qwen_jlens_v2_validate import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main(root: Path = ROOT) -> int:
+def main(root: Path = ROOT, *, allow_fixture_contract: bool = False) -> int:
     print("Qwen Jacobian lens v2 (long context)")
     try:
-        checks = validate_qwen_jlens_v2(root)
+        checks = validate_qwen_jlens_v2(
+            root, allow_fixture_contract=allow_fixture_contract
+        )
     except ValueError as exc:
         print(f"FAIL {exc}")
         return 1
