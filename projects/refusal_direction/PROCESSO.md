@@ -526,6 +526,26 @@ lacuna não deve ser escondida ao interpretar a avaliação. As fontes são
 e
 [`jlens_evaluation.json`](results/qwen25_coder_7b_jlens/jlens_evaluation.json).
 
+### J-lens v2: contexto longo (novembro 2026)
+
+A v1 validou formato e utilidade mínima com 100 ajustes e holdout de 20
+exemplos em contexto curto. Abri o perfil `qwen25-coder-jlens-v2` para testar o
+mesmo compromisso upstream (`anthropics/jacobian-lens` no commit congelado)
+com **512 tokens** por exemplo, **200 amostras** fixas no holdout e tamanho de
+ajuste escolhido por probe sob teto de **12 horas** projetadas na A100.
+
+A v2 grava em `artifacts/qwen25_coder_7b_jlens_v2/` e compara a lente nova com a
+v1 congelada no holdout compartilhado. O laboratório visual e o code-eval em
+batch **não** passam a usar a v2: continuam apontando para a lente v1 já
+documentada nesta seção.
+
+**Caderno.** A implementação local (corpus, transporte, checkpoints, comparação
+dual e testes) está fechada; a operação remota está descrita em
+[`JLENS_V2.md`](JLENS_V2.md). Ainda **não** há métricas de holdout v2 nem tensor
+final desta corrida: dependem de uma execução completa na A100 que não correu
+até a data desta entrada. Qualquer número futuro deve entrar aqui com `run_id` e
+links para `results/qwen25_coder_7b_jlens_v2/`, sem antecipar conclusão.
+
 ### Avaliação em tarefas de código
 
 A execução `5d214feb-e870-4e30-a783-0950a11b09f3` avaliou 32 itens de cada

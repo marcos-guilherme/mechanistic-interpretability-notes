@@ -317,3 +317,16 @@ def test_subset_stability_rejects_invalid_part_count() -> None:
         summarize_holdout_subset_stability(
             _records("v2", ids=["a", "b"]), source_layers=[0, 1], n_parts=0
         )
+
+
+def test_v2_documentation_names_safety_boundaries() -> None:
+    text = (ROOT / "JLENS_V2.md").read_text(encoding="utf-8")
+    for required in (
+        "512 tokens",
+        "200 amostras",
+        "checkpoint",
+        "12 horas",
+        "não substitui",
+        "checkpoint-backup",
+    ):
+        assert required in text
