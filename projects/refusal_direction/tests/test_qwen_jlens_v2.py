@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+
+import pytest
 
 from refusal_direction_replication.pipeline import load_config
 from refusal_direction_replication.qwen_jlens import (
     FINAL_LENS_FILENAME,
+    CorpusItem,
     JLENS_V2_PROFILE,
+    JLensCorpus,
     V2_FINAL_LENS_FILENAME,
     V2_FIT_COUNT_CANDIDATES,
     V2_HOLDOUT_COUNT,
     V2_MAX_FIT_COUNT,
     V2_MAX_SEQ_LEN,
+    select_fit_count,
+    slice_v2_corpus,
 )
 
 
@@ -39,3 +46,61 @@ def test_v2_profile_is_isolated_from_v1_lab_and_code_eval() -> None:
     assert V2_FINAL_LENS_FILENAME != FINAL_LENS_FILENAME
     assert v1["artifacts_dir"] != v2["artifacts_dir"]
     assert lab["source_lens"] == v2["source_v1_lens"]
+
+
+def _corpus_item(split: str, index: int) -> CorpusItem:
+    text = f"{split}-function-{index}"
+    return CorpusItem(
+        example_id=f"test:{split}:{index}",
+        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        token_count=512,
+        fit_text=text,
+        source_index=index,
+    )
+
+
+def _corpus(*, fit: int, holdout: int) -> JLensCorpus:
+    fit_items = tuple(_corpus_item("fit", index) for index in range(fit))
+    holdout_items = tuple(_corpus_item("holdout", index) for index in range(holdout))
+    return JLensCorpus(
+        fit=fit_items,
+        holdout=holdout_items,
+        dataset_revision="test-revision",
+        n_scanned=fit + holdout,
+        n_missing_code_or_docstring=0,
+        n_too_short=0,
+        n_duplicate_dropped=0,
+        n_excluded=0,
+        exclusions_available=False,
+    )
+
+
+def test_select_fit_count_picks_largest_safe_candidate() -> None:
+    selected = select_fit_count(
+        probe_seconds=80.0,
+        candidates=[100, 150, 200, 250, 300, 400, 600, 800],
+        limit_seconds=43_200,
+    )
+    assert selected.n_prompts == 400
+    assert selected.projected_seconds == 32_000.0
+
+
+def test_select_fit_count_rejects_when_minimum_exceeds_limit() -> None:
+    with pytest.raises(ValueError, match="minimum candidate"):
+        select_fit_count(
+            probe_seconds=500.0,
+            candidates=[100, 150],
+            limit_seconds=43_200,
+        )
+
+
+def test_slice_v2_corpus_keeps_holdout_fixed() -> None:
+    pool = _corpus(fit=800, holdout=200)
+    small = slice_v2_corpus(pool, fit_count=100, max_fit_count=800)
+    large = slice_v2_corpus(pool, fit_count=600, max_fit_count=800)
+    assert small.fit == pool.fit[:100]
+    assert large.fit == pool.fit[:600]
+    assert small.holdout == large.holdout == pool.holdout
+    assert set(item.content_hash for item in large.fit).isdisjoint(
+        item.content_hash for item in large.holdout
+    )

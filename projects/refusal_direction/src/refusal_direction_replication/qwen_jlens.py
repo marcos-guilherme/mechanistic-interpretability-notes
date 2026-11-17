@@ -167,6 +167,12 @@ class DurationProjection:
     exceeds_limit: bool
 
 
+@dataclass(frozen=True)
+class CorpusSplit:
+    fit: tuple[CorpusItem, ...]
+    holdout: tuple[CorpusItem, ...]
+
+
 def content_hash_text(text: str) -> str:
     return hashlib.sha256(normalize_prompt_text(text).encode("utf-8")).hexdigest()
 
@@ -461,6 +467,53 @@ def project_fit_duration(
         projected_seconds=projected,
         limit_seconds=int(limit_seconds),
         exceeds_limit=projected > limit_seconds,
+    )
+
+
+def select_fit_count(
+    *,
+    probe_seconds: float,
+    candidates: Sequence[int],
+    limit_seconds: int = MAX_PROJECTED_SECONDS,
+) -> DurationProjection:
+    ordered = sorted({int(value) for value in candidates})
+    if not ordered or ordered[0] <= 0:
+        raise ValueError("fit count candidates must be positive")
+    safe = [
+        project_fit_duration(
+            probe_seconds=probe_seconds,
+            n_prompts=value,
+            limit_seconds=limit_seconds,
+        )
+        for value in ordered
+        if float(probe_seconds) * value <= float(limit_seconds)
+    ]
+    if not safe:
+        raise ValueError("minimum candidate exceeds projected runtime limit")
+    return safe[-1]
+
+
+def slice_v2_corpus(
+    corpus: JLensCorpus,
+    *,
+    fit_count: int,
+    max_fit_count: int,
+    candidates: Sequence[int] = V2_FIT_COUNT_CANDIDATES,
+) -> CorpusSplit:
+    allowed = {int(value) for value in candidates}
+    count = int(fit_count)
+    cap = int(max_fit_count)
+    if count not in allowed:
+        raise ValueError(f"fit_count {count} is not in configured candidates")
+    if count <= 0 or count > cap:
+        raise ValueError(f"fit_count {count} outside 1..{cap}")
+    if count > len(corpus.fit):
+        raise ValueError(
+            f"fit_count {count} exceeds corpus fit pool ({len(corpus.fit)})"
+        )
+    return CorpusSplit(
+        fit=corpus.fit[:count],
+        holdout=corpus.holdout,
     )
 
 
