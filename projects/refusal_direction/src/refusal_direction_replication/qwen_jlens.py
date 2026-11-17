@@ -25,6 +25,7 @@ from .qwen_dose import METADATA_LEAK_KEYS, sha256_file
 
 
 JLENS_PROFILE = "qwen25_coder_7b_jlens.json"
+JLENS_V2_PROFILE = "qwen25_coder_7b_jlens_v2.json"
 QWEN_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
 QWEN_REVISION = "c03e6d358207e414f1eca0bb1891e29f1db0e242"
 JLENS_UPSTREAM = "anthropics/jacobian-lens"
@@ -55,10 +56,15 @@ MAX_SEQ_LEN = 128
 MIN_TOKENS_BEFORE_TRUNCATION = 128
 FIT_COUNT = 100
 HOLDOUT_COUNT = 20
+V2_MAX_SEQ_LEN = 512
+V2_HOLDOUT_COUNT = 200
+V2_FIT_COUNT_CANDIDATES = [100, 150, 200, 250, 300, 400, 600, 800]
+V2_MAX_FIT_COUNT = 800
 DIM_BATCH_PROBE_ORDER = [32, 16, 8]
 MAX_PROJECTED_SECONDS = 12 * 3600
 CHECKPOINT_FILENAME = "jlens_fit_checkpoint.pt"
 FINAL_LENS_FILENAME = "qwen25_coder_7b_jacobian_lens.pt"
+V2_FINAL_LENS_FILENAME = FINAL_LENS_FILENAME
 CHECKPOINT_IDENTITY_FIELDS = (
     "source_layers",
     "target_layer",
