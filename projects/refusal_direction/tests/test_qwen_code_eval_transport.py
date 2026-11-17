@@ -472,3 +472,35 @@ def test_code_eval_start_forces_a100_without_changing_other_profiles(
     )
     module.main()
     assert commands[-1][-1] == "L4"
+
+
+def test_existing_profile_routes_survive_the_causal_profile() -> None:
+    module = _orchestrator()
+    assert module.PROFILE_SESSIONS["gemma"] == "refusal-gemma"
+    assert module.PROFILE_SESSIONS["qwen25-coder"] == "refusal-qwen"
+    assert module.PROFILE_SESSIONS["qwen25-coder-dose"] == "refusal-qwen"
+    assert module.PROFILE_SESSIONS["qwen25-coder-jlens"] == "refusal-qwen"
+    assert module.PROFILE_SESSIONS["qwen25-coder-code-eval"] == "refusal-qwen"
+    assert module.PROFILE_SESSIONS["qwen25-coder-lab"] == "refusal-qwen-lab"
+    assert module.PROFILE_SESSIONS["qwen25-coder-jlens-v2"] == "refusal-qwen-jlens-v2"
+    assert module.PROFILE_SESSIONS["qwen25-coder-causal-jlens"] != "refusal-qwen"
+    assert module.A100_PROFILES >= {
+        "qwen25-coder-code-eval",
+        "qwen25-coder-lab",
+        module.JLENS_V2,
+        "qwen25-coder-causal-jlens",
+    }
+    assert "qwen25-coder-dose" not in module.A100_PROFILES
+    assert module.fetch_pack_script("qwen25-coder-code-eval") == PACK_SCRIPT
+    assert module.fetch_pack_script("qwen25-coder-jlens-v2").name == (
+        "colab_pack_qwen_jlens_v2_results.py"
+    )
+    assert module.fetch_pack_timeout("qwen25-coder-code-eval") == 1800
+    code_eval = module.code_eval_command("refusal-qwen", timeout=14400)
+    assert code_eval[-3].endswith("qwen_run_code_eval.py")
+    jlens = module.jlens_command(
+        "refusal-qwen-jlens-v2", timeout=100, profile="qwen25-coder-jlens-v2"
+    )
+    assert jlens[-3].endswith("qwen_run_jlens_v2.py")
+    assert INSTALL_SCRIPT in module.bootstrap_scripts("qwen25-coder-code-eval")
+    assert INSTALL_SCRIPT not in module.bootstrap_scripts("qwen25-coder-causal-jlens")

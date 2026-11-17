@@ -243,6 +243,55 @@ CODE_EVAL_RAW_PATTERNS = (
 MAX_CODE_EVAL_JSON_BYTES = 64 * 1024**2
 MAX_CODE_EVAL_JSONL_BYTES = 512 * 1024**2
 MAX_CODE_EVAL_TOTAL_BYTES = 4 * 1024**3
+CAUSAL_JLENS_RESULTS_DIR = "results/qwen25_coder_7b_causal_jlens"
+CAUSAL_JLENS_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b_causal_jlens"
+CAUSAL_JLENS_REMOTE_ARCHIVE = Path("/content/qwen_causal_jlens_results.tar.gz")
+CAUSAL_JLENS_DIRECTION_RELATIVE = CODE_EVAL_DIRECTION_RELATIVE
+CAUSAL_JLENS_V1_LENS_RELATIVE = CODE_EVAL_LENS_RELATIVE
+CAUSAL_JLENS_V2_LENS_RELATIVE = (
+    Path("artifacts")
+    / "qwen25_coder_7b_jlens_v2"
+    / JLENS_V2_FINAL_LENS_NAME
+)
+REMOTE_CAUSAL_JLENS_DIRECTION_STAGING = "/content/causal_jlens_source_direction.pt"
+REMOTE_CAUSAL_JLENS_V1_LENS_STAGING = "/content/causal_jlens_source_v1_lens.pt"
+REMOTE_CAUSAL_JLENS_V2_LENS_STAGING = "/content/causal_jlens_source_v2_lens.pt"
+CAUSAL_JLENS_COMPACT_NAMES = frozenset(
+    {
+        "00_prepare.json",
+        "01_pilot.json",
+        "02_panel.json",
+        "03_analysis.json",
+        "causal_jlens_evaluation.json",
+        "execution_manifest.json",
+    }
+)
+CAUSAL_JLENS_ARTIFACT_NAMES = frozenset(
+    {
+        "status.json",
+        "events.jsonl",
+        "checkpoint.json",
+        "responses.jsonl",
+        "observations.jsonl",
+    }
+)
+CAUSAL_JLENS_FETCH_ALLOWLIST = frozenset(
+    {
+        *(
+            f"{CAUSAL_JLENS_RESULTS_DIR}/{name}"
+            for name in CAUSAL_JLENS_COMPACT_NAMES
+        ),
+        *(
+            f"{CAUSAL_JLENS_ARTIFACTS_DIR}/{name}"
+            for name in CAUSAL_JLENS_ARTIFACT_NAMES
+        ),
+    }
+)
+MAX_CAUSAL_JLENS_JSON_BYTES = MAX_CODE_EVAL_JSON_BYTES
+MAX_CAUSAL_JLENS_JSONL_BYTES = MAX_CODE_EVAL_JSONL_BYTES
+MAX_CAUSAL_JLENS_TOTAL_BYTES = MAX_CODE_EVAL_TOTAL_BYTES
+MAX_CAUSAL_JLENS_DIRECTION_BYTES = MAX_DOSE_SOURCE_DIRECTION_BYTES
+MAX_CAUSAL_JLENS_LENS_BYTES = MAX_LAB_LENS_BYTES
 
 
 def normalize_member_name(name: str) -> str:
@@ -509,6 +558,174 @@ def atomic_install_code_eval_sources(
             prefix=".code_eval_lens.",
         )
         return require_local_code_eval_sources(project)
+    except Exception:
+        _rollback_install_records(records)
+        raise
+    finally:
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+
+def _validate_causal_jlens_source(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+    expected_sha256: str | None = None,
+) -> None:
+    if not os.path.lexists(path):
+        raise FileNotFoundError(f"causal-jlens {label} source missing: {path}")
+    if path_is_link_or_junction(path) or not path.is_file():
+        raise ValueError(f"causal-jlens {label} source must be a regular file: {path}")
+    size = path.stat().st_size
+    if size <= 0 or size > max_bytes:
+        raise ValueError(
+            f"causal-jlens {label} source size {size} exceeds {max_bytes} bytes"
+        )
+    if expected_sha256 is not None:
+        actual = sha256_file(path)
+        if actual != expected_sha256:
+            raise ValueError(
+                f"causal-jlens {label} sha256 {actual!r} != expected {expected_sha256!r}"
+            )
+
+
+def _assert_causal_jlens_source_destination(
+    project: Path,
+    destination: Path,
+    relative: Path,
+) -> Path:
+    expected = (project.resolve() / relative).resolve()
+    current = destination
+    while current != project and current.parent != current:
+        if path_is_link_or_junction(current):
+            raise ValueError("causal-jlens source destination is a link or junction")
+        current = current.parent
+    if destination.resolve() != expected:
+        raise ValueError("causal-jlens source destination escaped its fixed path")
+    return destination
+
+
+def require_local_causal_jlens_sources(
+    project: Path,
+    *,
+    expected_direction_sha256: str | None = None,
+    expected_v1_sha256: str | None = None,
+    expected_v2_sha256: str | None = None,
+) -> tuple[Path, Path, Path]:
+    direction = project / CAUSAL_JLENS_DIRECTION_RELATIVE
+    v1_lens = project / CAUSAL_JLENS_V1_LENS_RELATIVE
+    v2_lens = project / CAUSAL_JLENS_V2_LENS_RELATIVE
+    _validate_causal_jlens_source(
+        direction,
+        label="direction",
+        max_bytes=MAX_CAUSAL_JLENS_DIRECTION_BYTES,
+        expected_sha256=expected_direction_sha256,
+    )
+    _validate_causal_jlens_source(
+        v1_lens,
+        label="v1 lens",
+        max_bytes=MAX_CAUSAL_JLENS_LENS_BYTES,
+        expected_sha256=expected_v1_sha256,
+    )
+    _validate_causal_jlens_source(
+        v2_lens,
+        label="v2 lens",
+        max_bytes=MAX_CAUSAL_JLENS_LENS_BYTES,
+        expected_sha256=expected_v2_sha256,
+    )
+    return (
+        _assert_causal_jlens_source_destination(
+            project, direction, CAUSAL_JLENS_DIRECTION_RELATIVE
+        ),
+        _assert_causal_jlens_source_destination(
+            project, v1_lens, CAUSAL_JLENS_V1_LENS_RELATIVE
+        ),
+        _assert_causal_jlens_source_destination(
+            project, v2_lens, CAUSAL_JLENS_V2_LENS_RELATIVE
+        ),
+    )
+
+
+def atomic_install_causal_jlens_sources(
+    *,
+    staged_direction: Path,
+    staged_v1_lens: Path,
+    staged_v2_lens: Path,
+    project: Path,
+    expected_direction_sha256: str | None = None,
+    expected_v1_sha256: str | None = None,
+    expected_v2_sha256: str | None = None,
+) -> tuple[Path, Path, Path]:
+    """Install direction, v1 lens and v2 lens as one rollback-safe triple."""
+
+    staged = (
+        (staged_direction, "direction staging", MAX_CAUSAL_JLENS_DIRECTION_BYTES, expected_direction_sha256),
+        (staged_v1_lens, "v1 lens staging", MAX_CAUSAL_JLENS_LENS_BYTES, expected_v1_sha256),
+        (staged_v2_lens, "v2 lens staging", MAX_CAUSAL_JLENS_LENS_BYTES, expected_v2_sha256),
+    )
+    for path, label, max_bytes, expected in staged:
+        _validate_causal_jlens_source(
+            path,
+            label=label,
+            max_bytes=max_bytes,
+            expected_sha256=expected,
+        )
+    destinations = (
+        project / CAUSAL_JLENS_DIRECTION_RELATIVE,
+        project / CAUSAL_JLENS_V1_LENS_RELATIVE,
+        project / CAUSAL_JLENS_V2_LENS_RELATIVE,
+    )
+    relatives = (
+        CAUSAL_JLENS_DIRECTION_RELATIVE,
+        CAUSAL_JLENS_V1_LENS_RELATIVE,
+        CAUSAL_JLENS_V2_LENS_RELATIVE,
+    )
+    prefixes = (".causal_direction.", ".causal_v1_lens.", ".causal_v2_lens.")
+    limits = (
+        MAX_CAUSAL_JLENS_DIRECTION_BYTES,
+        MAX_CAUSAL_JLENS_LENS_BYTES,
+        MAX_CAUSAL_JLENS_LENS_BYTES,
+    )
+    staged_paths = (staged_direction, staged_v1_lens, staged_v2_lens)
+    for destination, relative in zip(destinations, relatives):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _assert_causal_jlens_source_destination(project, destination, relative)
+    backup_root = Path(
+        tempfile.mkdtemp(
+            prefix=".causal_jlens_sources_backup.",
+            dir=project,
+        )
+    )
+    records: list[InstallRecord] = []
+    try:
+        for destination, relative in zip(destinations, relatives):
+            had_original = destination.exists()
+            backup = backup_root / relative if had_original else None
+            if backup is not None:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(destination, backup)
+            records.append(
+                InstallRecord(
+                    target=destination,
+                    backup=backup,
+                    had_original=had_original,
+                )
+            )
+        for staged_path, destination, max_bytes, prefix in zip(
+            staged_paths, destinations, limits, prefixes
+        ):
+            _stream_install_regular_file(
+                staged=staged_path,
+                destination=destination,
+                max_bytes=max_bytes,
+                prefix=prefix,
+            )
+        return require_local_causal_jlens_sources(
+            project,
+            expected_direction_sha256=expected_direction_sha256,
+            expected_v1_sha256=expected_v1_sha256,
+            expected_v2_sha256=expected_v2_sha256,
+        )
     except Exception:
         _rollback_install_records(records)
         raise
@@ -2142,6 +2359,178 @@ def extract_qwen_code_eval_archive(archive: Path, project: Path) -> None:
         project,
         validator=validate_qwen_code_eval_archive,
         prefix="qwen-code-eval-fetch-",
+        post_stage_validate=validate_staged,
+    )
+
+
+def is_causal_jlens_unsafe_member_name(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return True
+    return not normalized.startswith(
+        (f"{CAUSAL_JLENS_RESULTS_DIR}/", f"{CAUSAL_JLENS_ARTIFACTS_DIR}/")
+    )
+
+
+def is_allowed_causal_jlens_fetch_member(name: str) -> bool:
+    try:
+        normalized = normalize_member_name(name)
+    except ValueError:
+        return False
+    if is_causal_jlens_unsafe_member_name(normalized):
+        return False
+    return normalized in CAUSAL_JLENS_FETCH_ALLOWLIST
+
+
+def causal_jlens_member_byte_limit(name: str) -> int:
+    normalized = normalize_member_name(name)
+    if normalized.endswith(".jsonl"):
+        return MAX_CAUSAL_JLENS_JSONL_BYTES
+    return MAX_CAUSAL_JLENS_JSON_BYTES
+
+
+def _validate_causal_jlens_compact(path: Path, relative: str) -> None:
+    if not relative.startswith(f"{CAUSAL_JLENS_RESULTS_DIR}/"):
+        return
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if compact_contains_leak(payload):
+        raise ValueError(f"compact json leakage in {relative}")
+
+
+def collect_qwen_causal_jlens_pack_entries(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    results_dir = root / CAUSAL_JLENS_RESULTS_DIR
+    artifacts_dir = root / CAUSAL_JLENS_ARTIFACTS_DIR
+    if results_dir.is_dir():
+        candidates.extend(sorted(results_dir.glob("*.json")))
+    if artifacts_dir.is_dir():
+        candidates.extend(
+            path for path in sorted(artifacts_dir.iterdir()) if path.is_file()
+        )
+    entries: list[Path] = []
+    for path in candidates:
+        if path.is_symlink() or path_is_link_or_junction(path):
+            continue
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        if not is_allowed_causal_jlens_fetch_member(relative):
+            continue
+        _assert_pack_path_safe(root, path)
+        if path.stat().st_size > causal_jlens_member_byte_limit(relative):
+            raise ValueError(f"causal-jlens member exceeds size limit: {relative}")
+        _validate_causal_jlens_compact(path, relative)
+        entries.append(path)
+    return entries
+
+
+def pack_qwen_causal_jlens_results(root: Path, archive: Path) -> None:
+    _pack_entries(
+        collect_qwen_causal_jlens_pack_entries(root),
+        root,
+        archive,
+        kind="Qwen causal jlens",
+    )
+
+
+def validate_qwen_causal_jlens_archive(
+    members: list[tarfile.TarInfo],
+) -> list[tarfile.TarInfo]:
+    return _validate_archive(
+        members,
+        is_unsafe=is_causal_jlens_unsafe_member_name,
+        is_allowed=is_allowed_causal_jlens_fetch_member,
+        max_total=MAX_CAUSAL_JLENS_TOTAL_BYTES,
+        member_limit_for=causal_jlens_member_byte_limit,
+    )
+
+
+def _revalidate_causal_jlens_members(
+    staging: Path,
+    members: list[tarfile.TarInfo],
+) -> None:
+    for member in members:
+        relative = normalize_member_name(member.name)
+        path = staging / relative
+        if path.stat().st_size > causal_jlens_member_byte_limit(relative):
+            raise ValueError(f"causal-jlens member exceeds size limit: {relative}")
+        _validate_causal_jlens_compact(path, relative)
+
+
+def _causal_jlens_tree_identity(root: Path) -> dict[str, Any] | None:
+    results_dir = root / CAUSAL_JLENS_RESULTS_DIR
+    identities: list[dict[str, Any]] = []
+
+    def add_identity(source: dict[str, Any]) -> None:
+        fields = ("run_id", "implementation_commit", "source_artifact_hashes")
+        if not all(field in source for field in fields):
+            return
+        identities.append(
+            {
+                "run_id": source["run_id"],
+                "implementation_commit": source["implementation_commit"],
+                "source_artifact_hashes": source["source_artifact_hashes"],
+            }
+        )
+
+    if results_dir.is_dir():
+        for path in sorted(results_dir.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            add_identity(payload.get("provenance") or payload)
+    artifacts_dir = root / CAUSAL_JLENS_ARTIFACTS_DIR
+    if artifacts_dir.is_dir():
+        for path in sorted(artifacts_dir.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix == ".json":
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                add_identity(payload.get("identity") or payload)
+            elif path.suffix == ".jsonl":
+                with path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.strip():
+                            add_identity(json.loads(line))
+    if not identities:
+        return None
+    first = identities[0]
+    if any(identity != first for identity in identities[1:]):
+        raise ValueError("causal-jlens tree contains conflicting identities")
+    return first
+
+
+def _causal_jlens_destination_exists(project: Path) -> bool:
+    return any(
+        any(candidate.is_file() for candidate in path.iterdir())
+        for path in (
+            project / CAUSAL_JLENS_RESULTS_DIR,
+            project / CAUSAL_JLENS_ARTIFACTS_DIR,
+        )
+        if path.is_dir()
+    )
+
+
+def _validate_causal_jlens_fetch_identity(staging: Path, project: Path) -> None:
+    incoming = _causal_jlens_tree_identity(staging)
+    if not _causal_jlens_destination_exists(project):
+        return
+    existing = _causal_jlens_tree_identity(project)
+    if incoming is None or existing is None:
+        raise ValueError("causal-jlens identity conflict: identity is unavailable")
+    if incoming != existing:
+        raise ValueError(
+            "causal-jlens identity conflict: run, commit, or source hashes differ"
+        )
+
+
+def extract_qwen_causal_jlens_archive(archive: Path, project: Path) -> None:
+    def validate_staged(staging: Path, members: list[tarfile.TarInfo]) -> None:
+        _revalidate_causal_jlens_members(staging, members)
+        _validate_causal_jlens_fetch_identity(staging, project)
+
+    _extract_allowlisted_archive(
+        archive,
+        project,
+        validator=validate_qwen_causal_jlens_archive,
+        prefix="qwen-causal-jlens-fetch-",
         post_stage_validate=validate_staged,
     )
 

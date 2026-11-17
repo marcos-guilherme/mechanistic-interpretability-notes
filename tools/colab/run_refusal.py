@@ -24,8 +24,10 @@ PROFILE_SESSIONS = {
     "qwen25-coder-code-eval": "refusal-qwen",
     "qwen25-coder-lab": "refusal-qwen-lab",
     "qwen25-coder-jlens-v2": "refusal-qwen-jlens-v2",
+    "qwen25-coder-causal-jlens": "refusal-qwen-causal-jlens",
 }
 JLENS_V2 = "qwen25-coder-jlens-v2"
+CAUSAL_JLENS = "qwen25-coder-causal-jlens"
 EXCLUDED_PARTS = {
     ".git",
     ".ipynb_checkpoints",
@@ -42,13 +44,19 @@ REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
 REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
 REMOTE_LAB_LENS_MANIFEST = "/content/lab_source_lens.pt.manifest.json"
 REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
-A100_PROFILES = frozenset({"qwen25-coder-code-eval", "qwen25-coder-lab", JLENS_V2})
+A100_PROFILES = frozenset(
+    {"qwen25-coder-code-eval", "qwen25-coder-lab", JLENS_V2, CAUSAL_JLENS}
+)
 DEFAULT_EXEC_TIMEOUT = 7200
 JLENS_V2_EXEC_TIMEOUT = 46800
 JLENS_V2_LENS_CHUNK_BYTES = LAB_LENS_CHUNK_BYTES
 REMOTE_JLENS_V2_LENS_STAGING = "/content/jlens_v2_source_v1_lens.pt"
 REMOTE_JLENS_V2_LENS_MANIFEST = "/content/jlens_v2_source_v1_lens.pt.manifest.json"
 REMOTE_JLENS_V2_ARTIFACTS = "/content/refusal_direction/artifacts/qwen25_coder_7b_jlens_v2"
+REMOTE_CAUSAL_JLENS_DIRECTION_STAGING = "/content/causal_jlens_source_direction.pt"
+REMOTE_CAUSAL_JLENS_V1_LENS_STAGING = "/content/causal_jlens_source_v1_lens.pt"
+REMOTE_CAUSAL_JLENS_V2_LENS_STAGING = "/content/causal_jlens_source_v2_lens.pt"
+CAUSAL_JLENS_LENS_CHUNK_BYTES = LAB_LENS_CHUNK_BYTES
 # Status/events before the checkpoint: the fit replaces the checkpoint before it
 # advances status/events, so this order can never yield status ahead of it.
 JLENS_V2_BACKUP_ORDER = ("status.json", "events.jsonl", "jlens_fit_checkpoint.pt")
@@ -173,6 +181,8 @@ def resolve_session(profile: str, session: str | None) -> str:
 
 
 def fetch_pack_script(profile: str) -> Path:
+    if profile == CAUSAL_JLENS:
+        return PROJECT / "scripts" / "colab_pack_qwen_causal_jlens_results.py"
     if profile == JLENS_V2:
         return PROJECT / "scripts" / "colab_pack_qwen_jlens_v2_results.py"
     if profile == "qwen25-coder-code-eval":
@@ -187,7 +197,7 @@ def fetch_pack_script(profile: str) -> Path:
 
 
 def fetch_pack_timeout(profile: str) -> int:
-    if profile in ("qwen25-coder-code-eval", JLENS_V2):
+    if profile in ("qwen25-coder-code-eval", JLENS_V2, CAUSAL_JLENS):
         return 1800
     return 300
 
@@ -206,6 +216,8 @@ def status_command(session: str, *, profile: str = "qwen25-coder") -> list[str]:
         script = PROJECT / "scripts" / "qwen_run_jlens_status.py"
     elif profile == JLENS_V2:
         script = PROJECT / "scripts" / "qwen_run_jlens_v2_status.py"
+    elif profile == CAUSAL_JLENS:
+        script = PROJECT / "scripts" / "qwen_run_causal_jlens_status.py"
     elif profile == "qwen25-coder-dose":
         script = PROJECT / "scripts" / "qwen_run_dose_status.py"
     return [
@@ -263,6 +275,14 @@ def lab_command(session: str, *, timeout: int) -> list[str]:
     )
 
 
+def causal_jlens_command(session: str, *, timeout: int) -> list[str]:
+    return exec_command(
+        session,
+        PROJECT / "scripts" / "qwen_run_causal_jlens.py",
+        timeout=timeout,
+    )
+
+
 def extract_qwen_results_archive(archive: Path, project: Path) -> None:
     sys.path.insert(0, str(project / "src"))
     from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
@@ -306,6 +326,15 @@ def extract_qwen_code_eval_results_archive(archive: Path, project: Path) -> None
     )
 
     extract_qwen_code_eval_archive(archive, project)
+
+
+def extract_qwen_causal_jlens_results_archive(archive: Path, project: Path) -> None:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        extract_qwen_causal_jlens_archive,
+    )
+
+    extract_qwen_causal_jlens_archive(archive, project)
 
 
 def require_dose_source_direction(project: Path) -> Path:
@@ -459,6 +488,51 @@ def require_lab_sources(project: Path) -> tuple[Path, Path]:
     return require_local_lab_sources(project)
 
 
+def require_causal_jlens_sources(project: Path) -> tuple[Path, Path, Path]:
+    sys.path.insert(0, str(project / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        require_local_causal_jlens_sources,
+    )
+
+    return require_local_causal_jlens_sources(project)
+
+
+def upload_chunked_source(
+    session: str,
+    source: Path,
+    remote_staging: str,
+    parts_dir: Path,
+    *,
+    chunk_bytes: int,
+) -> None:
+    sys.path.insert(0, str(PROJECT / "src"))
+    from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
+        write_artifact_chunk_manifest,
+    )
+
+    staged_name = Path(remote_staging).name
+    lens_parts = split_artifact_file(
+        source,
+        parts_dir,
+        chunk_bytes=chunk_bytes,
+        part_prefix=staged_name + ".part",
+    )
+    manifest_path = write_artifact_chunk_manifest(
+        source,
+        lens_parts,
+        parts_dir / (staged_name + ".manifest.json"),
+    )
+    run(upload_command(session, manifest_path, remote_staging + ".manifest.json"))
+    for index, part in enumerate(lens_parts):
+        run(
+            upload_command(
+                session,
+                part,
+                f"{remote_staging}.part{index:03d}",
+            )
+        )
+
+
 def bootstrap_scripts(profile: str) -> list[Path]:
     if profile == "qwen25-coder-lab":
         return [PROJECT / "scripts" / "colab_install_lab.py"]
@@ -473,6 +547,8 @@ def bootstrap_scripts(profile: str) -> list[Path]:
         scripts.append(PROJECT / "scripts" / "colab_install_jlens_v2_checkpoint.py")
     if profile == "qwen25-coder-code-eval":
         scripts.append(PROJECT / "scripts" / "colab_install_code_eval.py")
+    if profile == CAUSAL_JLENS:
+        scripts.append(PROJECT / "scripts" / "colab_install_causal_jlens.py")
     return scripts
 
 
@@ -605,6 +681,7 @@ def main() -> int:
             "jlens",
             "code-eval",
             "lab",
+            "causal-jlens",
             "checkpoint-backup",
             "stop",
         ),
@@ -641,12 +718,15 @@ def main() -> int:
         direction = None
         code_eval_sources = None
         lab_sources = None
+        causal_sources = None
         if args.profile == "qwen25-coder-dose":
             direction = require_dose_source_direction(PROJECT)
         elif args.profile == "qwen25-coder-code-eval":
             code_eval_sources = require_code_eval_sources(PROJECT)
         elif args.profile == "qwen25-coder-lab":
             lab_sources = require_lab_sources(PROJECT)
+        elif args.profile == CAUSAL_JLENS:
+            causal_sources = require_causal_jlens_sources(PROJECT)
         archive = build_archive(
             stamp_commit=stamps_implementation_commit(args.profile)
         )
@@ -770,6 +850,29 @@ def main() -> int:
                 )
             for local_path, remote in optional_jlens_v2_resume_bundle(PROJECT):
                 run(upload_command(session, local_path, remote))
+        if causal_sources is not None:
+            source_direction, source_v1, source_v2 = causal_sources
+            upload_chunked_source(
+                session,
+                source_direction,
+                REMOTE_CAUSAL_JLENS_DIRECTION_STAGING,
+                ROOT / ".colab-staging" / "causal-direction-parts",
+                chunk_bytes=CAUSAL_JLENS_LENS_CHUNK_BYTES,
+            )
+            upload_chunked_source(
+                session,
+                source_v1,
+                REMOTE_CAUSAL_JLENS_V1_LENS_STAGING,
+                ROOT / ".colab-staging" / "causal-v1-lens-parts",
+                chunk_bytes=CAUSAL_JLENS_LENS_CHUNK_BYTES,
+            )
+            upload_chunked_source(
+                session,
+                source_v2,
+                REMOTE_CAUSAL_JLENS_V2_LENS_STAGING,
+                ROOT / ".colab-staging" / "causal-v2-lens-parts",
+                chunk_bytes=CAUSAL_JLENS_LENS_CHUNK_BYTES,
+            )
     elif args.action == "bootstrap":
         for script in bootstrap_scripts(args.profile):
             run(
@@ -824,6 +927,9 @@ def main() -> int:
         elif args.profile == JLENS_V2:
             remote_archive = "/content/qwen_jlens_v2_results.tar.gz"
             local_name = "qwen_jlens_v2_results.tar.gz"
+        elif args.profile == CAUSAL_JLENS:
+            remote_archive = "/content/qwen_causal_jlens_results.tar.gz"
+            local_name = "qwen_causal_jlens_results.tar.gz"
         elif args.profile == "qwen25-coder-dose":
             remote_archive = "/content/qwen_dose_results.tar.gz"
             local_name = "qwen_dose_results.tar.gz"
@@ -855,6 +961,8 @@ def main() -> int:
             extract_qwen_jlens_results_archive(local, PROJECT)
         elif args.profile == JLENS_V2:
             extract_qwen_jlens_v2_results_archive(local, PROJECT)
+        elif args.profile == CAUSAL_JLENS:
+            extract_qwen_causal_jlens_results_archive(local, PROJECT)
         elif args.profile == "qwen25-coder-dose":
             extract_qwen_dose_results_archive(local, PROJECT)
         elif args.profile == "qwen25-coder":
@@ -870,6 +978,7 @@ def main() -> int:
             "qwen25-coder-code-eval",
             "qwen25-coder-lab",
             JLENS_V2,
+            CAUSAL_JLENS,
         ):
             parser.error("status is only available for Qwen profiles")
         run(status_command(session, profile=args.profile))
@@ -894,6 +1003,13 @@ def main() -> int:
                 "code-eval is only available for --profile qwen25-coder-code-eval"
             )
         run(code_eval_command(session, timeout=args.timeout))
+    elif args.action == "causal-jlens":
+        if args.profile != CAUSAL_JLENS:
+            parser.error(
+                "causal-jlens is only available for --profile "
+                "qwen25-coder-causal-jlens"
+            )
+        run(causal_jlens_command(session, timeout=args.timeout))
     elif args.action == "lab":
         if args.profile != "qwen25-coder-lab":
             parser.error("lab is only available for --profile qwen25-coder-lab")
