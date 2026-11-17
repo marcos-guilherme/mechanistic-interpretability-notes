@@ -21,8 +21,17 @@ from refusal_direction_replication.qwen_causal_jlens import (
     CAUSAL_JLENS_PROFILE,
     CONDITIONS,
     DATASETS,
+    FROZEN_COHORT_DIGEST,
+    FROZEN_PREPARE_SHA256,
+    FROZEN_SOURCE_DOSE_RUN_ID,
+    FROZEN_V1_EVALUATION_SHA256,
+    FROZEN_V1_RUN_ID,
+    FROZEN_V2_EVALUATION_SHA256,
+    FROZEN_V2_RUN_ID,
     LENS_VERSIONS,
+    PRODUCTION_DATASET_SIZE,
     READOUT_LAYERS,
+    cohort_digest,
     compact_contains_text_leak,
 )
 from refusal_direction_replication.qwen_dose import sha256_file
@@ -646,8 +655,7 @@ def _assert_exact_mask_and_cache_position(model: GreedyFixture) -> None:
 
 
 def _config(root: Path, *, dataset_size: int = 32) -> dict[str, Any]:
-    del root
-    return {
+    config: dict[str, Any] = {
         "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
         "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
         "dtype": "bfloat16",
@@ -691,9 +699,56 @@ def _config(root: Path, *, dataset_size: int = 32) -> dict[str, Any]:
         "source_v2_lens": (
             "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt"
         ),
+        "source_v1_evaluation": (
+            "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
+        ),
+        "source_v2_evaluation": (
+            "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json"
+        ),
         "results_dir": "results/qwen25_coder_7b_causal_jlens",
         "artifacts_dir": "artifacts/qwen25_coder_7b_causal_jlens",
     }
+    if int(dataset_size) == PRODUCTION_DATASET_SIZE:
+        config.update(
+            {
+                "expected_prepare_sha256": FROZEN_PREPARE_SHA256,
+                "expected_cohort_digest": FROZEN_COHORT_DIGEST,
+                "expected_v1_evaluation_sha256": FROZEN_V1_EVALUATION_SHA256,
+                "expected_v2_evaluation_sha256": FROZEN_V2_EVALUATION_SHA256,
+                "expected_v1_run_id": FROZEN_V1_RUN_ID,
+                "expected_v2_run_id": FROZEN_V2_RUN_ID,
+                "expected_source_dose_run_id": FROZEN_SOURCE_DOSE_RUN_ID,
+            }
+        )
+        return config
+    prepare_path = root / str(config["source_prepare"])
+    if prepare_path.is_file():
+        payload = json.loads(prepare_path.read_text(encoding="utf-8"))
+        config["expected_prepare_sha256"] = sha256_file(prepare_path)
+        try:
+            config["expected_cohort_digest"] = cohort_digest(payload)
+        except (KeyError, TypeError, ValueError):
+            pass
+    for sha_key, run_key, relative in (
+        (
+            "expected_v1_evaluation_sha256",
+            "expected_v1_run_id",
+            config["source_v1_evaluation"],
+        ),
+        (
+            "expected_v2_evaluation_sha256",
+            "expected_v2_run_id",
+            config["source_v2_evaluation"],
+        ),
+    ):
+        path = root / str(relative)
+        if not path.is_file():
+            continue
+        config[sha_key] = sha256_file(path)
+        run_id = json.loads(path.read_text(encoding="utf-8")).get("run_id")
+        if run_id:
+            config[run_key] = run_id
+    return config
 
 
 def _seed_sources(root: Path) -> None:
@@ -755,13 +810,38 @@ def _stamp_canonical_source_manifests(root: Path) -> None:
     hashes = {
         name: sha256_file(path) for name, path in paths.items() if path.is_file()
     }
-    v1_eval = root / "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
-    v2_eval = root / "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json"
+    v1_eval = root / str(config["source_v1_evaluation"])
+    v2_eval = root / str(config["source_v2_evaluation"])
     v1_eval.parent.mkdir(parents=True, exist_ok=True)
     v2_eval.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(v1_eval, {"status": "pass", "lens_sha256": hashes["v1_lens"]})
-    atomic_write_json(v2_eval, {"status": "pass", "lens_sha256": hashes["v2_lens"]})
     dose_payload = json.loads(paths["dose_evaluation"].read_text(encoding="utf-8"))
+    dose_run_id = dose_payload.get("run_id", "dose-run")
+    atomic_write_json(
+        v1_eval,
+        {
+            "status": "pass",
+            "lens_sha256": hashes["v1_lens"],
+            "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+            "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+            "source_dose_status": "pass",
+            "source_dose_run_id": dose_run_id,
+            "run_id": "fixture-v1-eval",
+        },
+    )
+    atomic_write_json(
+        v2_eval,
+        {
+            "status": "pass",
+            "lens_sha256": hashes["v2_lens"],
+            "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+            "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+            "source_dose_status": "pass",
+            "source_dose_run_id": dose_run_id,
+            "run_id": "fixture-v2-eval",
+        },
+    )
     dose_hashes = dict(dose_payload.get("source_artifact_hashes") or {})
     dose_hashes["selected_direction"] = hashes["direction"]
     dose_payload["source_artifact_hashes"] = dose_hashes
@@ -949,8 +1029,8 @@ def _seed_causal_project(root: Path, *, dataset_size: int = 2) -> dict[str, Any]
     _seed_sources(root)
     _write_prepare_source(root, records)
     source_root = _write_purplellama(root, records)
-    config = _write_profile(root, dataset_size=dataset_size)
     _stamp_canonical_source_manifests(root)
+    config = _write_profile(root, dataset_size=dataset_size)
     config["_source_root"] = source_root
     config["_records"] = records
     return config
@@ -1673,7 +1753,7 @@ def test_source_context_requires_canonical_manifest_agreement(tmp_path: Path) ->
     config = _config(tmp_path, dataset_size=2)
     v1 = tmp_path / str(config["source_v1_lens"])
     v1.write_bytes(b"tampered-v1")
-    with pytest.raises(ValueError, match="hash"):
+    with pytest.raises(ValueError, match="hash|sha256"):
         source_context(tmp_path, config)
 
 
@@ -1778,3 +1858,145 @@ def test_resume_initialize_does_not_regress_completed_units(
     assert by_stage["panel"] == 1
     generation = [completed for stage, completed in seen if stage in {"pilot", "panel"}]
     assert generation == sorted(generation)
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_CANONICAL_PREPARE = (
+    _PROJECT_ROOT / "results/qwen25_coder_7b_code_eval/00_prepare.json"
+)
+_CANONICAL_V1_EVAL = (
+    _PROJECT_ROOT / "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
+)
+_CANONICAL_V2_EVAL = (
+    _PROJECT_ROOT / "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json"
+)
+
+
+def _copy_canonical_prepare(root: Path) -> dict[str, Any]:
+    payload = json.loads(_CANONICAL_PREPARE.read_text(encoding="utf-8"))
+    dest = root / "results/qwen25_coder_7b_code_eval/00_prepare.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(_CANONICAL_PREPARE.read_bytes())
+    return payload
+
+
+def test_committed_prepare_matches_frozen_cohort_pins() -> None:
+    from refusal_direction_replication.qwen_causal_jlens import (
+        FROZEN_COHORT_DIGEST,
+        FROZEN_PREPARE_SHA256,
+        cohort_digest,
+    )
+
+    payload = json.loads(_CANONICAL_PREPARE.read_text(encoding="utf-8"))
+    assert sha256_file(_CANONICAL_PREPARE) == FROZEN_PREPARE_SHA256
+    assert cohort_digest(payload) == FROZEN_COHORT_DIGEST
+    assert len(payload["results"]["mitre"]["example_ids"]) == 32
+    assert len(payload["results"]["mitre_frr"]["example_ids"]) == 32
+
+
+def test_committed_lens_evaluations_match_frozen_manifest_pins() -> None:
+    from refusal_direction_replication.qwen_causal_jlens import (
+        FROZEN_V1_EVALUATION_SHA256,
+        FROZEN_V1_RUN_ID,
+        FROZEN_V2_EVALUATION_SHA256,
+        FROZEN_V2_RUN_ID,
+        FROZEN_SOURCE_DOSE_RUN_ID,
+    )
+
+    v1 = json.loads(_CANONICAL_V1_EVAL.read_text(encoding="utf-8"))
+    v2 = json.loads(_CANONICAL_V2_EVAL.read_text(encoding="utf-8"))
+    assert sha256_file(_CANONICAL_V1_EVAL) == FROZEN_V1_EVALUATION_SHA256
+    assert sha256_file(_CANONICAL_V2_EVAL) == FROZEN_V2_EVALUATION_SHA256
+    assert v1["run_id"] == FROZEN_V1_RUN_ID
+    assert v2["run_id"] == FROZEN_V2_RUN_ID
+    assert v1["source_dose_run_id"] == FROZEN_SOURCE_DOSE_RUN_ID
+    assert v2["source_dose_run_id"] == FROZEN_SOURCE_DOSE_RUN_ID
+    assert v1["status"] == "pass" and v2["status"] == "pass"
+
+
+def test_source_context_rejects_alternate_internally_consistent_cohort(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_causal_jlens import (
+        FROZEN_COHORT_DIGEST,
+        FROZEN_PREPARE_SHA256,
+        cohort_digest,
+    )
+    from refusal_direction_replication.qwen_causal_jlens_runtime import source_context
+
+    _seed_sources(tmp_path)
+    payload = json.loads(_CANONICAL_PREPARE.read_text(encoding="utf-8"))
+    for dataset in DATASETS:
+        block = payload["results"][dataset]
+        block["example_ids"] = list(reversed(block["example_ids"]))
+        block["content_hashes"] = list(reversed(block["content_hashes"]))
+        block["source_indices"] = list(reversed(block["source_indices"]))
+    dest = tmp_path / "results/qwen25_coder_7b_code_eval/00_prepare.json"
+    atomic_write_json(dest, payload)
+    assert cohort_digest(payload) != FROZEN_COHORT_DIGEST
+    assert sha256_file(dest) != FROZEN_PREPARE_SHA256
+    with pytest.raises(ValueError, match="frozen prepare|frozen cohort"):
+        source_context(
+            tmp_path,
+            _config(tmp_path, dataset_size=32),
+            load_direction_payload=False,
+        )
+
+
+def test_source_context_rejects_replaced_lens_and_matching_manifest(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import source_context
+
+    _seed_sources(tmp_path)
+    _copy_canonical_prepare(tmp_path)
+    config = _config(tmp_path, dataset_size=32)
+    v1_eval = tmp_path / str(config["source_v1_evaluation"])
+    v2_eval = tmp_path / str(config["source_v2_evaluation"])
+    v1_hash = sha256_file(tmp_path / str(config["source_v1_lens"]))
+    v2_hash = sha256_file(tmp_path / str(config["source_v2_lens"]))
+    atomic_write_json(
+        v1_eval,
+        {
+            "status": "pass",
+            "lens_sha256": v1_hash,
+            "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+            "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+            "source_dose_status": "pass",
+            "source_dose_run_id": FROZEN_SOURCE_DOSE_RUN_ID,
+            "run_id": "forged-v1-run",
+        },
+    )
+    atomic_write_json(
+        v2_eval,
+        {
+            "status": "pass",
+            "lens_sha256": v2_hash,
+            "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+            "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+            "source_dose_status": "pass",
+            "source_dose_run_id": FROZEN_SOURCE_DOSE_RUN_ID,
+            "run_id": "forged-v2-run",
+        },
+    )
+    with pytest.raises(ValueError, match="frozen evaluation sha256|frozen v1 run_id|frozen v2 run_id"):
+        source_context(tmp_path, config, load_direction_payload=False)
+
+
+def test_source_context_rejects_lens_manifest_with_wrong_revision(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import source_context
+
+    _seed_sources(tmp_path)
+    config = _config(tmp_path, dataset_size=2)
+    v1_eval = tmp_path / str(config["source_v1_evaluation"])
+    payload = json.loads(v1_eval.read_text(encoding="utf-8"))
+    payload["status"] = "pass"
+    payload["model_revision"] = "0" * 40
+    payload["jlens_upstream_commit"] = "581d398613e5602a5af361e1c34d3a92ea82ba8e"
+    atomic_write_json(v1_eval, payload)
+    with pytest.raises(ValueError, match="revision|jlens"):
+        source_context(tmp_path, config, load_direction_payload=False)

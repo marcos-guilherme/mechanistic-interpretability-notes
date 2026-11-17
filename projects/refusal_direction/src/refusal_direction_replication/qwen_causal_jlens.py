@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+import hashlib
+import json
 import random
 from statistics import mean
 from typing import Any
@@ -14,7 +16,27 @@ LENS_VERSIONS = ("v1", "v2")
 READOUT_STEPS = 8
 CONDITIONS = ("baseline", "ablation", "addition", "random_control")
 DATASETS = ("mitre", "mitre_frr")
+PRODUCTION_DATASET_SIZE = 32
 PRIMARY_LAYER = 25
+# Frozen provenance from committed canonical artifacts. Recalculate only if
+# those source result files are deliberately replaced by a later approved run.
+FROZEN_PREPARE_SHA256 = (
+    "d5da5bb0e9dcd1f982ce3fbb748c0863057982d8cc4667b9ef68b7ba7ba17c1b"
+)
+FROZEN_COHORT_DIGEST = (
+    "734f6ba50e28bd9958dc733a68ef70d6e443b22872012b5d922be531fba097e1"
+)
+FROZEN_V1_EVALUATION_SHA256 = (
+    "6067ec0bd1dd1f0a42b9cf6cd27052800b5d6e0856d47d50984fcd085905a07a"
+)
+FROZEN_V2_EVALUATION_SHA256 = (
+    "dd0f73d9e47f7efa6138e9885f275828090f5e6461f56e8b7b422b379583f3de"
+)
+FROZEN_V1_RUN_ID = "e23b9570-130e-4b9a-8000-fb91255b29d8"
+FROZEN_V2_RUN_ID = "e35026e6-43e1-4014-8022-f4055aa6a58f"
+FROZEN_SOURCE_DOSE_RUN_ID = "d76d0e7f-1e86-4953-8eac-de1c352708d2"
+CANONICAL_V1_EVALUATION = "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
+CANONICAL_V2_EVALUATION = "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json"
 BOOTSTRAP_DEFAULT_RESAMPLES = 10_000
 BOOTSTRAP_CI_LOWER_INDEX = 249
 BOOTSTRAP_CI_UPPER_INDEX = 9749
@@ -37,6 +59,36 @@ def bootstrap_ci_indices(resamples: int) -> tuple[int, int]:
             f"resamples, received {resamples}"
         )
     return BOOTSTRAP_CI_LOWER_INDEX, BOOTSTRAP_CI_UPPER_INDEX
+
+
+def selected_cohort_records(
+    prepare: Mapping[str, Any],
+) -> list[tuple[str, str, str, int]]:
+    records: list[tuple[str, str, str, int]] = []
+    results = prepare.get("results") or {}
+    for dataset in DATASETS:
+        block = results.get(dataset) or {}
+        ids = list(block.get("example_ids") or [])
+        hashes = list(block.get("content_hashes") or [])
+        indices = list(block.get("source_indices") or [])
+        if len(ids) != len(hashes) or len(hashes) != len(indices):
+            raise ValueError(f"{dataset} cohort fields have unequal length")
+        for example_id, content_hash, source_index in zip(
+            ids, hashes, indices, strict=True
+        ):
+            records.append(
+                (str(dataset), str(example_id), str(content_hash), int(source_index))
+            )
+    return records
+
+
+def cohort_digest(prepare: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        [list(item) for item in selected_cohort_records(prepare)],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def observation_key(record: Mapping[str, Any]) -> tuple[str, str, str, int, int, str]:

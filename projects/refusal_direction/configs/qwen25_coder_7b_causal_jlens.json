@@ -31,6 +31,15 @@
   "source_dose_evaluation": "results/qwen25_coder_7b_dose/dose_followup_evaluation.json",
   "source_v1_lens": "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt",
   "source_v2_lens": "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt",
+  "source_v1_evaluation": "results/qwen25_coder_7b_jlens/jlens_evaluation.json",
+  "source_v2_evaluation": "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json",
+  "expected_prepare_sha256": "d5da5bb0e9dcd1f982ce3fbb748c0863057982d8cc4667b9ef68b7ba7ba17c1b",
+  "expected_cohort_digest": "734f6ba50e28bd9958dc733a68ef70d6e443b22872012b5d922be531fba097e1",
+  "expected_v1_evaluation_sha256": "6067ec0bd1dd1f0a42b9cf6cd27052800b5d6e0856d47d50984fcd085905a07a",
+  "expected_v2_evaluation_sha256": "dd0f73d9e47f7efa6138e9885f275828090f5e6461f56e8b7b422b379583f3de",
+  "expected_v1_run_id": "e23b9570-130e-4b9a-8000-fb91255b29d8",
+  "expected_v2_run_id": "e35026e6-43e1-4014-8022-f4055aa6a58f",
+  "expected_source_dose_run_id": "d76d0e7f-1e86-4953-8eac-de1c352708d2",
   "results_dir": "results/qwen25_coder_7b_causal_jlens",
   "artifacts_dir": "artifacts/qwen25_coder_7b_causal_jlens"
 }

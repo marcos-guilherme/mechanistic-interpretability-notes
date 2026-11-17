@@ -38,13 +38,22 @@ from .qwen_causal_jlens import (
     CAUSAL_JLENS_PROFILE,
     CONDITIONS,
     DATASETS,
+    FROZEN_COHORT_DIGEST,
+    FROZEN_PREPARE_SHA256,
+    FROZEN_SOURCE_DOSE_RUN_ID,
+    FROZEN_V1_EVALUATION_SHA256,
+    FROZEN_V1_RUN_ID,
+    FROZEN_V2_EVALUATION_SHA256,
+    FROZEN_V2_RUN_ID,
     LENS_VERSIONS,
     PRIMARY_LAYER,
+    PRODUCTION_DATASET_SIZE,
     READOUT_LAYERS,
     READOUT_STEPS,
     TEXT_LEAK_KEYS,
     aggregate_fidelity,
     cluster_bootstrap_difference,
+    cohort_digest,
     compact_contains_text_leak,
     observation_key,
     summarize_behavior_changes,
@@ -57,6 +66,7 @@ from .qwen_code_eval import (
 from .qwen_dose import EXPECTED_SOURCE_LAYER, EXPECTED_SOURCE_OFFSET, sha256_file
 from .qwen_jlens import (
     JLENS_UPSTREAM_COMMIT,
+    QWEN_MODEL,
     QWEN_REVISION,
     assert_jlens_contract,
     rank_one_based,
@@ -108,8 +118,6 @@ CHECKPOINT_FILENAME = "checkpoint.json"
 RESPONSES_FILENAME = "responses.jsonl"
 OBSERVATIONS_FILENAME = "observations.jsonl"
 PILOT_PROMPTS_PER_DATASET = 2
-CANONICAL_V1_EVALUATION = "results/qwen25_coder_7b_jlens/jlens_evaluation.json"
-CANONICAL_V2_EVALUATION = "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json"
 OBSERVATION_KEYS = (
     "dataset",
     "example_id",
@@ -164,12 +172,131 @@ def _require_config_contract(config: Mapping[str, Any]) -> None:
 
 
 def _canonical_evaluation_paths(root: Path, config: Mapping[str, Any]) -> dict[str, Path]:
+    missing = [
+        key
+        for key in ("source_v1_evaluation", "source_v2_evaluation")
+        if key not in config
+    ]
+    if missing:
+        raise ValueError(
+            "lens evaluation paths must be pinned in the causal profile: "
+            + ", ".join(missing)
+        )
     return {
-        "v1_evaluation": root
-        / str(config.get("source_v1_evaluation", CANONICAL_V1_EVALUATION)),
-        "v2_evaluation": root
-        / str(config.get("source_v2_evaluation", CANONICAL_V2_EVALUATION)),
+        "v1_evaluation": root / str(config["source_v1_evaluation"]),
+        "v2_evaluation": root / str(config["source_v2_evaluation"]),
     }
+
+
+def _required_pin(config: Mapping[str, Any], key: str, frozen: str) -> str:
+    if int(config["dataset_size"]) == PRODUCTION_DATASET_SIZE:
+        provided = config.get(key)
+        if provided is not None and str(provided) != frozen:
+            raise ValueError(f"{key} disagrees with frozen pin")
+        return frozen
+    value = config.get(key)
+    if not value:
+        raise ValueError(f"{key} missing for fixture contract")
+    return str(value)
+
+
+def _verify_frozen_prepare_pins(
+    *,
+    prepare_path: Path,
+    prepare: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> None:
+    expected_sha = _required_pin(config, "expected_prepare_sha256", FROZEN_PREPARE_SHA256)
+    expected_digest = _required_pin(
+        config, "expected_cohort_digest", FROZEN_COHORT_DIGEST
+    )
+    actual_sha = sha256_file(prepare_path)
+    if actual_sha != expected_sha:
+        raise ValueError("frozen prepare sha256 does not match")
+    actual_digest = cohort_digest(prepare)
+    if actual_digest != expected_digest:
+        raise ValueError("frozen cohort digest does not match")
+
+
+def _verify_one_lens_manifest(
+    *,
+    evaluation: Mapping[str, Any],
+    evaluation_path: Path,
+    lens_path: Path,
+    dose: Mapping[str, Any],
+    config: Mapping[str, Any],
+    version: str,
+    expected_sha: str,
+    expected_run_id: str,
+) -> None:
+    if evaluation.get("status") != STATUS_PASS:
+        raise ValueError(f"{version} lens evaluation status must be pass")
+    if str(evaluation.get("model_revision")) != QWEN_REVISION:
+        raise ValueError(f"{version} lens evaluation model revision mismatch")
+    model_name = evaluation.get("model_name")
+    if model_name is not None and str(model_name) != QWEN_MODEL:
+        raise ValueError(f"{version} lens evaluation model name mismatch")
+    if str(evaluation.get("jlens_upstream_commit")) != JLENS_UPSTREAM_COMMIT:
+        raise ValueError(f"{version} lens evaluation jlens commit mismatch")
+    dose_status = evaluation.get("source_dose_status")
+    if dose_status is not None and dose_status != STATUS_PASS:
+        raise ValueError(f"{version} lens evaluation source dose status must be pass")
+    expected_dose_run = (
+        FROZEN_SOURCE_DOSE_RUN_ID
+        if int(config["dataset_size"]) == PRODUCTION_DATASET_SIZE
+        else str(dose.get("run_id") or "")
+    )
+    eval_dose_run = evaluation.get("source_dose_run_id")
+    if eval_dose_run is not None and str(eval_dose_run) != expected_dose_run:
+        raise ValueError(f"{version} lens evaluation source dose run_id mismatch")
+    if str(evaluation.get("run_id")) != expected_run_id:
+        raise ValueError(f"frozen {version} run_id does not match")
+    if sha256_file(evaluation_path) != expected_sha:
+        raise ValueError(f"frozen evaluation sha256 does not match for {version}")
+    lens_hash = sha256_file(lens_path)
+    if str(evaluation.get("lens_sha256")) != lens_hash:
+        raise ValueError(f"{version} lens_sha256 does not match current lens artifact")
+
+
+def _verify_lens_manifest_provenance(
+    *,
+    root: Path,
+    config: Mapping[str, Any],
+    paths: Mapping[str, Path],
+    dose: Mapping[str, Any],
+) -> None:
+    evaluations = _canonical_evaluation_paths(root, config)
+    missing = [name for name, path in evaluations.items() if not path.is_file()]
+    if missing:
+        raise ValueError("canonical lens evaluation missing: " + ", ".join(missing))
+    expected_v1_sha = _required_pin(
+        config, "expected_v1_evaluation_sha256", FROZEN_V1_EVALUATION_SHA256
+    )
+    expected_v2_sha = _required_pin(
+        config, "expected_v2_evaluation_sha256", FROZEN_V2_EVALUATION_SHA256
+    )
+    expected_v1_run = _required_pin(config, "expected_v1_run_id", FROZEN_V1_RUN_ID)
+    expected_v2_run = _required_pin(config, "expected_v2_run_id", FROZEN_V2_RUN_ID)
+    _verify_one_lens_manifest(
+        evaluation=_read_json(evaluations["v1_evaluation"]),
+        evaluation_path=evaluations["v1_evaluation"],
+        lens_path=paths["v1_lens"],
+        dose=dose,
+        config=config,
+        version="v1",
+        expected_sha=expected_v1_sha,
+        expected_run_id=expected_v1_run,
+    )
+    _verify_one_lens_manifest(
+        evaluation=_read_json(evaluations["v2_evaluation"]),
+        evaluation_path=evaluations["v2_evaluation"],
+        lens_path=paths["v2_lens"],
+        dose=dose,
+        config=config,
+        version="v2",
+        expected_sha=expected_v2_sha,
+        expected_run_id=expected_v2_run,
+    )
 
 
 def _agreed_canonical_hash(*values: Any, name: str) -> str:
@@ -297,6 +424,17 @@ def source_context(
         raise ValueError("source dose coefficients do not match frozen coefficients")
     prepare = _read_json(paths["prepare"])
     _verify_prepare_frozen_identity(prepare, config)
+    _verify_frozen_prepare_pins(
+        prepare_path=paths["prepare"],
+        prepare=prepare,
+        config=config,
+    )
+    _verify_lens_manifest_provenance(
+        root=root,
+        config=config,
+        paths=paths,
+        dose=dose,
+    )
     current_hashes = {name: sha256_file(path) for name, path in paths.items()}
     _verify_canonical_source_hashes(
         root=root,
