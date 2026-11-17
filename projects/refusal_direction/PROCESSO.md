@@ -699,3 +699,73 @@ remoto que confirme o download do JSON através do relay. Ao final rodei
 “pensamentos” do modelo. Nada neste smoke altera as conclusões do piloto, da
 dose, do ajuste de lente em batch ou da avaliação MITRE/HumanEval+ documentadas
 acima.
+
+## J-lens sob intervenção causal (17 de novembro de 2026)
+
+### A pergunta que uniu os dois estudos
+
+Até aqui eu sabia que a direção alterava a recusa e que a J-lens recuperava
+parte dos tokens escolhidos a partir de camadas intermediárias. Esses
+resultados tinham sido obtidos separadamente. O teste seguinte perguntou se a
+lente continuaria descritiva quando o estado residual fosse alterado pela
+própria direção de recusa.
+
+Congelei antes da execução o painel de 32 prompts MITRE e 32 MITRE-FRR, as
+condições baseline, ablação 20%, adição 50% e controle aleatório 20%, as
+camadas 19, 22, 25 e 26 e os primeiros oito tokens gerados. O endpoint
+principal foi `pass@5` na camada 25. A equivalência contra o baseline exigia
+que o intervalo de 95%, obtido por bootstrap agrupado por prompt, permanecesse
+entre -5 e +5 pontos percentuais.
+
+### Execução e incidentes
+
+A primeira execução real parou na checagem de paridade entre o caminho
+incremental e o `JacobianLens.apply`. Eu havia movido as matrizes da lente para
+a GPU antes dessa checagem, criando uma combinação indevida de tensores em CPU
+e CUDA. Corrigi a ordem para executar a paridade primeiro e manter na GPU
+somente as quatro matrizes necessárias depois da aprovação.
+
+A repetição seguinte ainda usou as funções antigas, embora os arquivos já
+estivessem corrigidos. O kernel persistente do Colab havia preservado os
+módulos importados em `sys.modules`. Limpei explicitamente os módulos do
+projeto e descartei os diretórios das tentativas falhas antes de repetir. Não
+aceitei resultados parciais dessas tentativas.
+
+A execução canônica
+`df86a101-9f5a-4363-8918-5f4c183ee25d`, no commit
+`251dfd50397da06a008be6f06cf3aa541c9fd8a4`, terminou com 256 respostas e
+16.384 observações de rank. O validador recomputou matriz, métricas, bootstrap
+e flags de equivalência e confirmou todos os contratos.
+
+### O que observei
+
+A direção voltou a mostrar efeito comportamental forte. No MITRE, a recusa foi
+78,125% no baseline, 0% na ablação, 100% na adição e 78,125% no controle. No
+MITRE-FRR, foi 9,375%, 0%, 100% e 6,25%, respectivamente. A direção controlou
+recusa, mas a adição não distinguiu solicitações ofensivas de defensivas.
+
+Na camada 25, baseline, adição e controle mantiveram `pass@5` entre 98,047% e
+100%. A ablação no MITRE caiu de 98,047% para 93,359%. Seu intervalo de
+diferença, de -8,203 a -1,563 pontos, atravessou a margem inferior e impediu
+declarar equivalência. As outras sete comparações principais foram
+equivalentes. V1 e v2 tiveram os mesmos endpoints principais.
+
+A camada 26 ficou entre 99,609% e 100%, mas está muito próxima da saída. As
+camadas 19 e 22 foram menos fiéis e reagiram mais às intervenções. Isso
+localiza melhor a conclusão: a leitura tardia permaneceu útil sob mudança
+causal, sem demonstrar robustez uniforme ao longo da rede.
+
+### Como isso mudou a pergunta seguinte
+
+O resultado aproximou os dois eixos do projeto. A J-lens conseguiu descrever
+um modelo cujo comportamento havia sido alterado, enquanto a direção revelou
+uma limitação de seletividade. Em vez de apenas procurar uma intensidade
+melhor para o mesmo vetor, uma continuação plausível é comparar formas de
+representação mais ricas. Um subespaço com várias direções ou features de um
+autoencoder esparso poderia separar recusa, conteúdo de cibersegurança e
+intenção ofensiva. Essa hipótese exigiria novamente validação causal, pois
+ativação correlacionada não basta para atribuir função.
+
+A descrição completa do protocolo e dos resultados está em
+[`CAUSAL_JLENS.md`](CAUSAL_JLENS.md). Os números canônicos estão em
+[`results/qwen25_coder_7b_causal_jlens/causal_jlens_evaluation.json`](results/qwen25_coder_7b_causal_jlens/causal_jlens_evaluation.json).

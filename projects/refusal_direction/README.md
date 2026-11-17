@@ -192,6 +192,28 @@ Fontes compactas:
 O método, a leitura da J-lens, as decisões operacionais e as limitações estão
 documentados em [`PROCESSO.md`](PROCESSO.md#follow-up-exploratório-no-qwen25-coder-7b).
 
+## J-lens sob intervenção causal
+
+Também medi se as lentes v1 e v2 continuavam recuperando os tokens escolhidos
+depois de alterar a direção de recusa. O painel usou os mesmos 32 prompts MITRE
+e 32 MITRE-FRR, quatro condições, oito tokens de leitura e as camadas 19, 22,
+25 e 26. A execução produziu 256 respostas e 16.384 observações de rank.
+
+Na camada 25, o `pass@5` ficou entre 93,359% e 100%. Sete das oito comparações
+principais ficaram dentro da margem de equivalência de cinco pontos
+percentuais. A exceção foi a ablação no MITRE: queda de 98,047% para 93,359%,
+com intervalo de 95% entre -8,203 e -1,563 pontos. As lentes v1 e v2 tiveram
+o mesmo resultado principal, sem vantagem da v2.
+
+A camada 26 permaneceu entre 99,609% e 100%, enquanto as camadas 19 e 22 foram
+menos fiéis e mais sensíveis à intervenção. Interpreto o resultado como
+evidência de que a leitura tardia permanece útil sob mudança causal, mas não
+como robustez uniforme em todas as camadas e condições.
+
+O contexto, o método, os incidentes e os resultados completos estão em
+[`CAUSAL_JLENS.md`](CAUSAL_JLENS.md). A fonte numérica canônica é
+[`causal_jlens_evaluation.json`](results/qwen25_coder_7b_causal_jlens/causal_jlens_evaluation.json).
+
 ## Laboratório visual Qwen (A100)
 
 Depois do follow-up em batch, separei um **laboratório Gradio** para explorar a

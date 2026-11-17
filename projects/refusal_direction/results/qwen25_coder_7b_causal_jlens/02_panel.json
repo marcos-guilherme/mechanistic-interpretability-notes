@@ -1,0 +1,100 @@
+{
+  "config": {
+    "ablation_coefficient": 0.2,
+    "addition_coefficient": 0.5,
+    "artifacts_dir": "artifacts/qwen25_coder_7b_causal_jlens",
+    "batch_size": 1,
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 2028,
+    "conditions": [
+      "baseline",
+      "ablation",
+      "addition",
+      "random_control"
+    ],
+    "dataset_size": 32,
+    "datasets": [
+      "mitre",
+      "mitre_frr"
+    ],
+    "dtype": "bfloat16",
+    "eos_token_id": 151645,
+    "equivalence_margin": 0.05,
+    "expected_cohort_digest": "734f6ba50e28bd9958dc733a68ef70d6e443b22872012b5d922be531fba097e1",
+    "expected_prepare_sha256": "d5da5bb0e9dcd1f982ce3fbb748c0863057982d8cc4667b9ef68b7ba7ba17c1b",
+    "expected_source_dose_run_id": "d76d0e7f-1e86-4953-8eac-de1c352708d2",
+    "expected_v1_evaluation_sha256": "6067ec0bd1dd1f0a42b9cf6cd27052800b5d6e0856d47d50984fcd085905a07a",
+    "expected_v1_run_id": "e23b9570-130e-4b9a-8000-fb91255b29d8",
+    "expected_v2_evaluation_sha256": "dd0f73d9e47f7efa6138e9885f275828090f5e6461f56e8b7b422b379583f3de",
+    "expected_v2_run_id": "e35026e6-43e1-4014-8022-f4055aa6a58f",
+    "format_style": "chat_template",
+    "jlens_upstream": "anthropics/jacobian-lens",
+    "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+    "max_new_tokens": 64,
+    "mitre_frr_relative_path": "CybersecurityBenchmarks/datasets/mitre_frr/mitre_frr.json",
+    "mitre_relative_path": "CybersecurityBenchmarks/datasets/mitre/mitre_benchmark_100_per_category_with_augmentation.json",
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "primary_k": 5,
+    "primary_layer": 25,
+    "purplellama_repository": "meta-llama/PurpleLlama",
+    "purplellama_revision": "0654501399e7cbd560db9501965dc09c567a5563",
+    "random_control_coefficient": 0.2,
+    "random_control_seed": 1042,
+    "readout_layers": [
+      19,
+      22,
+      25,
+      26
+    ],
+    "readout_steps": 8,
+    "results_dir": "results/qwen25_coder_7b_causal_jlens",
+    "seed": 42,
+    "source_direction": "artifacts/qwen25_coder_7b/selected_direction.pt",
+    "source_dose_evaluation": "results/qwen25_coder_7b_dose/dose_followup_evaluation.json",
+    "source_prepare": "results/qwen25_coder_7b_code_eval/00_prepare.json",
+    "source_v1_evaluation": "results/qwen25_coder_7b_jlens/jlens_evaluation.json",
+    "source_v1_lens": "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt",
+    "source_v2_evaluation": "results/qwen25_coder_7b_jlens_v2/jlens_evaluation.json",
+    "source_v2_lens": "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt"
+  },
+  "experiment": "causal_jlens_panel",
+  "provenance": {
+    "cohort_digest": "734f6ba50e28bd9958dc733a68ef70d6e443b22872012b5d922be531fba097e1",
+    "config_sha256": "bd59526c9fc9c072bba6624ea1866fb013bfbad7293adff8fc6c552930f7649f",
+    "direction_layer": 18,
+    "direction_offset": -1,
+    "eos_token_id": 151645,
+    "implementation_commit": "251dfd50397da06a008be6f06cf3aa541c9fd8a4",
+    "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",
+    "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "purplellama_revision": "0654501399e7cbd560db9501965dc09c567a5563",
+    "requested_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "resolved_model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+    "run_id": "df86a101-9f5a-4363-8918-5f4c183ee25d",
+    "source_artifact_hashes": {
+      "direction": "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
+      "dose_evaluation": "6c49a775ebbe9a3ca7c18b80ab54ada064caa759d2fadcdb69b942f79f7d3986",
+      "prepare": "d5da5bb0e9dcd1f982ce3fbb748c0863057982d8cc4667b9ef68b7ba7ba17c1b",
+      "v1_lens": "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e",
+      "v2_lens": "b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a"
+    },
+    "source_dose_run_id": "d76d0e7f-1e86-4953-8eac-de1c352708d2"
+  },
+  "results": {
+    "conditions": [
+      "baseline",
+      "ablation",
+      "addition",
+      "random_control"
+    ],
+    "matrix_size": 256,
+    "observation_count": 16384,
+    "response_count": 256,
+    "terminal_reasons": {
+      "eos": 119,
+      "max_tokens": 137
+    }
+  },
+  "schema_version": 1
+}
