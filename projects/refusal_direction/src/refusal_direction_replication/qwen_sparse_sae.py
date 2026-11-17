@@ -36,32 +36,68 @@ class TopKSparseAutoencoder(nn.Module):
         centered = x - self.decoder.bias
         return F.relu(self.encoder(centered))
 
-    def encode_with_support(
-        self,
-        x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Encode and expose indices/support using a deterministic tie policy.
+    def _topk_indices(self, pre: torch.Tensor) -> torch.Tensor:
+        """Select TopK, resolving only boundary-tie rows by lower index."""
+        if self.k == self.d_sae:
+            return torch.arange(
+                self.d_sae,
+                device=pre.device,
+                dtype=torch.long,
+            ).expand(*pre.shape[:-1], self.d_sae)
 
-        Features are ordered by descending pre-activation. Equal values prefer
-        the lower feature index, including all-zero rows. Support records the
-        selected TopK positions even when a selected activation value is zero.
-        """
-        pre = self.pre_activations(x)
-        indices = torch.argsort(
+        probe_values, probe_indices = torch.topk(
             pre,
+            k=self.k + 1,
             dim=-1,
-            descending=True,
-            stable=True,
-        )[..., : self.k]
+            sorted=True,
+        )
+        indices = probe_indices[..., : self.k].clone()
+        boundary_ties = probe_values[..., self.k - 1].eq(
+            probe_values[..., self.k]
+        )
+        for row_index in boundary_ties.nonzero(as_tuple=False).flatten().tolist():
+            row = pre[row_index]
+            threshold = probe_values[row_index, self.k - 1]
+            above = (row > threshold).nonzero(as_tuple=False).flatten()
+            equal = (row == threshold).nonzero(as_tuple=False).flatten()
+            selected = torch.cat(
+                (above, equal[: self.k - int(above.numel())])
+            )
+            selected_values = row.gather(0, selected)
+            order = torch.argsort(
+                selected_values,
+                descending=True,
+                stable=True,
+            )
+            indices[row_index] = selected.gather(0, order)
+        return indices
+
+    def _encode_pre_activations(
+        self,
+        pre: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        indices = self._topk_indices(pre)
         values = pre.gather(-1, indices)
         encoded = torch.zeros_like(pre)
         encoded.scatter_(-1, indices, values)
-        support = torch.zeros_like(pre, dtype=torch.bool)
-        support.scatter_(-1, indices, True)
-        return encoded, indices, support
+        return encoded, indices
+
+    def encode_with_indices(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode and return compact indices using a deterministic tie policy.
+
+        The normal path uses ``torch.topk``. Only rows tied across the kth
+        boundary are repaired, preferring lower feature indices. The compact
+        indices retain selected zero values for dead-feature tracking.
+        """
+        pre = self.pre_activations(x)
+        return self._encode_pre_activations(pre)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        encoded, _, _ = self.encode_with_support(x)
+        pre = self.pre_activations(x)
+        encoded, _ = self._encode_pre_activations(pre)
         return encoded
 
     def decode(self, encoded: torch.Tensor) -> torch.Tensor:
@@ -89,14 +125,15 @@ def sae_loss(
     """Return the reconstruction plus dead-latent auxiliary loss."""
     if dead_mask.shape != (sae.d_sae,) or dead_mask.dtype != torch.bool:
         raise ValueError("dead_mask must be a boolean tensor of shape [d_sae]")
-    reconstructed, encoded = sae(x)
+    pre = sae.pre_activations(x)
+    encoded, selected_indices = sae._encode_pre_activations(pre)
+    reconstructed = sae.decode(encoded)
     residual = x - reconstructed
     mse = residual.square().mean()
     dead_count = int(dead_mask.sum().item())
     if dead_count == 0:
         aux = mse.new_zeros(())
     else:
-        pre = sae.pre_activations(x)
         dead_pre = pre.masked_fill(
             ~dead_mask.unsqueeze(0),
             float("-inf"),
@@ -119,6 +156,7 @@ def sae_loss(
         "mse": mse.detach(),
         "aux": aux.detach(),
         "l0": encoded.ne(0).sum(-1).float().mean(),
+        "selected_indices": selected_indices.detach(),
     }
 
 
@@ -187,7 +225,7 @@ def evaluate_sae_quality(
             if batch.shape[0] == 0:
                 continue
             x = batch.to(device=device)
-            encoded, _, support = sae.encode_with_support(x)
+            encoded, selected_indices = sae.encode_with_indices(x)
             reconstructed = sae.decode(encoded)
             nonfinite_count += int((~torch.isfinite(x)).sum().item())
             nonfinite_count += int(
@@ -214,7 +252,7 @@ def evaluate_sae_quality(
             norm_sum += float(
                 torch.linalg.vector_norm(clean_x, dim=-1).sum().item()
             )
-            active_features |= support.any(dim=0).cpu()
+            active_features[selected_indices.reshape(-1).cpu()] = True
     finally:
         sae.train(was_training)
 

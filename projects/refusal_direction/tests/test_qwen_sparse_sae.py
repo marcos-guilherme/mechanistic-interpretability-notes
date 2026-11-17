@@ -26,17 +26,17 @@ def test_topk_sae_keeps_exactly_k_positive_features() -> None:
     assert torch.all(encoded >= 0)
 
 
-def test_topk_support_tracks_selected_zero_values() -> None:
+def test_topk_indices_track_selected_zero_values_compactly() -> None:
     sae = TopKSparseAutoencoder(d_in=2, d_sae=4, k=2)
     with torch.no_grad():
         sae.encoder.weight.zero_()
         sae.encoder.bias.zero_()
         sae.decoder.bias.zero_()
 
-    encoded, indices, support = sae.encode_with_support(torch.zeros(1, 2))
+    encoded, indices = sae.encode_with_indices(torch.zeros(3, 2))
 
-    assert indices.tolist() == [[0, 1]]
-    assert support.tolist() == [[True, True, False, False]]
+    assert indices.shape == (3, 2)
+    assert indices.tolist() == [[0, 1], [0, 1], [0, 1]]
     assert torch.count_nonzero(encoded).item() == 0
 
 
@@ -49,11 +49,24 @@ def test_topk_boundary_tie_prefers_lower_feature_index() -> None:
         sae.encoder.bias.zero_()
         sae.decoder.bias.zero_()
 
-    encoded, indices, support = sae.encode_with_support(torch.ones(1, 1))
+    encoded, indices = sae.encode_with_indices(torch.ones(1, 1))
 
     assert indices.tolist() == [[0, 1]]
-    assert support.tolist() == [[True, True, False, False]]
     assert encoded.tolist() == [[3.0, 2.0, 0.0, 0.0]]
+
+
+def test_ordinary_encode_does_not_request_tracking_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sae = TopKSparseAutoencoder(d_in=2, d_sae=4, k=2)
+
+    def fail_if_requested(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        del x
+        raise AssertionError("ordinary encode requested tracking indices")
+
+    monkeypatch.setattr(sae, "encode_with_indices", fail_if_requested)
+
+    assert sae.encode(torch.ones(2, 2)).shape == (2, 4)
 
 
 def test_decoder_columns_remain_unit_norm() -> None:
@@ -78,6 +91,28 @@ def test_sae_loss_handles_no_dead_features() -> None:
     assert torch.isfinite(total)
     assert metrics["aux"].item() == 0.0
     assert metrics["l0"].item() <= 2.0
+
+
+def test_sae_loss_computes_preactivations_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sae = TopKSparseAutoencoder(d_in=4, d_sae=8, k=2)
+    original = sae.pre_activations
+    calls = 0
+
+    def count_calls(x: torch.Tensor) -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        return original(x)
+
+    monkeypatch.setattr(sae, "pre_activations", count_calls)
+    sae_loss(
+        sae,
+        torch.randn(3, 4),
+        torch.ones(8, dtype=torch.bool),
+    )
+
+    assert calls == 1
 
 
 def test_decoder_gradient_projection_removes_parallel_component() -> None:

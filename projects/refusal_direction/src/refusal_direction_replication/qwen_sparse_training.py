@@ -375,32 +375,29 @@ def train_sae_stream(
             tokens_seen - last_activation_token
             >= config.dead_feature_window_tokens
         )
-        with torch.no_grad():
-            _, _, support = sae.encode_with_support(x)
-            token_rows = torch.arange(
-                1,
-                x.shape[0] + 1,
-                device=device,
-                dtype=torch.long,
-            ).unsqueeze(1)
-            last_selected_row = torch.where(
-                support,
-                token_rows,
-                torch.zeros_like(token_rows),
-            ).amax(dim=0)
         optimizer.zero_grad(set_to_none=True)
-        loss, _ = sae_loss(sae, x, dead_mask)
+        loss, metrics = sae_loss(sae, x, dead_mask)
+        selected_indices = metrics["selected_indices"]
         loss.backward()
         remove_parallel_decoder_grad_(sae)
         optimizer.step()
         sae.renormalize_decoder_()
 
+        batch_start_token = tokens_seen
         tokens_seen += int(x.shape[0])
         batch_index = stream_index + 1
-        selected = last_selected_row.ne(0)
-        batch_start_token = tokens_seen - int(x.shape[0])
-        last_activation_token[selected] = (
-            batch_start_token + last_selected_row[selected]
+        token_positions = torch.arange(
+            batch_start_token + 1,
+            tokens_seen + 1,
+            device=device,
+            dtype=torch.long,
+        ).unsqueeze(1).expand_as(selected_indices)
+        last_activation_token.scatter_reduce_(
+            0,
+            selected_indices.reshape(-1),
+            token_positions.reshape(-1),
+            reduce="amax",
+            include_self=True,
         )
         if tokens_seen >= next_checkpoint_tokens:
             last_checkpoint_path = _write_checkpoint(
