@@ -36,16 +36,32 @@ class TopKSparseAutoencoder(nn.Module):
         centered = x - self.decoder.bias
         return F.relu(self.encoder(centered))
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_with_support(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode and expose indices/support using a deterministic tie policy.
+
+        Features are ordered by descending pre-activation. Equal values prefer
+        the lower feature index, including all-zero rows. Support records the
+        selected TopK positions even when a selected activation value is zero.
+        """
         pre = self.pre_activations(x)
-        values, indices = torch.topk(
+        indices = torch.argsort(
             pre,
-            k=self.k,
             dim=-1,
-            sorted=False,
-        )
+            descending=True,
+            stable=True,
+        )[..., : self.k]
+        values = pre.gather(-1, indices)
         encoded = torch.zeros_like(pre)
         encoded.scatter_(-1, indices, values)
+        support = torch.zeros_like(pre, dtype=torch.bool)
+        support.scatter_(-1, indices, True)
+        return encoded, indices, support
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        encoded, _, _ = self.encode_with_support(x)
         return encoded
 
     def decode(self, encoded: torch.Tensor) -> torch.Tensor:
@@ -171,7 +187,8 @@ def evaluate_sae_quality(
             if batch.shape[0] == 0:
                 continue
             x = batch.to(device=device)
-            reconstructed, encoded = sae(x)
+            encoded, _, support = sae.encode_with_support(x)
+            reconstructed = sae.decode(encoded)
             nonfinite_count += int((~torch.isfinite(x)).sum().item())
             nonfinite_count += int(
                 (~torch.isfinite(reconstructed)).sum().item()
@@ -197,7 +214,7 @@ def evaluate_sae_quality(
             norm_sum += float(
                 torch.linalg.vector_norm(clean_x, dim=-1).sum().item()
             )
-            active_features |= encoded.ne(0).any(dim=0).cpu()
+            active_features |= support.any(dim=0).cpu()
     finally:
         sae.train(was_training)
 

@@ -287,6 +287,18 @@ def _restore_rng_state(checkpoint: SparseTrainingCheckpoint) -> None:
         torch.cuda.set_rng_state_all(checkpoint.cuda_rng_state)
 
 
+def _validate_activation_batch(
+    activation_batch: ActivationBatch,
+    d_in: int,
+) -> torch.Tensor:
+    x = activation_batch.activations
+    if x.ndim != 2 or x.shape[1] != d_in:
+        raise ValueError(f"activation batch shape must be [tokens, {d_in}]")
+    if x.shape[0] == 0:
+        raise ValueError("activation batch must contain at least one token")
+    return x
+
+
 def train_sae_stream(
     sae: TopKSparseAutoencoder,
     batches: Iterable[ActivationBatch],
@@ -306,6 +318,8 @@ def train_sae_stream(
     )
     tokens_seen = 0
     batch_index = 0
+    resume_batch_index = 0
+    resume_tokens_seen = 0
     last_activation_token = torch.zeros(
         sae.d_sae,
         dtype=torch.long,
@@ -328,6 +342,8 @@ def train_sae_stream(
         _move_optimizer_state_(optimizer, device)
         tokens_seen = checkpoint.tokens_seen
         batch_index = checkpoint.batch_index
+        resume_batch_index = checkpoint.batch_index
+        resume_tokens_seen = checkpoint.tokens_seen
         last_activation_token = checkpoint.last_activation_token.to(
             device=device,
             dtype=torch.long,
@@ -338,23 +354,40 @@ def train_sae_stream(
         (tokens_seen // config.checkpoint_every_tokens) + 1
     ) * config.checkpoint_every_tokens
     last_checkpoint_path: Path | None = None
+    skipped_batches = 0
+    skipped_tokens = 0
     for stream_index, activation_batch in enumerate(batches):
-        if stream_index < batch_index:
+        x = _validate_activation_batch(activation_batch, sae.d_in)
+        if stream_index < resume_batch_index:
+            skipped_batches += 1
+            skipped_tokens += int(x.shape[0])
+            if (
+                skipped_batches == resume_batch_index
+                and skipped_tokens != resume_tokens_seen
+            ):
+                raise ValueError(
+                    "resume prefix tokens_seen mismatch: "
+                    f"{skipped_tokens} != {resume_tokens_seen}"
+                )
             continue
-        x = activation_batch.activations
-        if x.ndim != 2 or x.shape[1] != sae.d_in:
-            raise ValueError(
-                f"activation batch shape must be [tokens, {sae.d_in}]"
-            )
-        if x.shape[0] == 0:
-            raise ValueError("activation batch must contain at least one token")
         x = x.to(device=device, dtype=sae.decoder.weight.dtype)
         dead_mask = (
             tokens_seen - last_activation_token
             >= config.dead_feature_window_tokens
         )
         with torch.no_grad():
-            fired = sae.encode(x).ne(0).any(dim=0)
+            _, _, support = sae.encode_with_support(x)
+            token_rows = torch.arange(
+                1,
+                x.shape[0] + 1,
+                device=device,
+                dtype=torch.long,
+            ).unsqueeze(1)
+            last_selected_row = torch.where(
+                support,
+                token_rows,
+                torch.zeros_like(token_rows),
+            ).amax(dim=0)
         optimizer.zero_grad(set_to_none=True)
         loss, _ = sae_loss(sae, x, dead_mask)
         loss.backward()
@@ -364,7 +397,11 @@ def train_sae_stream(
 
         tokens_seen += int(x.shape[0])
         batch_index = stream_index + 1
-        last_activation_token[fired] = tokens_seen
+        selected = last_selected_row.ne(0)
+        batch_start_token = tokens_seen - int(x.shape[0])
+        last_activation_token[selected] = (
+            batch_start_token + last_selected_row[selected]
+        )
         if tokens_seen >= next_checkpoint_tokens:
             last_checkpoint_path = _write_checkpoint(
                 sae,
@@ -378,6 +415,16 @@ def train_sae_stream(
             while tokens_seen >= next_checkpoint_tokens:
                 next_checkpoint_tokens += config.checkpoint_every_tokens
 
+    if skipped_batches != resume_batch_index:
+        raise ValueError(
+            "truncated resume prefix: "
+            f"{skipped_batches} batches != {resume_batch_index}"
+        )
+    if skipped_tokens != resume_tokens_seen:
+        raise ValueError(
+            "resume prefix tokens_seen mismatch: "
+            f"{skipped_tokens} != {resume_tokens_seen}"
+        )
     final_path = _write_checkpoint(
         sae,
         optimizer,

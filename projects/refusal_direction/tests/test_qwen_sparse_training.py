@@ -94,6 +94,90 @@ def test_checkpoint_resume_reproduces_uninterrupted_weights(
     torch.testing.assert_close(torch.random.get_rng_state(), full_torch_state)
 
 
+def test_resume_validates_skipped_prefix_batch_shape(tmp_path: Path) -> None:
+    batches = deterministic_batches(seed=17, count=3, d_in=4)
+    partial = train_sae_stream(
+        TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+        batches[:2],
+        tiny_config(),
+        tmp_path / "partial-shape",
+    )
+    mismatched = [
+        ActivationBatch(torch.ones(5, 5)),
+        *batches[1:],
+    ]
+
+    with pytest.raises(ValueError, match="shape"):
+        train_sae_stream(
+            TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+            mismatched,
+            tiny_config(),
+            tmp_path / "resume-shape",
+            resume_from=partial.checkpoint_path,
+        )
+
+
+def test_resume_rejects_truncated_prefix(tmp_path: Path) -> None:
+    batches = deterministic_batches(seed=23, count=3, d_in=4)
+    partial = train_sae_stream(
+        TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+        batches[:2],
+        tiny_config(),
+        tmp_path / "partial-truncated",
+    )
+
+    with pytest.raises(ValueError, match="truncated resume prefix"):
+        train_sae_stream(
+            TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+            batches[:1],
+            tiny_config(),
+            tmp_path / "resume-truncated",
+            resume_from=partial.checkpoint_path,
+        )
+
+
+def test_resume_rejects_prefix_token_mismatch(tmp_path: Path) -> None:
+    batches = deterministic_batches(seed=29, count=3, d_in=4)
+    partial = train_sae_stream(
+        TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+        batches[:2],
+        tiny_config(),
+        tmp_path / "partial-tokens",
+    )
+    mismatched = [
+        ActivationBatch(torch.ones(4, 4)),
+        batches[1],
+        batches[2],
+    ]
+
+    with pytest.raises(ValueError, match="tokens_seen"):
+        train_sae_stream(
+            TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+            mismatched,
+            tiny_config(),
+            tmp_path / "resume-tokens",
+            resume_from=partial.checkpoint_path,
+        )
+
+
+def test_dead_feature_timestamps_use_last_selected_token(tmp_path: Path) -> None:
+    sae = TopKSparseAutoencoder(d_in=1, d_sae=4, k=2)
+    with torch.no_grad():
+        sae.encoder.weight.copy_(
+            torch.tensor([[1.0], [-1.0], [0.0], [0.0]])
+        )
+        sae.encoder.bias.copy_(torch.tensor([0.0, 0.0, 1.0, 0.0]))
+        sae.decoder.bias.zero_()
+    result = train_sae_stream(
+        sae,
+        [ActivationBatch(torch.tensor([[2.0], [-2.0], [0.0]]))],
+        tiny_config(),
+        tmp_path / "timestamps",
+    )
+
+    assert result.last_activation_token.tolist() == [3, 2, 3, 0]
+
+
 def test_checkpoint_rejects_changed_and_partial_identity(tmp_path: Path) -> None:
     checkpoint = train_sae_stream(
         TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
@@ -154,3 +238,26 @@ def test_training_rejects_wrong_activation_width(tmp_path: Path) -> None:
             tiny_config(),
             tmp_path,
         )
+
+
+def test_atomic_checkpoint_cleanup_removes_partial_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_dir = tmp_path / "failed-save"
+
+    def fail_after_partial_write(payload: object, path: Path) -> None:
+        del payload
+        Path(path).write_bytes(b"partial")
+        raise OSError("forced save failure")
+
+    monkeypatch.setattr(torch, "save", fail_after_partial_write)
+    with pytest.raises(OSError, match="forced save failure"):
+        train_sae_stream(
+            TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+            deterministic_batches(seed=31, count=1, d_in=4),
+            tiny_config(),
+            checkpoint_dir,
+        )
+
+    assert list(checkpoint_dir.iterdir()) == []

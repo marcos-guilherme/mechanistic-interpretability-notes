@@ -26,6 +26,36 @@ def test_topk_sae_keeps_exactly_k_positive_features() -> None:
     assert torch.all(encoded >= 0)
 
 
+def test_topk_support_tracks_selected_zero_values() -> None:
+    sae = TopKSparseAutoencoder(d_in=2, d_sae=4, k=2)
+    with torch.no_grad():
+        sae.encoder.weight.zero_()
+        sae.encoder.bias.zero_()
+        sae.decoder.bias.zero_()
+
+    encoded, indices, support = sae.encode_with_support(torch.zeros(1, 2))
+
+    assert indices.tolist() == [[0, 1]]
+    assert support.tolist() == [[True, True, False, False]]
+    assert torch.count_nonzero(encoded).item() == 0
+
+
+def test_topk_boundary_tie_prefers_lower_feature_index() -> None:
+    sae = TopKSparseAutoencoder(d_in=1, d_sae=4, k=2)
+    with torch.no_grad():
+        sae.encoder.weight.copy_(
+            torch.tensor([[3.0], [2.0], [2.0], [1.0]])
+        )
+        sae.encoder.bias.zero_()
+        sae.decoder.bias.zero_()
+
+    encoded, indices, support = sae.encode_with_support(torch.ones(1, 1))
+
+    assert indices.tolist() == [[0, 1]]
+    assert support.tolist() == [[True, True, False, False]]
+    assert encoded.tolist() == [[3.0, 2.0, 0.0, 0.0]]
+
+
 def test_decoder_columns_remain_unit_norm() -> None:
     sae = TopKSparseAutoencoder(d_in=4, d_sae=8, k=2)
     with torch.no_grad():
