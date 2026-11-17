@@ -36,8 +36,13 @@ troca automática da lente usada nas intervenções já documentadas.
 ## Probe e seleção do `fit_count`
 
 Antes do ajuste longo, o pipeline mede tempo por amostra com `dim_batch` da
-ordem de probe (32, 16, 8) e escolhe o maior candidato em
+ordem de probe (32, 16, 8, 4, 2, 1) e escolhe o maior candidato em
 `fit_count_candidates` cuja projeção total caiba em `max_projected_hours` (12).
+
+Na primeira execução real, em 17 de novembro de 2026, os lotes 32, 16 e 8
+esgotaram a memória de uma A100 de 80 GB antes do ajuste. Por isso, a ordem foi
+estendida até 1. A mudança reduz o pico de memória sem alterar os exemplos nem
+o cálculo; o custo é processar as dimensões da Jacobiana em mais etapas.
 
 O valor escolhido fica gravado no checkpoint remoto (`fit_count`, `n_done`,
 `next_idx`, somas de Jacobiano por camada fonte). A comparação v2 versus v1 no

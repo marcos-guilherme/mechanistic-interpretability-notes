@@ -33,7 +33,6 @@ from .qwen_jlens import (
     DATASET_REPO_ID,
     DATASET_REVISION,
     DATASET_SPLIT,
-    DIM_BATCH_PROBE_ORDER,
     EXPECTED_D_MODEL,
     EXPECTED_N_LAYERS,
     EXPECTED_SOURCE_LAYERS,
@@ -49,6 +48,7 @@ from .qwen_jlens import (
     SKIP_FIRST,
     SOURCE_DOSE_RUN_ID,
     V2_FINAL_LENS_FILENAME,
+    V2_DIM_BATCH_PROBE_ORDER,
     V2_FIT_COUNT_CANDIDATES,
     V2_HOLDOUT_COUNT,
     V2_MAX_FIT_COUNT,
@@ -410,7 +410,7 @@ def _check_profile(config: Mapping[str, Any]) -> None:
     )
     _require(
         [int(v) for v in config.get("dim_batch_probe_order") or []]
-        == list(DIM_BATCH_PROBE_ORDER),
+        == list(V2_DIM_BATCH_PROBE_ORDER),
         "profile dim_batch_probe_order differs from the canonical order",
     )
     _require(

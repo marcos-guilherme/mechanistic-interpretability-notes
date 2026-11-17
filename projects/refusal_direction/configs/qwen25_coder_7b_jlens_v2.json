@@ -13,7 +13,7 @@
   "holdout_count": 200,
   "fit_count_candidates": [100, 150, 200, 250, 300, 400, 600, 800],
   "max_fit_count": 800,
-  "dim_batch_probe_order": [32, 16, 8],
+  "dim_batch_probe_order": [32, 16, 8, 4, 2, 1],
   "max_projected_hours": 12,
   "jlens_upstream": "anthropics/jacobian-lens",
   "jlens_upstream_commit": "581d398613e5602a5af361e1c34d3a92ea82ba8e",

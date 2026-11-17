@@ -61,6 +61,7 @@ V2_HOLDOUT_COUNT = 200
 V2_FIT_COUNT_CANDIDATES = [100, 150, 200, 250, 300, 400, 600, 800]
 V2_MAX_FIT_COUNT = 800
 DIM_BATCH_PROBE_ORDER = [32, 16, 8]
+V2_DIM_BATCH_PROBE_ORDER = [32, 16, 8, 4, 2, 1]
 MAX_PROJECTED_SECONDS = 12 * 3600
 CHECKPOINT_FILENAME = "jlens_fit_checkpoint.pt"
 FINAL_LENS_FILENAME = "qwen25_coder_7b_jacobian_lens.pt"
@@ -645,7 +646,7 @@ def validate_checkpoint_structure(
         raise ValueError(f"checkpoint n_done {n_done} outside 0..{selected_fit_count}")
     if "dim_batch" not in payload:
         raise ValueError("checkpoint is missing dim_batch")
-    if int(payload["dim_batch"]) not in DIM_BATCH_PROBE_ORDER:
+    if int(payload["dim_batch"]) not in V2_DIM_BATCH_PROBE_ORDER:
         raise ValueError(f"checkpoint dim_batch {payload['dim_batch']!r} is invalid")
     sums = payload.get("jacobian_sum")
     if not isinstance(sums, dict) or not sums:
