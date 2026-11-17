@@ -30,6 +30,7 @@ from refusal_direction_replication.qwen_colab_transport import (
     optional_local_jlens_v2_checkpoint,
     optional_local_jlens_v2_resume_bundle,
     pack_qwen_jlens_v2_results,
+    validate_jlens_v2_resume_bundle,
     validate_qwen_jlens_v2_archive,
 )
 
@@ -429,3 +430,84 @@ def test_v2_archive_rejects_links_and_extract_leaves_project_untouched(
     with pytest.raises(ValueError, match="allowlist"):
         extract_qwen_jlens_v2_archive(archive, project)
     assert not (project / "artifacts").exists()
+
+
+# --- review fixes ----------------------------------------------------------
+
+
+def test_v2_extract_rejects_invalid_archived_fit_count_before_replacing_local(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    local = _write_valid_checkpoint(
+        project / V2_ARTIFACTS / "jlens_fit_checkpoint.pt", fit_count=200, n_done=50
+    )
+    previous = local.read_bytes()
+    members = _write_resume_members(tmp_path / "stage", fit_count=123, n_done=5)
+    archive = tmp_path / "bad_fit_count.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        for member in members:
+            handle.add(member, arcname=f"{V2_ARTIFACTS}/{member.name}")
+
+    with pytest.raises(ValueError, match="fit_count"):
+        extract_qwen_jlens_v2_archive(archive, project)
+
+    assert local.read_bytes() == previous
+    assert sorted(path.name for path in local.parent.iterdir()) == [
+        "jlens_fit_checkpoint.pt"
+    ]
+
+
+@pytest.mark.parametrize("operation", ["backup", "install"])
+def test_v2_validates_the_exact_temporary_copy_before_replacing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    project = tmp_path / "project"
+    destination = _write_valid_checkpoint(
+        project / V2_ARTIFACTS / "jlens_fit_checkpoint.pt", fit_count=200, n_done=50
+    )
+    previous = destination.read_bytes()
+    staged = _write_valid_checkpoint(tmp_path / "download.pt", fit_count=400, n_done=120)
+
+    def corrupt_copy(source, target, *args, **kwargs):
+        target.write(b"torn copy")
+
+    monkeypatch.setattr(transport.shutil, "copyfileobj", corrupt_copy)
+    with pytest.raises(ValueError, match="checkpoint"):
+        if operation == "backup":
+            atomic_replace_validated_jlens_v2_backup(staged, destination)
+        else:
+            atomic_install_jlens_v2_checkpoint(staged=staged, project=project)
+    monkeypatch.undo()
+
+    assert destination.read_bytes() == previous
+    assert sorted(path.name for path in destination.parent.iterdir()) == [
+        "jlens_fit_checkpoint.pt"
+    ]
+
+
+def test_v2_fit_count_must_be_a_real_int(tmp_path: Path) -> None:
+    for index, bad in enumerate((200.0, True, "200")):
+        staged = _write_valid_checkpoint(tmp_path / f"bad{index}.pt", n_done=5)
+        payload = torch.load(staged, map_location="cpu", weights_only=True)
+        payload["fit_count"] = bad
+        torch.save(payload, staged)
+        with pytest.raises(ValueError, match="integer"):
+            atomic_install_jlens_v2_checkpoint(
+                staged=staged, project=tmp_path / f"project{index}"
+            )
+
+
+def test_v2_resume_status_fit_total_must_match_checkpoint_fit_count(
+    tmp_path: Path,
+) -> None:
+    checkpoint, status, events = _write_resume_members(
+        tmp_path / "stage", fit_count=200, n_done=50
+    )
+    payload = json.loads(status.read_text(encoding="utf-8"))
+    payload["fit_total_units"] = 800
+    status.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="fit_total_units"):
+        validate_jlens_v2_resume_bundle(
+            checkpoint=checkpoint, status=status, events=events
+        )

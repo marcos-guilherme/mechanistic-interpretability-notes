@@ -999,10 +999,9 @@ def validate_jlens_v2_checkpoint_payload(payload: Mapping[str, Any]) -> int:
 
     if "fit_count" not in payload:
         raise ValueError("v2 checkpoint is missing fit_count")
-    try:
-        stored_count = int(payload["fit_count"])
-    except (TypeError, ValueError) as error:
-        raise ValueError("v2 checkpoint fit_count is not an integer") from error
+    stored_count = payload["fit_count"]
+    if type(stored_count) is not int:
+        raise ValueError("v2 checkpoint fit_count is not an integer")
     if stored_count not in V2_FIT_COUNT_CANDIDATES:
         raise ValueError(
             f"v2 checkpoint fit_count {stored_count} is not one of "
@@ -1059,6 +1058,39 @@ def optional_local_jlens_checkpoint(project: Path) -> Path | None:
     return _optional_local_checkpoint(_JLENS_V1_TRANSPORT, project)
 
 
+def _copy_validate_replace_checkpoint(
+    profile: _JLensTransportProfile,
+    *,
+    staged: Path,
+    destination: Path,
+    prefix: str,
+) -> None:
+    """Copy, fsync, validate that exact temporary file, then ``os.replace``.
+
+    The destination is untouched on any failure and the temporary is removed.
+    """
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            with staged.open("rb") as incoming:
+                shutil.copyfileobj(incoming, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _validate_regular_jlens_checkpoint(tmp_path, origin="temporary")
+        profile.validate_payload(load_fit_checkpoint(tmp_path))
+        os.replace(tmp_path, destination)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
 def _atomic_install_checkpoint(
     profile: _JLensTransportProfile,
     *,
@@ -1071,32 +1103,18 @@ def _atomic_install_checkpoint(
             return None
         raise FileNotFoundError(f"jlens checkpoint missing (staging: {staged})")
     _validate_regular_jlens_checkpoint(staged, origin="staging")
-    payload = load_fit_checkpoint(staged)
-    profile.validate_payload(payload)
     destination = project / profile.checkpoint
     destination.parent.mkdir(parents=True, exist_ok=True)
     _assert_confined_checkpoint(project, destination, profile.checkpoint)
-    fd, tmp_name = tempfile.mkstemp(
+    # Only the exact temporary copy is loaded and validated (no separate staged
+    # load), so what is validated is what gets installed.
+    _copy_validate_replace_checkpoint(
+        profile,
+        staged=staged,
+        destination=destination,
         prefix=".jlens_fit_checkpoint.",
-        suffix=".tmp",
-        dir=destination.parent,
     )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            with staged.open("rb") as incoming:
-                shutil.copyfileobj(incoming, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if tmp_path.stat().st_size > MAX_JLENS_CHECKPOINT_BYTES:
-            raise ValueError("jlens checkpoint size exceeds limit after copy")
-        os.replace(tmp_path, destination)
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        raise
     _validate_regular_jlens_checkpoint(destination, origin="destination")
-    profile.validate_payload(load_fit_checkpoint(destination))
     return _assert_confined_checkpoint(project, destination, profile.checkpoint)
 
 
@@ -1279,6 +1297,14 @@ def _validate_resume_bundle(
     }
     if profile.v2:
         meta["fit_count"] = int(payload["fit_count"])
+        fit_total = status_payload.get("fit_total_units")
+        if fit_total is not None and (
+            type(fit_total) is not int or fit_total != meta["fit_count"]
+        ):
+            raise ValueError(
+                f"jlens resume status fit_total_units {fit_total!r} != "
+                f"checkpoint fit_count {meta['fit_count']}"
+            )
     return meta
 
 
@@ -1825,39 +1851,22 @@ def atomic_install_jlens_v2_resume(
 def atomic_replace_validated_jlens_v2_backup(staged: Path, destination: Path) -> Path:
     """Replace ``destination`` with ``staged`` only after full validation.
 
-    The previous destination is never touched until a complete, fsynced,
-    re-verified copy sits next to it; the swap is a single ``os.replace``.
+    The previous destination is never touched until a complete, fsynced copy
+    next to it has been loaded and validated; the swap is one ``os.replace``.
     """
 
     _validate_regular_jlens_checkpoint(staged, origin="backup staging")
-    validate_jlens_v2_checkpoint_payload(load_fit_checkpoint(staged))
     if os.path.lexists(destination) and (
         path_is_link_or_junction(destination) or not destination.is_file()
     ):
         raise ValueError(f"jlens backup destination must be a regular file: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
+    _copy_validate_replace_checkpoint(
+        _JLENS_V2_TRANSPORT,
+        staged=staged,
+        destination=destination,
         prefix=".jlens_v2_backup.",
-        suffix=".tmp",
-        dir=destination.parent,
     )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            with staged.open("rb") as incoming:
-                shutil.copyfileobj(incoming, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if (
-            tmp_path.stat().st_size != staged.stat().st_size
-            or sha256_file(tmp_path) != sha256_file(staged)
-        ):
-            raise ValueError("jlens backup copy does not match validated staging")
-        os.replace(tmp_path, destination)
-    except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        raise
     return destination
 
 
@@ -1915,13 +1924,35 @@ def validate_qwen_jlens_v2_archive(
     )
 
 
+def _validate_staged_jlens_v2_members(
+    staging: Path,
+    members: list[tarfile.TarInfo],
+) -> None:
+    """Validate staged v2 members before any project file is replaced."""
+
+    _revalidate_staged_jlens_members(staging, members)
+    artifacts = staging / JLENS_V2_ARTIFACTS_DIR
+    checkpoint = artifacts / "jlens_fit_checkpoint.pt"
+    if not checkpoint.is_file():
+        return
+    status = artifacts / "status.json"
+    events = artifacts / "events.jsonl"
+    if status.is_file() and events.is_file():
+        _validate_resume_bundle(
+            _JLENS_V2_TRANSPORT, checkpoint=checkpoint, status=status, events=events
+        )
+        return
+    _validate_regular_jlens_checkpoint(checkpoint, origin="archive")
+    validate_jlens_v2_checkpoint_payload(load_fit_checkpoint(checkpoint))
+
+
 def extract_qwen_jlens_v2_archive(archive: Path, project: Path) -> None:
     _extract_allowlisted_archive(
         archive,
         project,
         validator=validate_qwen_jlens_v2_archive,
         prefix="qwen-jlens-v2-fetch-",
-        post_stage_validate=_revalidate_staged_jlens_members,
+        post_stage_validate=_validate_staged_jlens_v2_members,
     )
 
 
