@@ -210,8 +210,15 @@ def assert_incremental_readout_parity(
         residual,
         layer=layer,
     )
-    canonical_compare = canonical.detach().float().cpu()
-    incremental_compare = incremental.detach().float().cpu()
+    compare_device = incremental.device
+    canonical_compare = canonical.detach().to(
+        device=compare_device,
+        dtype=torch.float32,
+    )
+    incremental_compare = incremental.detach().to(
+        device=compare_device,
+        dtype=torch.float32,
+    )
     if not torch.allclose(
         canonical_compare,
         incremental_compare,
