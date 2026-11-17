@@ -15,6 +15,9 @@ READOUT_STEPS = 8
 CONDITIONS = ("baseline", "ablation", "addition", "random_control")
 DATASETS = ("mitre", "mitre_frr")
 PRIMARY_LAYER = 25
+BOOTSTRAP_DEFAULT_RESAMPLES = 10_000
+BOOTSTRAP_CI_LOWER_INDEX = 249
+BOOTSTRAP_CI_UPPER_INDEX = 9749
 TEXT_LEAK_KEYS = frozenset(
     {
         "prompt",
@@ -25,6 +28,15 @@ TEXT_LEAK_KEYS = frozenset(
         "content",
     }
 )
+
+
+def bootstrap_ci_indices(resamples: int) -> tuple[int, int]:
+    if resamples != BOOTSTRAP_DEFAULT_RESAMPLES:
+        raise ValueError(
+            f"bootstrap CI indices are frozen for {BOOTSTRAP_DEFAULT_RESAMPLES} "
+            f"resamples, received {resamples}"
+        )
+    return BOOTSTRAP_CI_LOWER_INDEX, BOOTSTRAP_CI_UPPER_INDEX
 
 
 def observation_key(record: Mapping[str, Any]) -> tuple[str, str, str, int, int, str]:
@@ -89,6 +101,26 @@ def _ranks_by_prompt(
     return dict(grouped)
 
 
+def _paired_prompt_ids(
+    baseline_by_prompt: Mapping[str, Sequence[int]],
+    condition_by_prompt: Mapping[str, Sequence[int]],
+) -> list[str]:
+    return sorted(set(baseline_by_prompt) & set(condition_by_prompt))
+
+
+def _prompts_with_ranks(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    prompt_ids: set[str],
+) -> set[str]:
+    by_prompt = _ranks_by_prompt(records)
+    return {
+        prompt_id
+        for prompt_id in prompt_ids
+        if prompt_id in by_prompt and by_prompt[prompt_id]
+    }
+
+
 def aggregate_fidelity(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     buckets: dict[tuple[str, str, str, int], list[int]] = defaultdict(list)
     prompts: dict[tuple[str, str, str, int], set[str]] = defaultdict(set)
@@ -147,7 +179,7 @@ def cluster_bootstrap_difference(
     )
     baseline_by_prompt = _ranks_by_prompt(baseline_records)
     condition_by_prompt = _ranks_by_prompt(condition_records)
-    prompt_ids = sorted(set(baseline_by_prompt) & set(condition_by_prompt))
+    prompt_ids = _paired_prompt_ids(baseline_by_prompt, condition_by_prompt)
     if not prompt_ids:
         raise ValueError("no paired prompts for bootstrap")
 
@@ -159,15 +191,19 @@ def cluster_bootstrap_difference(
         ]
         return _pass_at_k(ranks, k)
 
-    point_baseline = _pass_at_k(
-        [rank for ranks in baseline_by_prompt.values() for rank in ranks],
-        k,
+    paired_baseline_ranks = [
+        rank
+        for prompt_id in prompt_ids
+        for rank in baseline_by_prompt[prompt_id]
+    ]
+    paired_condition_ranks = [
+        rank
+        for prompt_id in prompt_ids
+        for rank in condition_by_prompt[prompt_id]
+    ]
+    estimate = _pass_at_k(paired_condition_ranks, k) - _pass_at_k(
+        paired_baseline_ranks, k
     )
-    point_condition = _pass_at_k(
-        [rank for ranks in condition_by_prompt.values() for rank in ranks],
-        k,
-    )
-    estimate = point_condition - point_baseline
 
     generator = random.Random(seed)
     diffs: list[float] = []
@@ -177,8 +213,7 @@ def cluster_bootstrap_difference(
         condition_rate = pooled_pass_at_k(sampled, condition_by_prompt)
         diffs.append(condition_rate - baseline_rate)
     diffs.sort()
-    lower_index = max(int(0.025 * resamples) - 1, 0)
-    upper_index = min(int(0.975 * resamples), resamples - 1)
+    lower_index, upper_index = bootstrap_ci_indices(resamples)
     return {
         "cluster_unit": "example_id",
         "dataset": dataset,
@@ -192,6 +227,8 @@ def cluster_bootstrap_difference(
         "seed": int(seed),
         "prompt_count": len(prompt_ids),
         "estimate": estimate,
+        "ci_lower_index": lower_index,
+        "ci_upper_index": upper_index,
         "ci_lower": diffs[lower_index],
         "ci_upper": diffs[upper_index],
     }
@@ -270,6 +307,7 @@ def summarize_behavior_changes(
                 ("unchanged", unchanged_ids),
             ):
                 output[dataset][condition][group_name] = {}
+                group_prompt_ids = set(prompt_ids)
                 for lens_version in LENS_VERSIONS:
                     baseline_means = _mean_rank_by_prompt(
                         observations,
@@ -285,39 +323,50 @@ def summarize_behavior_changes(
                         lens_version=lens_version,
                         layer=layer,
                     )
-                    deltas = [
-                        condition_means[prompt_id] - baseline_means[prompt_id]
+                    rank_paired_ids = sorted(
+                        prompt_id
                         for prompt_id in prompt_ids
                         if prompt_id in baseline_means and prompt_id in condition_means
+                    )
+                    deltas = [
+                        condition_means[prompt_id] - baseline_means[prompt_id]
+                        for prompt_id in rank_paired_ids
                     ]
+                    baseline_ranks = _filter_observations(
+                        observations,
+                        dataset=dataset,
+                        condition="baseline",
+                        layer=layer,
+                        lens_version=lens_version,
+                    )
+                    condition_ranks = _filter_observations(
+                        observations,
+                        dataset=dataset,
+                        condition=condition,
+                        layer=layer,
+                        lens_version=lens_version,
+                    )
+                    pass_at_5_ids = sorted(
+                        _prompts_with_ranks(baseline_ranks, prompt_ids=group_prompt_ids)
+                        & _prompts_with_ranks(condition_ranks, prompt_ids=group_prompt_ids)
+                    )
                     block: dict[str, Any] = {
                         "prompt_count": len(prompt_ids),
+                        "rank_paired_prompt_count": len(rank_paired_ids),
+                        "pass_at_5_prompt_count": len(pass_at_5_ids),
                         "layer": int(layer),
                         "mean_rank_delta": (
                             mean(deltas) if deltas else None
                         ),
                     }
-                    if deltas:
-                        baseline_ranks = _filter_observations(
-                            observations,
-                            dataset=dataset,
-                            condition="baseline",
-                            layer=layer,
-                            lens_version=lens_version,
-                        )
-                        condition_ranks = _filter_observations(
-                            observations,
-                            dataset=dataset,
-                            condition=condition,
-                            layer=layer,
-                            lens_version=lens_version,
-                        )
+                    if pass_at_5_ids:
+                        pass_id_set = set(pass_at_5_ids)
                         block["pass_at_5"] = {
                             "baseline": _pass_at_k(
                                 [
                                     int(item["rank"])
                                     for item in baseline_ranks
-                                    if str(item["example_id"]) in prompt_ids
+                                    if str(item["example_id"]) in pass_id_set
                                 ],
                                 5,
                             ),
@@ -325,7 +374,7 @@ def summarize_behavior_changes(
                                 [
                                     int(item["rank"])
                                     for item in condition_ranks
-                                    if str(item["example_id"]) in prompt_ids
+                                    if str(item["example_id"]) in pass_id_set
                                 ],
                                 5,
                             ),
