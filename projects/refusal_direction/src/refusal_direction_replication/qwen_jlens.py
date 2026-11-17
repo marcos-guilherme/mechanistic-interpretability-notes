@@ -810,6 +810,206 @@ def summarize_holdout_metrics(
     }
 
 
+def _unique_ids(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for record in records:
+        example_id = str(record["example_id"])
+        if example_id not in seen:
+            seen.add(example_id)
+            ordered.append(example_id)
+    return ordered
+
+
+def _contiguous_parts(ids: Sequence[str], n_parts: int) -> list[list[str]]:
+    base, extra = divmod(len(ids), n_parts)
+    parts: list[list[str]] = []
+    start = 0
+    for index in range(n_parts):
+        size = base + (1 if index < extra else 0)
+        parts.append(list(ids[start : start + size]))
+        start += size
+    return parts
+
+
+def _split_parts(ids: Sequence[str], n_parts: int) -> list[list[str]]:
+    if int(n_parts) < 1 or int(n_parts) > len(ids):
+        raise ValueError(
+            f"n_parts must be between 1 and the number of holdout ids "
+            f"({len(ids)}), got {n_parts}"
+        )
+    return _contiguous_parts(ids, int(n_parts))
+
+
+def summarize_holdout_subset_stability(
+    records: Sequence[Mapping[str, Any]],
+    source_layers: Sequence[int],
+    n_parts: int = 2,
+) -> dict[str, Any]:
+    """Aggregate metrics over contiguous, near-equal subsets of holdout ids.
+
+    Ids keep first-appearance order, so 200 ids split into the first and second
+    100; other sizes yield parts whose sizes differ by at most one.
+    """
+    parts = _split_parts(_unique_ids(records), n_parts)
+    summaries: list[dict[str, Any]] = []
+    for index, part_ids in enumerate(parts):
+        members = set(part_ids)
+        subset = [
+            record for record in records if str(record["example_id"]) in members
+        ]
+        metrics = summarize_holdout_metrics(subset, source_layers=source_layers)
+        summaries.append(
+            {
+                "part": index,
+                "n_items": metrics["n_items"],
+                "n_records": metrics["n_records"],
+                "holdout_ids": metrics["holdout_ids"],
+                "by_layer": metrics["by_layer"],
+                "overall": metrics["overall"],
+            }
+        )
+    stability: dict[str, Any] = {"n_parts": len(summaries), "parts": summaries}
+    if len(summaries) == 2:
+        stability["halves"] = summaries
+    return stability
+
+
+def _observation_identity(record: Mapping[str, Any]) -> tuple[str, str, int, int, int]:
+    return (
+        str(record["example_id"]),
+        str(record["content_hash"]),
+        int(record["position"]),
+        int(record["layer"]),
+        int(record["target_token_id"]),
+    )
+
+
+_RANK_HIT_KEYS = ("rank_sum", "hits@1", "hits@5", "hits@10")
+
+
+def _by_item_counters(
+    v2_records: Sequence[Mapping[str, Any]],
+    v1_records: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, dict[str, int]]]:
+    by_item: dict[str, dict[str, dict[str, int]]] = {}
+    for v2, v1 in zip(v2_records, v1_records):
+        block = by_item.setdefault(str(v2["example_id"]), {}).setdefault(
+            str(int(v2["layer"])),
+            {"n_positions": 0}
+            | {
+                f"{method}_{stat}": 0
+                for method in ("jlens_v2", "jlens_v1", "logit_lens")
+                for stat in _RANK_HIT_KEYS
+            },
+        )
+        block["n_positions"] += 1
+        for method, rank in (
+            ("jlens_v2", int(v2["jlens_rank"])),
+            ("jlens_v1", int(v1["jlens_rank"])),
+            ("logit_lens", int(v2["logit_lens_rank"])),
+        ):
+            block[f"{method}_rank_sum"] += rank
+            for k in (1, 5, 10):
+                block[f"{method}_hits@{k}"] += int(rank <= k)
+    return by_item
+
+
+def summarize_dual_holdout_metrics(
+    v2_records: Sequence[Mapping[str, Any]],
+    v1_records: Sequence[Mapping[str, Any]],
+    source_layers: Sequence[int],
+) -> dict[str, Any]:
+    """Compare v2 lens, frozen v1 lens and logit lens on identical observations.
+
+    Each readout carries its own logit-lens rank; those must agree, so the logit
+    lens is a single shared reference. Observation identity is
+    ``(example_id, content_hash, position, layer, target_token_id)`` and the two
+    ordered identity lists must be exactly equal.
+    """
+    if not v2_records or not v1_records:
+        raise ValueError("dual holdout comparison got empty records")
+    v2_ids = _unique_ids(v2_records)
+    if v2_ids != _unique_ids(v1_records):
+        raise ValueError("v1 and v2 records must cover the same holdout ids in order")
+    layers = [int(layer) for layer in source_layers]
+    for records in (v2_records, v1_records):
+        unlisted = {int(r["layer"]) for r in records} - set(layers)
+        if unlisted:
+            raise ValueError(
+                f"record layers {sorted(unlisted)} not in source_layers {layers}"
+            )
+    v2_identity = [_observation_identity(r) for r in v2_records]
+    v1_identity = [_observation_identity(r) for r in v1_records]
+    if v2_identity != v1_identity:
+        raise ValueError(
+            "v1 and v2 records differ in observation identity "
+            "(example_id, content_hash, position, layer, target_token_id)"
+        )
+    if len(set(v2_identity)) != len(v2_identity):
+        raise ValueError("duplicate observation identity in holdout records")
+    if any(
+        int(a["logit_lens_rank"]) != int(b["logit_lens_rank"])
+        for a, b in zip(v2_records, v1_records)
+    ):
+        raise ValueError("logit lens reference ranks differ between v1 and v2 readouts")
+
+    v2_metrics = summarize_holdout_metrics(v2_records, source_layers=layers)
+    v1_metrics = summarize_holdout_metrics(v1_records, source_layers=layers)
+    v2_stability = summarize_holdout_subset_stability(v2_records, layers)
+    v1_stability = summarize_holdout_subset_stability(v1_records, layers)
+
+    def _merge_parts(v2_part: Mapping[str, Any], v1_part: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "part": v2_part["part"],
+            "n_items": v2_part["n_items"],
+            "n_records": v2_part["n_records"],
+            "holdout_ids": v2_part["holdout_ids"],
+            "overall": {
+                "jlens_v2": v2_part["overall"]["jlens"],
+                "jlens_v1": v1_part["overall"]["jlens"],
+                "logit_lens": v2_part["overall"]["logit_lens"],
+            },
+        }
+
+    parts = [
+        _merge_parts(a, b)
+        for a, b in zip(v2_stability["parts"], v1_stability["parts"])
+    ]
+    stability: dict[str, Any] = {"n_parts": len(parts), "parts": parts}
+    if len(parts) == 2:
+        stability["halves"] = parts
+    return {
+        "n_items": len(v2_ids),
+        "n_observations": len(v2_records),
+        "shared_holdout_ids": v2_ids,
+        "shared_holdout_hashes": v2_metrics["holdout_hashes"],
+        "methods": {
+            "jlens_v2": {
+                "by_layer": {
+                    layer: block["jlens"] for layer, block in v2_metrics["by_layer"].items()
+                },
+                "overall": v2_metrics["overall"]["jlens"],
+            },
+            "jlens_v1": {
+                "by_layer": {
+                    layer: block["jlens"] for layer, block in v1_metrics["by_layer"].items()
+                },
+                "overall": v1_metrics["overall"]["jlens"],
+            },
+            "logit_lens": {
+                "by_layer": {
+                    layer: block["logit_lens"]
+                    for layer, block in v2_metrics["by_layer"].items()
+                },
+                "overall": v2_metrics["overall"]["logit_lens"],
+            },
+        },
+        "by_item": _by_item_counters(v2_records, v1_records),
+        "stability": stability,
+    }
+
+
 def validate_fitted_lens(
     lens: Any,
     *,

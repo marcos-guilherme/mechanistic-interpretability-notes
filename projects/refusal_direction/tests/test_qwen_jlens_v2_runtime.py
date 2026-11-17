@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,8 +75,38 @@ def _write_v2_fixture(
     )
     path = root / "configs" / JLENS_V2_PROFILE
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    _write_frozen_v1_lens(root, config)
     return path
 
+
+V1_LENS_N_PROMPTS = 7
+
+
+class V1DistinguishingLens(FakeLens):
+    """FakeLens whose Jacobian readout ranks the target 2nd when it is the v1 lens."""
+
+    def apply(self, model, prompt, **kwargs):
+        lens_logits, model_logits, ids = super().apply(model, prompt, **kwargs)
+        if kwargs.get("use_jacobian", True) and self.n_prompts == V1_LENS_N_PROMPTS:
+            for logits in lens_logits.values():
+                logits[:, 0] = 5.0  # outranks the target at index 1
+        return lens_logits, model_logits, ids
+
+
+def _write_frozen_v1_lens(root: Path, config: dict[str, Any]) -> Path:
+    path = root / str(config["source_v1_lens"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    layers = [int(layer) for layer in config["source_layers"]]
+    FakeLens(
+        {layer: torch.eye(int(config["d_model"])) * (layer + 1) for layer in layers},
+        n_prompts=V1_LENS_N_PROMPTS,
+        d_model=int(config["d_model"]),
+    ).save(str(path))
+    return path
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 def _tiny_model() -> tuple[Any, Any]:
     model = SimpleNamespace(
@@ -118,6 +149,7 @@ def _run(
     jacobian_fn,
     probe_seconds: float = 1.0,
     run_id: str | None = "v2-run",
+    lens_cls: Any = FakeLens,
 ) -> dict[str, Any]:
     return run_qwen_jlens(
         root,
@@ -127,7 +159,7 @@ def _run(
         load_model=_tiny_model,
         wrap_model=_tiny_wrapper,
         jacobian_for_prompt_fn=jacobian_fn,
-        lens_cls=FakeLens,
+        lens_cls=lens_cls,
         release_resources=lambda: None,
         clock=lambda: 0.0,
         probe_clock=_clock_for_seconds(probe_seconds),
@@ -445,3 +477,140 @@ def test_validate_checkpoint_payload_accepts_v2_count_above_100() -> None:
             d_model=8,
             dim_batch=8,
         )
+
+
+def _v1_path(root: Path) -> Path:
+    config = load_config(root, profile=JLENS_V2_PROFILE)
+    return root / str(config["source_v1_lens"])
+
+
+def test_runtime_compares_v1_v2_and_logit_lens_on_shared_holdout(tmp_path: Path) -> None:
+    config = _write_v2_fixture(
+        tmp_path,
+        candidates=[2, 4],
+        holdout_count=3,
+        max_seq_len=8,
+        max_projected_hours=12,
+    )
+    v1_path = _v1_path(tmp_path)
+    v1_before = _sha256(v1_path)
+    v1_mtime = v1_path.stat().st_mtime_ns
+    siblings = sorted(path.name for path in v1_path.parent.iterdir())
+
+    result = _run(
+        tmp_path,
+        config.name,
+        rows=_rows(8),
+        jacobian_fn=_recording_jacobian([]),
+        probe_seconds=1.0,
+        lens_cls=V1DistinguishingLens,
+    )
+    assert result["status"] == "pass"
+
+    results = tmp_path / V2_RESULTS
+    compare_path = results / "04_jlens_compare.json"
+    compare = _json(compare_path)["results"]
+    holdout = _json(results / "03_jlens_holdout.json")["results"]
+    assert set(compare["methods"]) == {"jlens_v2", "jlens_v1", "logit_lens"}
+    assert compare["shared_holdout_ids"] == holdout["holdout_ids"]
+    assert len(compare["shared_holdout_ids"]) == 3
+    overall = {name: block["overall"] for name, block in compare["methods"].items()}
+    assert overall["jlens_v2"]["mean_rank"] == 1.0
+    assert overall["jlens_v1"]["mean_rank"] == 2.0
+    assert overall["logit_lens"]["mean_rank"] == holdout["overall"]["logit_lens"]["mean_rank"]
+    assert overall["jlens_v2"] == holdout["overall"]["jlens"]
+    assert compare["n_observations"] == overall["jlens_v2"]["n_observations"]
+    assert len(compare["stability"]["halves"]) == 2
+    assert compare["v1_lens"]["sha256"] == v1_before
+    assert compare["v1_lens"]["n_prompts"] == V1_LENS_N_PROMPTS
+    assert compare["v1_lens"]["path"] == _json(config)["source_v1_lens"]
+
+    # Frozen v1 artifact: untouched content, mtime, and directory contents.
+    assert _sha256(v1_path) == v1_before
+    assert v1_path.stat().st_mtime_ns == v1_mtime
+    assert sorted(path.name for path in v1_path.parent.iterdir()) == siblings
+
+    # Ordinary v2 metrics stay in 03 and no raw text reaches the comparison.
+    assert "by_item" in holdout
+    serialized = compare_path.read_text(encoding="utf-8")
+    assert "function-" not in serialized and "print(1)" not in serialized
+    assert "fit_text" not in serialized and "decoded" not in serialized
+    manifest = _json(results / "execution_manifest.json")["results"]
+    assert "04_jlens_compare.json" in manifest["result_files"]
+
+
+def test_runtime_rejects_missing_v1_lens_before_fitting(tmp_path: Path) -> None:
+    config = _write_v2_fixture(
+        tmp_path,
+        candidates=[2, 4],
+        holdout_count=2,
+        max_seq_len=8,
+        max_projected_hours=12,
+    )
+    _v1_path(tmp_path).unlink()
+    calls: list[dict[str, Any]] = []
+    with pytest.raises(FileNotFoundError, match="v1 lens"):
+        _run(
+            tmp_path,
+            config.name,
+            rows=_rows(6),
+            jacobian_fn=_recording_jacobian(calls),
+        )
+    assert calls == []
+    assert not (tmp_path / V2_RESULTS / "04_jlens_compare.json").exists()
+
+
+def test_runtime_rejects_v1_lens_with_other_layers_without_writing_compare(
+    tmp_path: Path,
+) -> None:
+    config = _write_v2_fixture(
+        tmp_path,
+        candidates=[2, 4],
+        holdout_count=2,
+        max_seq_len=8,
+        max_projected_hours=12,
+    )
+    v1_path = _v1_path(tmp_path)
+    FakeLens({0: torch.eye(8)}, n_prompts=V1_LENS_N_PROMPTS, d_model=8).save(str(v1_path))
+    v1_before = _sha256(v1_path)
+    with pytest.raises(ValueError, match="source_layers"):
+        _run(
+            tmp_path,
+            config.name,
+            rows=_rows(6),
+            jacobian_fn=_recording_jacobian([]),
+        )
+    assert not (tmp_path / V2_RESULTS / "04_jlens_compare.json").exists()
+    assert _sha256(v1_path) == v1_before
+
+
+def test_runtime_does_not_write_compare_when_v2_run_aborts(tmp_path: Path) -> None:
+    config = _write_v2_fixture(
+        tmp_path,
+        candidates=[2, 4],
+        holdout_count=2,
+        max_seq_len=8,
+        max_projected_hours=1,
+    )
+    result = _run(
+        tmp_path,
+        config.name,
+        rows=_rows(6),
+        jacobian_fn=_recording_jacobian([]),
+        probe_seconds=3600.0,
+    )
+    assert result["status"] == "aborted"
+    assert not (tmp_path / V2_RESULTS / "04_jlens_compare.json").exists()
+
+
+def test_v1_profile_does_not_write_compare(tmp_path: Path) -> None:
+    write_source_dose(tmp_path)
+    _run(
+        tmp_path,
+        JLENS_PROFILE,
+        rows=[_row(index) for index in range(130)],
+        jacobian_fn=_recording_jacobian([]),
+        run_id="v1-run",
+    )
+    results = tmp_path / "results" / "qwen25_coder_7b_jlens"
+    assert not (results / "04_jlens_compare.json").exists()

@@ -59,6 +59,7 @@ from .qwen_jlens import (
     require_finite_logits,
     select_fit_count,
     slice_v2_corpus,
+    summarize_dual_holdout_metrics,
     summarize_holdout_metrics,
     valid_token_positions,
     validate_checkpoint_identity,
@@ -495,6 +496,60 @@ def run_holdout_readout(
     return records
 
 
+def compare_with_frozen_v1(
+    *,
+    lens_cls: Any,
+    v1_lens_path: Path,
+    v1_lens_config_path: str,
+    v2_records: Sequence[Mapping[str, Any]],
+    model: Any,
+    tokenizer: Any,
+    items: Sequence[Any],
+    source_layers: Sequence[int],
+    d_model: int,
+    skip_first: int,
+    max_seq_len: int,
+) -> dict[str, Any]:
+    """Read the frozen v1 lens (never written) over the v2 holdout and compare.
+
+    The v1 file is hashed before and after loading; any change aborts. The
+    result holds only ids, hashes, token ids and integer ranks.
+    """
+    digest_before = sha256_file(v1_lens_path)
+    v1_lens = lens_cls.load(str(v1_lens_path))
+    try:
+        validate_fitted_lens(
+            v1_lens,
+            source_layers=source_layers,
+            d_model=d_model,
+            n_prompts=int(v1_lens.n_prompts),
+        )
+        v1_n_prompts = int(v1_lens.n_prompts)
+        v1_records = run_holdout_readout(
+            lens=v1_lens,
+            model=model,
+            tokenizer=tokenizer,
+            items=items,
+            source_layers=source_layers,
+            skip_first=skip_first,
+            max_seq_len=max_seq_len,
+        )
+    finally:
+        del v1_lens
+    if sha256_file(v1_lens_path) != digest_before:
+        raise ValueError("frozen v1 lens changed during comparison")
+    comparison = summarize_dual_holdout_metrics(
+        v2_records, v1_records, source_layers=source_layers
+    )
+    comparison["v1_lens"] = {
+        "path": v1_lens_config_path,
+        "sha256": digest_before,
+        "bytes": v1_lens_path.stat().st_size,
+        "n_prompts": v1_n_prompts,
+    }
+    return comparison
+
+
 def run_qwen_jlens(
     root: Path,
     *,
@@ -605,6 +660,14 @@ def run_qwen_jlens(
 
     try:
         contract()
+        v1_lens_path: Path | None = None
+        if is_v2:
+            # Fail before any multi-hour fit if the frozen v1 lens is absent.
+            v1_lens_path = root / str(config["source_v1_lens"])
+            if not v1_lens_path.is_file():
+                raise FileNotFoundError(
+                    f"frozen v1 lens not found: {config['source_v1_lens']}"
+                )
         # v2 sizes stages from the corpus pool until the probe selects a count.
         enter_stage("prepare", int(config["max_fit_count"]) if is_v2 else FIT_COUNT)
         _, tokenizer = ensure_model()
@@ -1190,6 +1253,34 @@ def run_qwen_jlens(
             results=metrics,
             provenance=provenance,
         )
+        result_files = [
+            "00_jlens_prepare.json",
+            "01_jlens_probe.json",
+            "02_jlens_fit.json",
+            "03_jlens_holdout.json",
+        ]
+        if is_v2 and v1_lens_path is not None:
+            comparison = compare_with_frozen_v1(
+                lens_cls=Lens,
+                v1_lens_path=v1_lens_path,
+                v1_lens_config_path=str(config["source_v1_lens"]),
+                v2_records=records,
+                model=bound,
+                tokenizer=tokenizer,
+                items=corpus.holdout,
+                source_layers=source_layers,
+                d_model=d_model,
+                skip_first=skip_first,
+                max_seq_len=max_seq_len,
+            )
+            _write_compact(
+                results_dir / "04_jlens_compare.json",
+                experiment="jlens_compare",
+                config=config,
+                results=comparison,
+                provenance=provenance,
+            )
+            result_files.append("04_jlens_compare.json")
         evaluation = build_jlens_evaluation(
             status=STATUS_PASS,
             operational_success=True,
@@ -1213,10 +1304,7 @@ def run_qwen_jlens(
             provenance=provenance,
             status=STATUS_PASS,
             files=[
-                "00_jlens_prepare.json",
-                "01_jlens_probe.json",
-                "02_jlens_fit.json",
-                "03_jlens_holdout.json",
+                *result_files,
                 "jlens_evaluation.json",
                 "execution_manifest.json",
             ],
