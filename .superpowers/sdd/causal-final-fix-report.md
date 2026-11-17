@@ -169,3 +169,129 @@ Output:
 None. The actual A100/model path was intentionally not exercised in this fix
 wave; the CPU fixtures cover preparation, pruning, device agreement, parity,
 and transfer-path behavior.
+
+## Whole-implementation rereview fix wave
+
+### Status
+
+DONE
+
+Commit: the separate commit containing this appended section and the rereview
+fixes.
+
+### RED evidence
+
+#### Independent profile pin and raw pilot gate
+
+Command:
+
+```text
+uv run pytest tests/test_qwen_causal_jlens_runtime.py -k "semantically_unchanged_profile or raw_pilot_gate or panel_requires" -q
+```
+
+Output:
+
+```text
+FF                                                                       [100%]
+2 failed, 32 deselected
+```
+
+The failures showed that `_require_config_contract` had no independently pinned
+profile-byte argument and that panel execution reached model loading when the
+compact pilot summary existed but raw pilot rows were absent.
+
+#### Resume, finalize reconciliation, and validator profile pin
+
+Command:
+
+```text
+uv run pytest tests/test_qwen_causal_jlens_validate.py -k "caught_failure_terminal or abrupt_interruption or passing_terminal_reconciles or semantically_unchanged_profile" -q
+```
+
+Output:
+
+```text
+FFFF                                                                     [100%]
+4 failed, 44 deselected
+```
+
+The caught-failure case was rejected as permanently non-reusable, the passing
+terminal was strictly validated before status/event reconciliation, and a
+semantically unchanged profile-byte mutation reached source validation instead
+of failing the independent digest. The first abrupt-interruption run also
+exposed a missing test import; that fixture error was corrected before the
+production implementation, and the completed GREEN test exercises the repeated
+initialized attempt through final offline validation.
+
+### Implemented rereview fixes
+
+- Added immutable `FROZEN_CAUSAL_PROFILE_SHA256` for the exact committed
+  `qwen25_coder_7b_causal_jlens.json` bytes. Runtime and validator verify the
+  packaged canonical file and the deployed production profile independently;
+  fixture relaxation remains explicit.
+- Same-identity `operational_error` and `aborted` terminals are identity-checked
+  and atomically retired with their manifest into non-transported artifacts,
+  after which stage artifacts/checkpoint state are resumed.
+- A passing terminal now reconciles finalize status/events before strict full
+  offline validation, closing the terminal-write/stage-completion crash window.
+- Event validation models repeated attempts within one stage. Pending, running,
+  failed, aborted, and hard-interrupted attempts may restart the same stage;
+  completed counters remain monotonic across attempts, and only a completed
+  attempt may advance the frozen stage order.
+- Panel now validates the raw pilot matrix before panel reconciliation or model
+  work: exact 16 response keys, unique complete observations, strict terminal
+  semantics, target-token alignment, same-identity checkpoint completion, and
+  exact compact summary counts are all required. Missing or inconsistent pilot
+  rows block instead of being regenerated.
+- Added end-to-end fixture tests for caught failure, interruption after
+  initialization, and passing-terminal reconciliation. Every case ends with a
+  full validator pass and unique raw response/observation keys.
+
+### GREEN evidence
+
+Focused event-attempt command:
+
+```text
+uv run pytest tests/test_qwen_causal_jlens_validate.py -k "caught_failure_terminal or abrupt_interruption or passing_terminal_reconciles or event_sequence" -q
+```
+
+Output:
+
+```text
+.......                                                                  [100%]
+7 passed, 41 deselected
+```
+
+Final causal/shared suite:
+
+```text
+uv run pytest tests/test_qwen_causal_jlens.py tests/test_qwen_causal_jlens_runtime.py tests/test_qwen_causal_jlens_validate.py tests/test_qwen_causal_jlens_transport.py tests/test_colab_orchestrator.py tests/test_qwen_code_eval_transport.py -q
+```
+
+Output:
+
+```text
+........................................................................ [ 45%]
+........................................................................ [ 90%]
+...............                                                          [100%]
+159 passed in 99.41s (0:01:39)
+```
+
+### Rereview files changed
+
+- `projects/refusal_direction/src/refusal_direction_replication/qwen_causal_jlens.py`
+- `projects/refusal_direction/src/refusal_direction_replication/qwen_causal_jlens_runtime.py`
+- `projects/refusal_direction/src/refusal_direction_replication/qwen_causal_jlens_validate.py`
+- `projects/refusal_direction/tests/test_qwen_causal_jlens_runtime.py`
+- `projects/refusal_direction/tests/test_qwen_causal_jlens_validate.py`
+- `.superpowers/sdd/causal-final-fix-report.md`
+
+### Rereview self-review and concerns
+
+Rechecked terminal identity before retirement, finalize reconciliation ordering,
+attempt transitions/counter monotonicity, raw-pilot validation ordering, and the
+independence of the profile digest. Existing stop, Jacobian cache, observation
+schema, clean-run event, validator, transport, and shared orchestrator tests
+remain green.
+
+Concerns: none. No model download, Colab start, or local GPU execution occurred.

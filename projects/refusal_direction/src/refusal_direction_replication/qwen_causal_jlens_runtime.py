@@ -57,6 +57,7 @@ from .qwen_causal_jlens import (
     compact_contains_text_leak,
     observation_key,
     summarize_behavior_changes,
+    verify_causal_profile_digest,
 )
 from .qwen_code_eval import (
     PURPLE_LLAMA_REPOSITORY,
@@ -167,6 +168,7 @@ def _packaged_profile() -> dict[str, Any]:
     path = Path(__file__).resolve().parents[2] / "configs" / CAUSAL_JLENS_PROFILE
     if not path.is_file():
         raise ValueError("production contract: packaged causal profile is missing")
+    verify_causal_profile_digest(path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("production contract: packaged causal profile is malformed")
@@ -174,9 +176,14 @@ def _packaged_profile() -> dict[str, Any]:
 
 
 def _require_config_contract(
-    config: Mapping[str, Any], *, allow_fixture_contract: bool = False
+    config: Mapping[str, Any],
+    *,
+    allow_fixture_contract: bool = False,
+    profile_path: Path | None = None,
 ) -> None:
     packaged = _packaged_profile()
+    if profile_path is not None and not allow_fixture_contract:
+        verify_causal_profile_digest(profile_path)
     actual = _jsonable_config(config)
     for key in sorted(set(packaged) | set(actual)):
         fixture_allowed = (
@@ -1017,6 +1024,98 @@ def _pair_is_complete(
     return set(keys) == _expected_observation_keys(response)
 
 
+def _require_raw_pair_semantics(
+    response: Mapping[str, Any],
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    config: Mapping[str, Any],
+) -> None:
+    token_ids = response.get("generated_token_ids")
+    if not isinstance(token_ids, list) or any(
+        isinstance(token, bool) or not isinstance(token, int)
+        for token in token_ids
+    ):
+        raise ValueError("raw pilot gate requires strict generated token ids")
+    count = response.get("generated_token_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("raw pilot gate requires a positive generated token count")
+    if len(token_ids) != count:
+        raise ValueError("raw pilot gate token count does not match token ids")
+    readout_steps = response.get("readout_steps")
+    expected_steps = min(int(config["readout_steps"]), count)
+    if (
+        isinstance(readout_steps, bool)
+        or not isinstance(readout_steps, int)
+        or readout_steps != expected_steps
+    ):
+        raise ValueError("raw pilot gate readout_steps are inconsistent")
+    terminal = response.get("terminal_reason")
+    eos_id = int(config["eos_token_id"])
+    eos_positions = [
+        index for index, token_id in enumerate(token_ids) if token_id == eos_id
+    ]
+    if terminal == "eos":
+        if eos_positions != [count - 1]:
+            raise ValueError("raw pilot gate EOS terminal semantics are invalid")
+    elif terminal == "max_tokens":
+        if count != int(config["max_new_tokens"]) or eos_positions:
+            raise ValueError("raw pilot gate max_tokens semantics are invalid")
+    else:
+        raise ValueError("raw pilot gate terminal reason is invalid")
+    _verify_observations(observations, config=config)
+    if not _pair_is_complete([response], observations):
+        raise ValueError("raw pilot gate observations are incomplete")
+    for observation in observations:
+        step = int(observation["generation_step"])
+        if int(observation["target_token_id"]) != token_ids[step - 1]:
+            raise ValueError("raw pilot gate target token alignment is invalid")
+
+
+def _require_raw_pilot_gate(
+    *,
+    artifacts_dir: Path,
+    config: Mapping[str, Any],
+    pilot: Mapping[str, Any],
+    pilot_matrix: Sequence[tuple[str, str, str]],
+    checkpoint: PanelCheckpoint,
+) -> None:
+    if checkpoint.pending(pilot_matrix):
+        raise ValueError("raw pilot gate checkpoint is missing completed pilot pairs")
+    expected = set(pilot_matrix)
+    responses = [
+        row
+        for row in _read_jsonl(artifacts_dir / RESPONSES_FILENAME)
+        if _pair_key(row) in expected
+    ]
+    observations = [
+        row
+        for row in _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
+        if _pair_key(row) in expected
+    ]
+    try:
+        require_exact_pair_matrix(responses, pilot_matrix)
+    except ValueError as exc:
+        raise ValueError(f"raw pilot gate response matrix is invalid: {exc}") from exc
+    grouped: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in observations:
+        grouped[_pair_key(row)].append(row)
+    for response in responses:
+        key = _pair_key(response)
+        _require_raw_pair_semantics(
+            response, grouped.get(key, ()), config=config
+        )
+    if set(grouped) != expected:
+        raise ValueError("raw pilot gate observation matrix is incomplete")
+    if int(pilot.get("response_count", -1)) != len(responses):
+        raise ValueError("raw pilot gate response count differs from 01_pilot.json")
+    if int(pilot.get("observation_count", -1)) != len(observations):
+        raise ValueError("raw pilot gate observation count differs from 01_pilot.json")
+    if pilot.get("terminal_reasons") != _terminal_reason_counts(responses):
+        raise ValueError(
+            "raw pilot gate terminal counts differ from 01_pilot.json"
+        )
+
+
 def require_complete_pair_artifacts(
     responses: Sequence[Mapping[str, Any]],
     observations: Sequence[Mapping[str, Any]],
@@ -1663,6 +1762,13 @@ def run_panel_stage(
     )
     checkpoint_path = artifacts_dir / CHECKPOINT_FILENAME
     checkpoint = _load_or_create_checkpoint(checkpoint_path, identity)
+    _require_raw_pilot_gate(
+        artifacts_dir=artifacts_dir,
+        config=config,
+        pilot=pilot,
+        pilot_matrix=pilot_matrix,
+        checkpoint=checkpoint,
+    )
     matrix = expected_matrix(prepare)
     generated = _run_generation_matrix(
         matrix=matrix,
@@ -1919,6 +2025,42 @@ def _reconcile_terminal_status(
         )
 
 
+def _require_terminal_identity(
+    terminal: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+) -> None:
+    expected_top_level = {
+        "run_id": provenance["run_id"],
+        "implementation_commit": provenance["implementation_commit"],
+        "source_artifact_hashes": provenance["source_artifact_hashes"],
+    }
+    for field, expected in expected_top_level.items():
+        if terminal.get(field) != expected:
+            raise ValueError(f"stale causal J-lens terminal {field}")
+    if terminal.get("config") != _jsonable_config(config):
+        raise ValueError("stale causal J-lens terminal config")
+    stored_provenance = terminal.get("provenance") or {}
+    for field, expected in provenance.items():
+        if stored_provenance.get(field) != expected:
+            label = "config hash" if field == "config_sha256" else field
+            raise ValueError(f"stale causal J-lens terminal provenance {label}")
+    if set(stored_provenance) != set(provenance):
+        raise ValueError("stale causal J-lens terminal provenance keys")
+
+
+def _retire_terminal_files(
+    *, results_dir: Path, artifacts_dir: Path
+) -> None:
+    retired = artifacts_dir / "retired_terminals"
+    retired.mkdir(parents=True, exist_ok=True)
+    for name in (EVALUATION_FILENAME, MANIFEST_FILENAME):
+        source = results_dir / name
+        if source.is_file():
+            os.replace(source, retired / name)
+
+
 def _stage_total_units(stage: str, *, dataset_size: int) -> int:
     if stage == "prepare":
         return len(DATASETS) * dataset_size
@@ -1956,6 +2098,8 @@ def _stage_completed_units(
     )
     checkpoint_path = artifacts_dir / CHECKPOINT_FILENAME
     checkpoint = _load_or_create_checkpoint(checkpoint_path, identity)
+    if stage == "panel":
+        return len(matrix) - len(checkpoint.pending(matrix))
     checkpoint = reconcile_generation_artifacts(
         artifacts_dir,
         matrix=matrix,
@@ -1994,7 +2138,9 @@ def run_qwen_causal_jlens(
     root = root.resolve()
     config = load_config(root, profile=profile)
     _require_config_contract(
-        config, allow_fixture_contract=allow_fixture_contract
+        config,
+        allow_fixture_contract=allow_fixture_contract,
+        profile_path=root / "configs" / profile,
     )
     results_dir, artifacts_dir = project_paths(root, config)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -2016,22 +2162,22 @@ def run_qwen_causal_jlens(
     terminal_path = results_dir / EVALUATION_FILENAME
     if terminal_path.is_file():
         terminal = _read_json(terminal_path)
-        if terminal.get("run_id") != resolved_run:
-            raise ValueError("stale causal J-lens terminal run_id")
-        if terminal.get("implementation_commit") != commit:
-            raise ValueError("stale causal J-lens terminal implementation_commit")
-        if terminal.get("source_artifact_hashes") != source["source_artifact_hashes"]:
-            raise ValueError("stale causal J-lens terminal source hashes")
-        if terminal.get("status") != STATUS_PASS:
-            raise ValueError("pre-existing causal J-lens terminal is not reusable")
-        from .qwen_causal_jlens_validate import validate_qwen_causal_jlens
-
-        validate_qwen_causal_jlens(
-            root, allow_fixture_contract=allow_fixture_contract
+        _require_terminal_identity(
+            terminal, config=config, provenance=provenance
         )
-        terminal = _read_json(terminal_path)
-        _reconcile_terminal_status(store, terminal)
-        return terminal
+        if terminal.get("status") == STATUS_PASS:
+            _reconcile_terminal_status(store, terminal)
+            from .qwen_causal_jlens_validate import validate_qwen_causal_jlens
+
+            validate_qwen_causal_jlens(
+                root, allow_fixture_contract=allow_fixture_contract
+            )
+            return _read_json(terminal_path)
+        if terminal.get("status") not in {STATUS_OPERATIONAL_ERROR, "aborted"}:
+            raise ValueError("pre-existing causal J-lens terminal is not resumable")
+        _retire_terminal_files(
+            results_dir=results_dir, artifacts_dir=artifacts_dir
+        )
     runner = stage_runner or _default_stage_runner
     accumulated: dict[str, Any] = {}
     last: dict[str, Any] | None = None

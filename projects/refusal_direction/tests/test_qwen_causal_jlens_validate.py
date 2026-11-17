@@ -27,6 +27,7 @@ from refusal_direction_replication.qwen_causal_jlens import (
     cluster_bootstrap_difference,
     cohort_digest,
     compact_contains_text_leak,
+    observation_key,
     summarize_behavior_changes,
 )
 from refusal_direction_replication.qwen_causal_jlens_runtime import (
@@ -764,6 +765,138 @@ def test_runtime_reuses_terminal_only_after_strict_offline_validation(
         )
 
 
+def _run_fixture_resume(root: Path) -> dict[str, Any]:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        run_qwen_causal_jlens,
+    )
+
+    return run_qwen_causal_jlens(
+        root,
+        run_id=RUN_ID,
+        implementation_commit=COMMIT,
+        gpu_probe=lambda: {
+            "cuda_available": True,
+            "device_name": "NVIDIA A100",
+            "total_memory_bytes": 40_000_000_000,
+        },
+        load_model=lambda *_args, **_kwargs: pytest.fail("model must not load"),
+        allow_fixture_contract=True,
+    )
+
+
+def _assert_complete_unique_raw_tree(root: Path) -> None:
+    responses = _jsonl(_art(root, "responses.jsonl"))
+    observations = _jsonl(_art(root, "observations.jsonl"))
+    response_keys = [
+        (row["dataset"], row["example_id"], row["condition"])
+        for row in responses
+    ]
+    observation_keys = [observation_key(row) for row in observations]
+    assert len(response_keys) == len(set(response_keys)) == 16
+    assert len(observation_keys) == len(set(observation_keys))
+    checks = validate_qwen_causal_jlens(root, allow_fixture_contract=True)
+    assert checks and all(checks.values())
+
+
+def test_caught_failure_terminal_resumes_and_validates_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    _seed_complete_tree(tmp_path)
+    _rewrite_json(
+        _res(tmp_path, EVALUATION_FILENAME),
+        lambda payload: payload.update(
+            status="operational_error",
+            operational_success=False,
+            stage="finalize",
+            exception_category="RuntimeError",
+            error_code="runtime_error",
+            message="caught finalize failure",
+        ),
+    )
+    _rewrite_json(
+        _res(tmp_path, MANIFEST_FILENAME),
+        lambda payload: payload["results"].update(status="operational_error"),
+    )
+    events = _jsonl(_art(tmp_path, "events.jsonl"))
+    events[-2]["completed_units"] = 0
+    events[-1] = {
+        **events[-1],
+        "event": "failed",
+        "state": "failed",
+        "completed_units": 0,
+    }
+    _write_jsonl(_art(tmp_path, "events.jsonl"), events)
+    _rewrite_json(
+        _art(tmp_path, "status.json"),
+        lambda payload: payload.update(
+            current_stage="finalize",
+            state="failed",
+            completed_units=0,
+            total_units=1,
+        ),
+    )
+
+    terminal = _run_fixture_resume(tmp_path)
+    assert terminal["status"] == "pass"
+    _assert_complete_unique_raw_tree(tmp_path)
+
+
+def test_abrupt_interruption_resumes_attempt_and_validates_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    _seed_complete_tree(tmp_path)
+    _res(tmp_path, EVALUATION_FILENAME).unlink()
+    _res(tmp_path, MANIFEST_FILENAME).unlink()
+    events = _jsonl(_art(tmp_path, "events.jsonl"))
+    _write_jsonl(_art(tmp_path, "events.jsonl"), events[:-3])
+    _rewrite_json(
+        _art(tmp_path, "status.json"),
+        lambda payload: payload.update(
+            current_stage="finalize",
+            state="pending",
+            completed_units=0,
+            total_units=1,
+        ),
+    )
+
+    terminal = _run_fixture_resume(tmp_path)
+    assert terminal["status"] == "pass"
+    _assert_complete_unique_raw_tree(tmp_path)
+
+
+def test_passing_terminal_reconciles_finalize_before_strict_validation(
+    tmp_path: Path,
+) -> None:
+    _seed_complete_tree(tmp_path)
+    events = _jsonl(_art(tmp_path, "events.jsonl"))
+    _write_jsonl(_art(tmp_path, "events.jsonl"), events[:-1])
+    _rewrite_json(
+        _art(tmp_path, "status.json"),
+        lambda payload: payload.update(
+            current_stage="finalize",
+            state="running",
+            completed_units=1,
+            total_units=1,
+        ),
+    )
+
+    terminal = _run_fixture_resume(tmp_path)
+    assert terminal["status"] == "pass"
+    _assert_complete_unique_raw_tree(tmp_path)
+
+
+def test_validator_rejects_semantically_unchanged_profile_byte_mutation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "configs").mkdir(parents=True)
+    path = tmp_path / "configs" / CAUSAL_JLENS_PROFILE
+    payload = json.loads(PACKAGED_PROFILE.read_text(encoding="utf-8"))
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="digest|sha256"):
+        validate_qwen_causal_jlens(tmp_path)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -811,8 +944,8 @@ def test_production_contract_requires_packaged_profile_exactly(tmp_path: Path) -
 
 def test_strict_validation_accepts_the_packaged_profile_contract(tmp_path: Path) -> None:
     (tmp_path / "configs").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "configs" / CAUSAL_JLENS_PROFILE).write_text(
-        PACKAGED_PROFILE.read_text(encoding="utf-8"), encoding="utf-8"
+    (tmp_path / "configs" / CAUSAL_JLENS_PROFILE).write_bytes(
+        PACKAGED_PROFILE.read_bytes()
     )
     with pytest.raises(ValueError) as caught:
         validate_qwen_causal_jlens(tmp_path)

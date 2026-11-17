@@ -32,6 +32,7 @@ from .qwen_causal_jlens import (
     compact_contains_text_leak,
     observation_key,
     summarize_behavior_changes,
+    verify_causal_profile_digest,
 )
 from .qwen_causal_jlens_runtime import (
     CAUSAL_STAGES,
@@ -224,6 +225,7 @@ def _packaged_profile() -> dict[str, Any]:
         Path(__file__).resolve().parents[2] / "configs" / CAUSAL_JLENS_PROFILE
     )
     _require(package_path.is_file(), "packaged causal J-lens profile is missing")
+    verify_causal_profile_digest(package_path)
     return dict(json.loads(package_path.read_text(encoding="utf-8")))
 
 
@@ -654,8 +656,8 @@ def _check_event_sequence(
 ) -> None:
     expected_stage_index = 0
     active_stage: str | None = None
-    state: str | None = None
-    previous_completed = 0
+    attempt_state: str | None = None
+    completed_floor = 0
     total_units: int | None = None
     for index, event in enumerate(events):
         _require(
@@ -666,27 +668,45 @@ def _check_event_sequence(
         _require(stage in CAUSAL_STAGES, f"unknown event stage at event {index}")
         kind = event.get("event")
         event_state = event.get("state")
-        if active_stage is None:
+        if kind == "initialized":
             _require(
                 expected_stage_index < len(CAUSAL_STAGES)
                 and stage == CAUSAL_STAGES[expected_stage_index],
                 "events stage order must be prepare, pilot, panel, analysis, finalize",
             )
             _require(
-                kind == "initialized" and event_state == "pending",
+                event_state == "pending",
                 "illegal event state transition: stage must initialize pending",
             )
-            active_stage = str(stage)
-            state = "pending"
-            previous_completed = _strict_int(
-                event.get("completed_units", 0), "event completed_units"
+            if active_stage is None:
+                active_stage = str(stage)
+                completed_floor = 0
+                total_units = _strict_int(
+                    event.get("total_units"), "event total_units"
+                )
+            else:
+                _require(
+                    stage == active_stage
+                    and attempt_state in {"pending", "running", "failed", "aborted"},
+                    "illegal repeated stage attempt",
+                )
+                _require(
+                    _strict_int(event.get("total_units"), "event total_units")
+                    == total_units,
+                    "event total_units changed across attempts",
+                )
+            initialized_completed = _strict_int(
+                event.get("completed_units", completed_floor),
+                "event completed_units",
             )
-            total_units = _strict_int(event.get("total_units"), "event total_units")
             _require(
-                0 <= previous_completed <= total_units,
+                completed_floor <= initialized_completed <= int(total_units),
                 "event counters are outside the stage total",
             )
+            completed_floor = initialized_completed
+            attempt_state = "pending"
             continue
+        _require(active_stage is not None, "event stage has no initialized attempt")
         _require(stage == active_stage, "events stage order changed before completion")
         completed = _strict_int(
             event.get("completed_units"), "event completed_units"
@@ -697,35 +717,47 @@ def _check_event_sequence(
             "event total_units changed within a stage",
         )
         _require(
-            completed >= previous_completed,
-            "event completed counters must be monotonic within stages",
+            completed >= completed_floor,
+            "event completed counters must be monotonic across stage attempts",
         )
         _require(completed <= current_total, "event completed_units exceeds total_units")
         if kind == "state_changed":
             _require(
-                state == "pending" and event_state == "running",
+                attempt_state == "pending" and event_state == "running",
                 "illegal event state transition",
             )
-            state = "running"
+            attempt_state = "running"
         elif kind == "progress":
             _require(
-                state == "running" and event_state == "running",
+                attempt_state == "running" and event_state == "running",
                 "illegal event state transition",
             )
+        elif kind == "failed":
+            _require(
+                attempt_state == "running" and event_state == "failed",
+                "illegal event state transition to failed",
+            )
+            attempt_state = "failed"
+        elif kind == "aborted":
+            _require(
+                attempt_state in {"pending", "running"} and event_state == "aborted",
+                "illegal event state transition to aborted",
+            )
+            attempt_state = "aborted"
         elif kind == "stage_completed":
             _require(
-                state == "running"
+                attempt_state == "running"
                 and event_state == "completed"
                 and completed == current_total,
                 "illegal event state transition to completed",
             )
             expected_stage_index += 1
             active_stage = None
-            state = None
+            attempt_state = None
             total_units = None
         else:
             raise ValueError(f"illegal event type in completed run: {kind!r}")
-        previous_completed = completed
+        completed_floor = completed
     _require(
         active_stage is None and expected_stage_index == len(CAUSAL_STAGES),
         "events do not contain the exact completed stage order",
@@ -1223,6 +1255,9 @@ def validate_qwen_causal_jlens(
 
 def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
     checks: dict[str, bool] = {}
+    profile_path = root / "configs" / CAUSAL_JLENS_PROFILE
+    if not allow_fixture_contract:
+        verify_causal_profile_digest(profile_path)
     config = load_config(root, profile=CAUSAL_JLENS_PROFILE)
     results_dir = _confined_path(root, config.get("results_dir"), "profile results_dir")
     artifacts_dir = _confined_path(

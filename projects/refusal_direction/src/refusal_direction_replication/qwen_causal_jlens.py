@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
+from pathlib import Path
 import random
 from statistics import mean
 from typing import Any
@@ -17,6 +18,9 @@ READOUT_STEPS = 8
 CONDITIONS = ("baseline", "ablation", "addition", "random_control")
 DATASETS = ("mitre", "mitre_frr")
 PRODUCTION_DATASET_SIZE = 32
+FROZEN_CAUSAL_PROFILE_SHA256 = (
+    "46e2b88564190544ebe1ea5285b19c946f8beb0a2b130a7d0632712d24654e92"
+)
 PRIMARY_LAYER = 25
 # Frozen provenance from committed canonical artifacts. Recalculate only if
 # those source result files are deliberately replaced by a later approved run.
@@ -51,6 +55,15 @@ TEXT_LEAK_KEYS = frozenset(
         "content",
     }
 )
+
+
+def verify_causal_profile_digest(path: str | Path) -> None:
+    actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if actual != FROZEN_CAUSAL_PROFILE_SHA256:
+        raise ValueError(
+            "production contract: causal profile sha256 digest differs from "
+            "the independently frozen pin"
+        )
 
 
 def bootstrap_ci_indices(resamples: int) -> tuple[int, int]:

@@ -1046,6 +1046,22 @@ def test_runtime_production_config_contract_is_exact_and_fixture_is_explicit() -
     _require_config_contract(fixture, allow_fixture_contract=True)
 
 
+def test_runtime_rejects_semantically_unchanged_profile_byte_mutation(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_causal_jlens_runtime import (
+        _require_config_contract,
+    )
+
+    packaged_path = _PROJECT_ROOT / "configs" / CAUSAL_JLENS_PROFILE
+    packaged = json.loads(packaged_path.read_text(encoding="utf-8"))
+    mutated = tmp_path / CAUSAL_JLENS_PROFILE
+    mutated.write_text(json.dumps(packaged, separators=(",", ":")), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="digest|sha256"):
+        _require_config_contract(packaged, profile_path=mutated)
+
+
 def test_resume_skips_only_complete_matching_pairs(tmp_path: Path) -> None:
     from refusal_direction_replication.qwen_causal_jlens_runtime import PanelCheckpoint
 
@@ -1162,18 +1178,81 @@ def _write_passing_pilot_gate(
         dataset: list(prepare[dataset]["example_ids"][:2])
         for dataset in DATASETS
     }
+    pilot_matrix = module.expected_matrix(prepare, example_ids=pilot_ids)
+    artifacts = root / str(config["artifacts_dir"])
+    responses_path = artifacts / "responses.jsonl"
+    observations_path = artifacts / "observations.jsonl"
+    responses = (
+        [
+            json.loads(line)
+            for line in responses_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if responses_path.is_file()
+        else []
+    )
+    observations = (
+        [
+            json.loads(line)
+            for line in observations_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if observations_path.is_file()
+        else []
+    )
+    response_keys = {
+        (row["dataset"], row["example_id"], row["condition"]) for row in responses
+    }
+    observation_keys = {
+        (row["dataset"], row["example_id"], row["condition"])
+        for row in observations
+    }
+    for dataset, example_id, condition in pilot_matrix:
+        key = (dataset, example_id, condition)
+        if key not in response_keys:
+            responses.append(_pair_response(dataset, example_id, condition))
+        if key not in observation_keys:
+            observations.extend(_pair_observations(dataset, example_id, condition))
+    _write_jsonl(responses_path, responses)
+    _write_jsonl(observations_path, observations)
+    identity = module.checkpoint_identity(
+        run_id=run_id,
+        implementation_commit=implementation_commit,
+        config=config,
+        source=source,
+        prepare=prepare,
+    )
+    checkpoint_path = artifacts / "checkpoint.json"
+    checkpoint = (
+        module.PanelCheckpoint.load(checkpoint_path, expected_identity=identity)
+        if checkpoint_path.is_file()
+        else module.PanelCheckpoint.create(identity)
+    )
+    for dataset, example_id, condition in pilot_matrix:
+        checkpoint.mark_complete(dataset, example_id, condition)
+    checkpoint.write(checkpoint_path)
+    pilot_responses = [
+        row
+        for row in responses
+        if (row["dataset"], row["example_id"], row["condition"]) in set(pilot_matrix)
+    ]
+    pilot_observations = [
+        row
+        for row in observations
+        if (row["dataset"], row["example_id"], row["condition"]) in set(pilot_matrix)
+    ]
     path = root / str(config["results_dir"]) / "01_pilot.json"
     module._write_stage(
         path,
         stage="pilot",
         config=config,
         results={
-            "response_count": 16,
-            "observation_count": 0,
+            "response_count": len(pilot_responses),
+            "observation_count": len(pilot_observations),
             "pilot_status": "pass",
             "conditions": list(CONDITIONS),
             "pilot_ids": pilot_ids,
-            "terminal_reasons": {"eos": 16, "max_tokens": 0},
+            "terminal_reasons": module._terminal_reason_counts(pilot_responses),
         },
         provenance=module._provenance(
             config=config,
@@ -1444,6 +1523,40 @@ def test_panel_requires_same_identity_passing_exact_pilot_gate(tmp_path: Path) -
             load_model=lambda *_args, **_kwargs: pytest.fail("model loaded"),
         )
 
+    _write_passing_pilot_gate(
+        tmp_path, config=config, source=source, prepare=prepare
+    )
+    observations_path = store.artifacts_dir / "observations.jsonl"
+    raw_observations = [
+        line
+        for line in observations_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    observations_path.write_text(
+        "\n".join(raw_observations[1:]) + "\n", encoding="utf-8"
+    )
+    before = {
+        name: (store.artifacts_dir / name).read_bytes()
+        for name in ("responses.jsonl", "observations.jsonl", "checkpoint.json")
+        if (store.artifacts_dir / name).is_file()
+    }
+    with pytest.raises(ValueError, match="raw pilot gate"):
+        run_panel_stage(
+            root=tmp_path,
+            config=config,
+            artifacts_dir=store.artifacts_dir,
+            store=store,
+            source=source,
+            prepare=prepare,
+            run_id="causal-run",
+            implementation_commit="a" * 40,
+            load_model=lambda *_args, **_kwargs: pytest.fail("model loaded"),
+        )
+    assert {
+        name: (store.artifacts_dir / name).read_bytes()
+        for name in before
+    } == before
+
 
 def test_panel_resume_skips_completed_pairs_and_keeps_compact_clean(
     tmp_path: Path,
@@ -1677,6 +1790,7 @@ def _pair_response(
     *,
     steps: int = 3,
 ) -> dict[str, Any]:
+    generated_token_ids = [2] * max(steps - 1, 0) + [151645]
     return {
         "dataset": dataset,
         "example_id": example_id,
@@ -1686,6 +1800,7 @@ def _pair_response(
         "response": "response",
         "refusal": False,
         "valid": True,
+        "generated_token_ids": generated_token_ids,
         "generated_token_count": steps,
         "readout_steps": min(8, steps),
         "terminal_reason": "eos",
@@ -1708,7 +1823,7 @@ def _pair_observations(
             "layer": int(layer),
             "lens_version": version,
             "rank": 1,
-            "target_token_id": 2,
+            "target_token_id": 151645 if step == steps else 2,
         }
         for step in range(1, min(8, steps) + 1)
         for layer in READOUT_LAYERS
@@ -1779,7 +1894,9 @@ def test_reconcile_prunes_partial_crash_and_repairs_lagging_checkpoint(
     assert repaired._completed == [("mitre", "id-1", "baseline")]
 
 
-def test_resume_regenerates_partial_pair_exactly_once(tmp_path: Path) -> None:
+def test_panel_blocks_partial_raw_pilot_instead_of_regenerating(
+    tmp_path: Path,
+) -> None:
     from refusal_direction_replication.qwen_causal_jlens_runtime import (
         PanelCheckpoint,
         checkpoint_identity,
@@ -1817,28 +1934,29 @@ def test_resume_regenerates_partial_pair_exactly_once(tmp_path: Path) -> None:
     _write_passing_pilot_gate(
         tmp_path, config=config, source=source, prepare=prepare
     )
-    results = run_panel_stage(
-        root=tmp_path,
-        config=config,
-        artifacts_dir=store.artifacts_dir,
-        store=store,
-        source=source,
-        prepare=prepare,
-        run_id="causal-run",
-        implementation_commit="a" * 40,
-        load_model=_load_model,
-        load_readout=_load_readout,
-        parity_check=lambda **_kwargs: None,
-    )
+    with pytest.raises(ValueError, match="raw pilot gate"):
+        run_panel_stage(
+            root=tmp_path,
+            config=config,
+            artifacts_dir=store.artifacts_dir,
+            store=store,
+            source=source,
+            prepare=prepare,
+            run_id="causal-run",
+            implementation_commit="a" * 40,
+            load_model=lambda *_args, **_kwargs: pytest.fail("model loaded"),
+            load_readout=_load_readout,
+            parity_check=lambda **_kwargs: None,
+        )
     responses = [
         json.loads(line)
-        for line in (store.artifacts_dir / "responses.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (store.artifacts_dir / "responses.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
         if line.strip()
     ]
     keys = [(row["dataset"], row["example_id"], row["condition"]) for row in responses]
     assert keys.count(("mitre", first_id, "baseline")) == 1
-    assert len(set(keys)) == len(keys) == 16
-    assert results["response_count"] == 16
 
 
 def test_pilot_and_panel_require_exact_unique_key_matrix(tmp_path: Path) -> None:
