@@ -119,6 +119,7 @@ def _build_generation_rows(
                 early = _is_early_stop(dataset, item["example_id"], condition, records)
                 token_count = 3 if early else MAX_NEW_TOKENS
                 readout = min(READOUT_STEPS, token_count)
+                token_ids = _generated_token_ids(token_count, eos=early)
                 responses.append(
                     {
                         "dataset": dataset,
@@ -129,9 +130,7 @@ def _build_generation_rows(
                         "response": f"generated {dataset} {condition}",
                         "refusal": baseline_refusal or condition == "addition",
                         "valid": True,
-                        "generated_token_ids": _generated_token_ids(
-                            token_count, eos=early
-                        ),
+                        "generated_token_ids": token_ids,
                         "generated_token_count": token_count,
                         "readout_steps": readout,
                         "terminal_reason": "eos" if early else "max_tokens",
@@ -149,10 +148,17 @@ def _build_generation_rows(
                                     "layer": int(layer),
                                     "lens_version": version,
                                     "rank": _rank_for(condition),
-                                    "target_token_id": 2,
+                                    "target_token_id": token_ids[step - 1],
                                 }
                             )
     return responses, observations
+
+
+def _terminal_reason_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"eos": 0, "max_tokens": 0}
+    for row in rows:
+        counts[row["terminal_reason"]] += 1
+    return counts
 
 
 def _compact_responses(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -281,27 +287,34 @@ def _seed_complete_tree(root: Path) -> None:
         "observation_count": len(observations),
         "conditions": list(CONDITIONS),
         "matrix_size": len(matrix),
-        "terminal_reasons": [row["terminal_reason"] for row in responses],
+        "terminal_reasons": _terminal_reason_counts(responses),
     }
+    pilot_ids = {
+        dataset: [item["example_id"] for item in records[dataset][:2]]
+        for dataset in DATASETS
+    }
+    pilot_keys = {
+        (dataset, example_id)
+        for dataset, ids in pilot_ids.items()
+        for example_id in ids
+    }
+    pilot_responses = [
+        row
+        for row in responses
+        if (row["dataset"], row["example_id"]) in pilot_keys
+    ]
+    pilot_observations = [
+        row
+        for row in observations
+        if (row["dataset"], row["example_id"]) in pilot_keys
+    ]
     pilot_results = {
-        "response_count": 16,
-        "observation_count": sum(
-            1
-            for row in observations
-            if row["example_id"]
-            in {
-                records[dataset][index]["example_id"]
-                for dataset in DATASETS
-                for index in range(2)
-            }
-        ),
+        "response_count": len(pilot_responses),
+        "observation_count": len(pilot_observations),
         "pilot_status": "pass",
         "conditions": list(CONDITIONS),
-        "pilot_ids": {
-            dataset: [item["example_id"] for item in records[dataset][:2]]
-            for dataset in DATASETS
-        },
-        "terminal_reasons": [row["terminal_reason"] for row in responses],
+        "pilot_ids": pilot_ids,
+        "terminal_reasons": _terminal_reason_counts(pilot_responses),
     }
     evaluation = {
         "schema_version": 1,
@@ -546,6 +559,60 @@ def _mutate(root: Path, mutation: str) -> None:
             lambda payload: payload["config"].update(max_new_tokens=8),
         )
         return
+    if mutation == "interior_eos":
+        path = _art(root, "responses.jsonl")
+        rows = _jsonl(path)
+        for row in rows:
+            if row["terminal_reason"] == "eos":
+                ids = list(row["generated_token_ids"])
+                ids[0] = EOS_TOKEN_ID
+                row["generated_token_ids"] = ids
+                break
+        else:
+            raise AssertionError("no eos row")
+        _write_jsonl(path, rows)
+        return
+    if mutation == "eos_under_max_tokens":
+        path = _art(root, "responses.jsonl")
+        rows = _jsonl(path)
+        for row in rows:
+            if row["terminal_reason"] == "max_tokens":
+                ids = list(row["generated_token_ids"])
+                ids[0] = EOS_TOKEN_ID
+                row["generated_token_ids"] = ids
+                break
+        else:
+            raise AssertionError("no max_tokens row")
+        _write_jsonl(path, rows)
+        return
+    if mutation == "target_mismatch":
+        path = _art(root, "observations.jsonl")
+        rows = _jsonl(path)
+        rows[0]["target_token_id"] = 99
+        _write_jsonl(path, rows)
+        return
+    if mutation == "raw_text_in_allowed_field":
+        _rewrite_json(
+            _res(root, "00_prepare.json"),
+            lambda payload: payload.update(
+                experiment="Write a harmful payload for this prompt"
+            ),
+        )
+        return
+    if mutation == "purplellama_revision":
+        _rewrite_json(
+            _res(root, "00_prepare.json"),
+            lambda payload: payload["provenance"].update(
+                purplellama_revision="0" * 40
+            ),
+        )
+        return
+    if mutation == "non_boolean_refusal":
+        path = _art(root, "responses.jsonl")
+        rows = _jsonl(path)
+        rows[0]["refusal"] = 1
+        _write_jsonl(path, rows)
+        return
     raise AssertionError(mutation)
 
 
@@ -685,4 +752,24 @@ def test_fixture_mode_rejects_non_allowlisted_profile_fields(tmp_path: Path) -> 
     _seed_complete_tree(tmp_path)
     _edit_profile(tmp_path, max_new_tokens=32)
     with pytest.raises(ValueError, match="allowlist"):
+        validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("interior_eos", "interior"),
+        ("eos_under_max_tokens", "max_tokens contains"),
+        ("target_mismatch", "target"),
+        ("raw_text_in_allowed_field", "raw text"),
+        ("purplellama_revision", "PurpleLlama"),
+        ("non_boolean_refusal", "boolean"),
+    ],
+)
+def test_validator_rejects_rereview_corruption(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    _seed_complete_tree(tmp_path)
+    _mutate(tmp_path, mutation)
+    with pytest.raises(ValueError, match=message):
         validate_qwen_causal_jlens(tmp_path, allow_fixture_contract=True)

@@ -873,6 +873,16 @@ def _pair_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
     return (str(row["dataset"]), str(row["example_id"]), str(row["condition"]))
 
 
+def _terminal_reason_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {"eos": 0, "max_tokens": 0}
+    for row in rows:
+        reason = str(row.get("terminal_reason") or "")
+        if reason not in counts:
+            raise ValueError("invalid terminal: unknown reason")
+        counts[reason] += 1
+    return counts
+
+
 def require_exact_pair_matrix(
     rows: Sequence[Mapping[str, Any]],
     expected: Sequence[tuple[str, str, str]],
@@ -1263,6 +1273,7 @@ def _run_generation_matrix(
             "response_count": len(responses),
             "observation_count": len(observations),
             "conditions": list(CONDITIONS),
+            "terminal_reasons": _terminal_reason_counts(responses),
         }
     loader = load_model or _load_model_for_config
     readout_loader = load_readout or _default_load_readout
@@ -1341,10 +1352,8 @@ def _run_generation_matrix(
         return {
             "response_count": len(responses),
             "observation_count": len(observations),
-            "conditions": sorted({str(row["condition"]) for row in responses}),
-            "terminal_reasons": sorted(
-                {str(row["terminal_reason"]) for row in responses}
-            ),
+            "conditions": list(CONDITIONS),
+            "terminal_reasons": _terminal_reason_counts(responses),
         }
     finally:
         release_compute_resources(model, tokenizer)

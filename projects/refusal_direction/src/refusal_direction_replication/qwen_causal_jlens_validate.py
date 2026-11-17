@@ -40,6 +40,7 @@ from .qwen_causal_jlens_runtime import (
     MANIFEST_FILENAME,
     OBSERVATION_KEYS,
     OBSERVATIONS_FILENAME,
+    PILOT_PROMPTS_PER_DATASET,
     PanelCheckpoint,
     RESPONSES_FILENAME,
     STAGE_FILES,
@@ -51,6 +52,7 @@ from .qwen_causal_jlens_runtime import (
     require_exact_pair_matrix,
     source_context,
 )
+from .qwen_code_eval import PURPLE_LLAMA_REPOSITORY, PURPLE_LLAMA_REVISION
 from .run_progress import EVENTS_FILENAME, STATUS_FILENAME
 
 RESULT_FILES = (
@@ -65,7 +67,16 @@ PRODUCTION_PAIR_COUNT = len(DATASETS) * PRODUCTION_DATASET_SIZE * len(CONDITIONS
 FLOAT_TOLERANCE = 1e-9
 ABS_TOLERANCE = 1e-12
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
 COMPLETED_STAGES = [*CAUSAL_STAGES]
+TERMINAL_REASONS = ("eos", "max_tokens")
+EXPECTED_EXPERIMENT = {
+    STAGE_FILES["prepare"]: "causal_jlens_prepare",
+    STAGE_FILES["pilot"]: "causal_jlens_pilot",
+    STAGE_FILES["panel"]: "causal_jlens_panel",
+    STAGE_FILES["analysis"]: "causal_jlens_analysis",
+    MANIFEST_FILENAME: "causal_jlens_manifest",
+}
 RAW_TEXT_ALIASES = TEXT_LEAK_KEYS | frozenset(
     {
         "samples",
@@ -270,6 +281,12 @@ def _strict_int(value: Any, label: str) -> int:
     return value
 
 
+def _strict_bool(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be an exact boolean")
+    return value
+
+
 def _check_exact_keys(obj: Any, expected: set[str], label: str) -> None:
     _require(isinstance(obj, Mapping), f"{label} is not an object")
     actual = set(obj)
@@ -354,6 +371,27 @@ def _check_scientific_constants(config: Mapping[str, Any]) -> None:
         "primary layer must remain 25",
     )
     _require(int(config.get("primary_k", -1)) == 5, "primary k must remain 5")
+    _require(
+        config.get("purplellama_revision") == PURPLE_LLAMA_REVISION,
+        "profile PurpleLlama revision must remain pinned",
+    )
+    _require(
+        config.get("purplellama_repository") == PURPLE_LLAMA_REPOSITORY,
+        "profile PurpleLlama repository must remain pinned",
+    )
+
+
+def _looks_like_raw_text(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if SHA_RE.fullmatch(stripped) or COMMIT_RE.fullmatch(stripped):
+        return False
+    if ("/" in stripped or "\\" in stripped) and " " not in stripped:
+        return False
+    if len(stripped) > 160:
+        return True
+    return len(stripped.split()) >= 5
 
 
 def _contains_raw_text(obj: Any) -> bool:
@@ -368,6 +406,8 @@ def _contains_raw_text(obj: Any) -> bool:
         return False
     if isinstance(obj, (list, tuple)):
         return any(_contains_raw_text(item) for item in obj)
+    if isinstance(obj, str):
+        return _looks_like_raw_text(obj)
     return False
 
 
@@ -388,6 +428,14 @@ def _check_result_schemas(
         MANIFEST_FILENAME,
     ):
         _check_exact_keys(payloads[name], set(ENVELOPE_KEYS), name)
+        _require(
+            payloads[name].get("schema_version") == 1,
+            f"{name} schema_version must be 1",
+        )
+        _require(
+            payloads[name].get("experiment") == EXPECTED_EXPERIMENT[name],
+            f"{name} experiment name is not the exact causal stage name",
+        )
         _check_exact_keys(payloads[name]["provenance"], set(PROVENANCE_KEYS), f"{name} provenance")
     _check_exact_keys(
         _results_of(payloads[STAGE_FILES["prepare"]], STAGE_FILES["prepare"]),
@@ -428,6 +476,10 @@ def _check_result_schemas(
         "execution_manifest.json results",
     )
     _check_exact_keys(payloads[EVALUATION_FILENAME], set(EVALUATION_KEYS), EVALUATION_FILENAME)
+    _require(
+        payloads[EVALUATION_FILENAME].get("schema_version") == 1,
+        "evaluation schema_version must be 1",
+    )
     _check_exact_keys(
         payloads[EVALUATION_FILENAME]["provenance"],
         set(PROVENANCE_KEYS),
@@ -451,7 +503,7 @@ def _refusal_rates(responses: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 if str(record["dataset"]) == dataset
                 and str(record["condition"]) == condition
             ]
-            refusals = [bool(record.get("refusal")) for record in items]
+            refusals = [_strict_bool(record.get("refusal"), "refusal") for record in items]
             output[dataset][condition] = {
                 "prompt_count": len(items),
                 "refusal_count": sum(refusals),
@@ -514,23 +566,27 @@ def _check_generation_integrity(
         terminal = row.get("terminal_reason")
         if not isinstance(terminal, str) or not terminal.strip():
             raise ValueError("early termination marker missing")
+        eos_positions = [
+            index for index, token in enumerate(token_ids) if token == eos_id
+        ]
         if terminal == "max_tokens":
             if count != max_new:
                 raise ValueError(
                     "invalid terminal: max_tokens count is below max_new_tokens"
                 )
-            if token_ids[-1] == eos_id:
+            if eos_positions:
                 raise ValueError(
-                    "invalid terminal: max_tokens ends with the frozen EOS id"
+                    "invalid terminal: max_tokens contains the frozen EOS id"
                 )
         elif terminal == "eos":
             if not 1 <= count <= max_new:
                 raise ValueError(
                     "invalid terminal: eos count is outside 1..max_new_tokens"
                 )
-            if token_ids[-1] != eos_id:
+            if eos_positions != [count - 1]:
                 raise ValueError(
-                    "invalid terminal: eos final token is not the frozen EOS ID"
+                    "invalid terminal: eos history must contain EOS exactly once "
+                    "as the final token, with no interior EOS"
                 )
         else:
             raise ValueError("invalid terminal: unknown reason")
@@ -538,15 +594,25 @@ def _check_generation_integrity(
             raise ValueError(
                 "termination readout_steps do not equal min(count, readout_steps)"
             )
+        pair_observations = grouped[_pair_key(row)]
         steps = {
             _strict_int(item.get("generation_step"), "generation_step")
-            for item in grouped[_pair_key(row)]
+            for item in pair_observations
         }
         expected_steps = set(range(1, expected_readout + 1))
         if steps != expected_steps:
             raise ValueError(
                 "observation steps are not exactly 1..min(count, readout_steps)"
             )
+        for item in pair_observations:
+            step = _strict_int(item.get("generation_step"), "generation_step")
+            target = item.get("target_token_id")
+            if isinstance(target, bool) or not isinstance(target, int):
+                raise ValueError("target_token_id must be a strict integer")
+            if target != token_ids[step - 1]:
+                raise ValueError(
+                    "observation target_token_id does not match generated_token_ids"
+                )
 
 
 def _check_unique_observation_keys(observations: Sequence[Mapping[str, Any]]) -> None:
@@ -665,6 +731,12 @@ def _check_file_identity(
         f"jlens upstream identity drifted in {name}",
     )
     _require(
+        provenance.get("purplellama_revision")
+        == config["purplellama_revision"]
+        == PURPLE_LLAMA_REVISION,
+        f"PurpleLlama revision identity drifted in {name}",
+    )
+    _require(
         provenance.get("source_dose_run_id") == source.get("source_dose_run_id"),
         f"source dose identity drifted in {name}",
     )
@@ -773,22 +845,67 @@ def _check_ids_and_matrix(
             "production contract: pair matrix must contain exactly 256 pairs",
         )
     source_results = source_prepare.get("results") or {}
+    frozen_files = source_results.get("source_files") or {}
+    stored_files = prepare.get("source_files") or {}
     for dataset in DATASETS:
         ids = list((prepare.get(dataset) or {}).get("example_ids") or [])
         hashes = list((prepare.get(dataset) or {}).get("content_hashes") or [])
+        indices = list((prepare.get(dataset) or {}).get("source_indices") or [])
         _require(
-            len(ids) == len(hashes) == dataset_size,
+            (prepare.get(dataset) or {}).get("dataset") == dataset,
+            f"{dataset} dataset field drifted from the frozen dataset name",
+        )
+        _require(
+            len(ids) == len(hashes) == len(indices) == dataset_size,
             f"{dataset} must have exactly {dataset_size} IDs",
         )
         _require(len(set(ids)) == len(ids), f"{dataset} duplicate example IDs")
-        source_ids = list((source_results.get(dataset) or {}).get("example_ids") or [])
-        source_hashes = list(
-            (source_results.get(dataset) or {}).get("content_hashes") or []
+        _require(
+            (prepare.get(dataset) or {}).get("selection_size") == dataset_size,
+            f"{dataset} selection_size drifted from the frozen source prepare",
         )
+        source_block = source_results.get(dataset) or {}
+        source_ids = list(source_block.get("example_ids") or [])
+        source_hashes = list(source_block.get("content_hashes") or [])
+        source_indices = list(source_block.get("source_indices") or [])
         _require(
             ids == source_ids and hashes == source_hashes,
             f"{dataset} IDs drifted from the frozen source prepare",
         )
+        _require(
+            indices == source_indices,
+            f"{dataset} source_indices drifted from the frozen source prepare",
+        )
+        identity = stored_files.get(dataset) or {}
+        frozen_identity = frozen_files.get(dataset) or {}
+        relative_key = (
+            "mitre_relative_path" if dataset == "mitre" else "mitre_frr_relative_path"
+        )
+        _require(
+            identity.get("repository")
+            == frozen_identity.get("repository")
+            == config["purplellama_repository"]
+            == PURPLE_LLAMA_REPOSITORY,
+            f"{dataset} PurpleLlama repository drifted from the frozen source prepare",
+        )
+        _require(
+            identity.get("revision")
+            == frozen_identity.get("revision")
+            == config["purplellama_revision"]
+            == PURPLE_LLAMA_REVISION,
+            f"{dataset} PurpleLlama revision drifted from the frozen source prepare",
+        )
+        _require(
+            identity.get("relative_path")
+            == frozen_identity.get("relative_path")
+            == config[relative_key],
+            f"{dataset} source relative_path drifted from the frozen source prepare",
+        )
+        if frozen_identity.get("sha256") is not None:
+            _require(
+                identity.get("sha256") == frozen_identity.get("sha256"),
+                f"{dataset} source sha256 drifted from the frozen source prepare",
+            )
     require_exact_pair_matrix(responses, matrix)
     require_complete_pair_artifacts(responses, observations, matrix)
     expected_observations = 0
@@ -803,6 +920,118 @@ def _check_ids_and_matrix(
         "observation count disagrees with the actual generated-step denominators",
     )
     return matrix
+
+
+def _terminal_reason_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {reason: 0 for reason in TERMINAL_REASONS}
+    for row in rows:
+        reason = row.get("terminal_reason")
+        if reason not in counts:
+            raise ValueError("invalid terminal: unknown reason")
+        counts[str(reason)] += 1
+    return counts
+
+
+def _check_terminal_summary(
+    stored: Any,
+    rows: Sequence[Mapping[str, Any]],
+    expected_pairs: int,
+    label: str,
+) -> None:
+    _require(isinstance(stored, Mapping), f"{label} terminal_reasons must be a mapping")
+    extra = set(stored) - set(TERMINAL_REASONS)
+    missing = set(TERMINAL_REASONS) - set(stored)
+    if extra:
+        raise ValueError(f"unexpected terminal reason in {label}: {sorted(extra)[0]}")
+    if missing:
+        raise ValueError(f"missing terminal reason in {label}: {sorted(missing)[0]}")
+    expected = _terminal_reason_counts(rows)
+    for reason in TERMINAL_REASONS:
+        _require(
+            _strict_int(stored[reason], f"{label} {reason} count") == expected[reason],
+            f"{label} terminal_reasons {reason} count drifted from responses",
+        )
+    _require(
+        stored["eos"] + stored["max_tokens"] == expected_pairs == len(rows),
+        f"{label} terminal_reasons do not sum to the expected pair count",
+    )
+
+
+def _pilot_id_map(prepare: Mapping[str, Any]) -> dict[str, list[str]]:
+    return {
+        dataset: list(prepare[dataset]["example_ids"][:PILOT_PROMPTS_PER_DATASET])
+        for dataset in DATASETS
+    }
+
+
+def _check_pilot_panel_content(
+    *,
+    prepare: Mapping[str, Any],
+    pilot: Mapping[str, Any],
+    panel: Mapping[str, Any],
+    responses: Sequence[Mapping[str, Any]],
+    observations: Sequence[Mapping[str, Any]],
+    matrix: Sequence[tuple[str, str, str]],
+) -> None:
+    expected_pilot_ids = _pilot_id_map(prepare)
+    _require(
+        pilot.get("pilot_ids") == expected_pilot_ids,
+        "pilot_ids drifted from frozen prepare",
+    )
+    _require(
+        list(pilot.get("conditions") or []) == list(CONDITIONS),
+        "pilot conditions are not the exact frozen conditions",
+    )
+    _require(
+        list(panel.get("conditions") or []) == list(CONDITIONS),
+        "panel conditions are not the exact frozen conditions",
+    )
+    _require(pilot.get("pilot_status") == "pass", "pilot_status must be pass")
+    pilot_keys = {
+        (dataset, example_id)
+        for dataset, ids in expected_pilot_ids.items()
+        for example_id in ids
+    }
+    pilot_responses = [
+        row
+        for row in responses
+        if (str(row["dataset"]), str(row["example_id"])) in pilot_keys
+    ]
+    pilot_observations = [
+        row
+        for row in observations
+        if (str(row["dataset"]), str(row["example_id"])) in pilot_keys
+    ]
+    expected_pilot_pairs = len(pilot_keys) * len(CONDITIONS)
+    _require(
+        pilot.get("response_count") == expected_pilot_pairs == len(pilot_responses),
+        "pilot response_count drifted from frozen prepare IDs",
+    )
+    _require(
+        pilot.get("observation_count") == len(pilot_observations),
+        "pilot observation_count drifted from frozen prepare IDs",
+    )
+    _check_terminal_summary(
+        pilot.get("terminal_reasons"),
+        pilot_responses,
+        expected_pilot_pairs,
+        "pilot",
+    )
+    _require(
+        panel.get("matrix_size") == len(matrix) == len(responses),
+        "panel matrix_size drifted from the exact pair matrix",
+    )
+    _check_terminal_summary(
+        panel.get("terminal_reasons"),
+        responses,
+        len(matrix),
+        "panel",
+    )
+
+
+def _check_exact_refusal_flags(responses: Sequence[Mapping[str, Any]]) -> None:
+    for row in responses:
+        _strict_bool(row.get("refusal"), "refusal")
 
 
 def _check_status_events_manifest(
@@ -903,6 +1132,7 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
     prepare = _results_of(payloads[STAGE_FILES["prepare"]], STAGE_FILES["prepare"])
     analysis = _results_of(payloads[STAGE_FILES["analysis"]], STAGE_FILES["analysis"])
     panel = _results_of(payloads[STAGE_FILES["panel"]], STAGE_FILES["panel"])
+    pilot = _results_of(payloads[STAGE_FILES["pilot"]], STAGE_FILES["pilot"])
     source_prepare = _read_json(_confined_path(root, config["source_prepare"], "source_prepare"))
     status = _read_json(artifacts_dir / STATUS_FILENAME)
     events = _read_jsonl(artifacts_dir / EVENTS_FILENAME)
@@ -925,6 +1155,7 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
     observations = _read_jsonl(artifacts_dir / OBSERVATIONS_FILENAME)
     _check_generation_integrity(responses, observations, config)
     checks["early_termination"] = True
+    _check_exact_refusal_flags(responses)
     _check_unique_observation_keys(observations)
     checks["unique_observation_keys"] = True
     matrix = _check_ids_and_matrix(
@@ -936,6 +1167,14 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
         allow_fixture_contract=allow_fixture_contract,
     )
     checks["exact_ids_and_pair_matrix"] = True
+    _check_pilot_panel_content(
+        prepare=prepare,
+        pilot=pilot,
+        panel=panel,
+        responses=responses,
+        observations=observations,
+        matrix=matrix,
+    )
     completed = [
         (str(item[0]), str(item[1]), str(item[2]))
         for item in (_read_json(checkpoint_path).get("completed") or [])
@@ -1017,7 +1256,6 @@ def _validate(root: Path, *, allow_fixture_contract: bool) -> dict[str, bool]:
         responses=responses,
         observations=observations,
     )
-    pilot = _results_of(payloads[STAGE_FILES["pilot"]], STAGE_FILES["pilot"])
     _require(
         evaluation.get("pilot_status") == pilot.get("pilot_status") == "pass",
         "evaluation pilot_status drifted from 01_pilot.json",
