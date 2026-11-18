@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
+import json
 import os
 import secrets
 import shutil
@@ -11,11 +13,13 @@ import sys
 import tarfile
 import tempfile
 import time
+from typing import NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = ROOT / "projects" / "refusal_direction"
 AUTH = ["colab", "--auth=adc"]
+SPARSE_REFUSAL = "qwen25-coder-sparse-refusal"
 PROFILE_SESSIONS = {
     "gemma": "refusal-gemma",
     "qwen25-coder": "refusal-qwen",
@@ -25,9 +29,36 @@ PROFILE_SESSIONS = {
     "qwen25-coder-lab": "refusal-qwen-lab",
     "qwen25-coder-jlens-v2": "refusal-qwen-jlens-v2",
     "qwen25-coder-causal-jlens": "refusal-qwen-causal-jlens",
+    SPARSE_REFUSAL: "refusal-qwen-sparse-refusal",
 }
 JLENS_V2 = "qwen25-coder-jlens-v2"
 CAUSAL_JLENS = "qwen25-coder-causal-jlens"
+
+
+class ColabProfile(NamedTuple):
+    session_name: str
+    gpu_type: str
+    remote_root: str
+    bootstrap_notebook: str
+    run_notebook: str
+    result_archive: str
+
+
+PROFILES = {
+    SPARSE_REFUSAL: ColabProfile(
+        session_name="refusal-qwen-sparse-refusal",
+        gpu_type="A100",
+        remote_root="/content/refusal_direction",
+        bootstrap_notebook=(
+            "projects/refusal_direction/scripts/"
+            "colab_install_sparse_refusal.py"
+        ),
+        run_notebook=(
+            "projects/refusal_direction/scripts/colab_run_sparse_refusal.py"
+        ),
+        result_archive="/content/qwen_sparse_refusal_results.tar.gz",
+    ),
+}
 EXCLUDED_PARTS = {
     ".git",
     ".ipynb_checkpoints",
@@ -45,7 +76,13 @@ REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
 REMOTE_LAB_LENS_MANIFEST = "/content/lab_source_lens.pt.manifest.json"
 REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
 A100_PROFILES = frozenset(
-    {"qwen25-coder-code-eval", "qwen25-coder-lab", JLENS_V2, CAUSAL_JLENS}
+    {
+        "qwen25-coder-code-eval",
+        "qwen25-coder-lab",
+        JLENS_V2,
+        CAUSAL_JLENS,
+        SPARSE_REFUSAL,
+    }
 )
 DEFAULT_EXEC_TIMEOUT = 7200
 JLENS_V2_EXEC_TIMEOUT = 46800
@@ -56,6 +93,25 @@ REMOTE_JLENS_V2_ARTIFACTS = "/content/refusal_direction/artifacts/qwen25_coder_7
 REMOTE_CAUSAL_JLENS_DIRECTION_STAGING = "/content/causal_jlens_source_direction.pt"
 REMOTE_CAUSAL_JLENS_V1_LENS_STAGING = "/content/causal_jlens_source_v1_lens.pt"
 REMOTE_CAUSAL_JLENS_V2_LENS_STAGING = "/content/causal_jlens_source_v2_lens.pt"
+REMOTE_SPARSE_DIRECTION_STAGING = "/content/sparse_refusal_direction.pt"
+REMOTE_SPARSE_REVIEWED_PAIRS = "/content/sparse_refusal_reviewed_pairs.jsonl"
+REMOTE_SPARSE_REVIEWED_PAIRS_DIGEST = (
+    "/content/sparse_refusal_reviewed_pairs.sha256.json"
+)
+REMOTE_SPARSE_CHECKPOINT_STAGING = "/content/sparse_refusal_checkpoint.pt"
+REMOTE_SPARSE_TRAINING_STATUS = "/content/sparse_refusal_training_status.json"
+REMOTE_SPARSE_COMMAND = "/content/qwen_sparse_refusal_command.json"
+REMOTE_SPARSE_CHECKPOINT_ARCHIVE = (
+    "/content/qwen_sparse_refusal_checkpoint.tar.gz"
+)
+REMOTE_SPARSE_RESULTS_ARCHIVE = "/content/qwen_sparse_refusal_results.tar.gz"
+SPARSE_CHUNK_BYTES = LAB_LENS_CHUNK_BYTES
+SPARSE_FAILURE_MARKERS = (
+    "Traceback",
+    "RuntimeError",
+    "CUDA out of memory",
+    "SystemExit: 1",
+)
 CAUSAL_JLENS_LENS_CHUNK_BYTES = LAB_LENS_CHUNK_BYTES
 # Status/events before the checkpoint: the fit replaces the checkpoint before it
 # advances status/events, so this order can never yield status ahead of it.
@@ -497,6 +553,408 @@ def require_causal_jlens_sources(project: Path) -> tuple[Path, Path, Path]:
     return require_local_causal_jlens_sources(project)
 
 
+def _require_regular_file(path: Path, label: str) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise FileNotFoundError(f"{label} not found as a regular file: {path}")
+    if path.stat().st_size <= 0:
+        raise ValueError(f"{label} is empty: {path}")
+    return path
+
+
+def require_sparse_sources(
+    project: Path,
+) -> tuple[Path, Path, tuple[Path, Path] | None]:
+    config_path = project / "configs" / "qwen25_coder_sparse_refusal.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    direction = _require_regular_file(
+        project / str(config["direction_path"]),
+        "sparse frozen direction",
+    )
+    expected_direction = str(config["direction_sha256"])
+    actual_direction = hashlib.sha256(direction.read_bytes()).hexdigest()
+    if actual_direction != expected_direction:
+        raise ValueError("sparse frozen direction SHA-256 differs from profile")
+    pairs = _require_regular_file(
+        project
+        / "artifacts"
+        / "qwen25_coder_sparse_refusal"
+        / "pairs"
+        / "reviewed.jsonl",
+        "sparse reviewed pairs",
+    )
+    checkpoint = (
+        project
+        / "artifacts"
+        / "qwen25_coder_sparse_refusal"
+        / "sae_checkpoint.pt"
+    )
+    status = checkpoint.with_name("training_status.json")
+    checkpoint_exists = checkpoint.exists() or checkpoint.is_symlink()
+    status_exists = status.exists() or status.is_symlink()
+    if checkpoint_exists != status_exists:
+        raise ValueError(
+            "sparse checkpoint and training status must be present together"
+        )
+    resume = (
+        (
+            _require_regular_file(checkpoint, "sparse checkpoint"),
+            _require_regular_file(status, "sparse training status"),
+        )
+        if checkpoint_exists
+        else None
+    )
+    return direction, pairs, resume
+
+
+def _write_sparse_pairs_digest(source: Path, destination: Path) -> Path:
+    payload = {
+        "path": Path(REMOTE_SPARSE_REVIEWED_PAIRS).name,
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return destination
+
+
+def upload_sparse_sources(
+    session: str,
+    *,
+    project: Path = PROJECT,
+    staging_root: Path | None = None,
+) -> None:
+    direction, pairs, resume = require_sparse_sources(project)
+    staging = staging_root or (ROOT / ".colab-staging")
+    returncode, output = run_sparse_remote_action(
+        session,
+        "clean-staging",
+        timeout=60,
+    )
+    if returncode != 0 or sparse_output_has_failure(output):
+        raise RuntimeError("sparse remote staging cleanup failed")
+    upload_chunked_source(
+        session,
+        direction,
+        REMOTE_SPARSE_DIRECTION_STAGING,
+        staging / "sparse-direction-parts",
+        chunk_bytes=SPARSE_CHUNK_BYTES,
+    )
+    digest = _write_sparse_pairs_digest(
+        pairs,
+        staging / "sparse-reviewed-pairs.sha256.json",
+    )
+    run(upload_command(session, pairs, REMOTE_SPARSE_REVIEWED_PAIRS))
+    run(
+        upload_command(
+            session,
+            digest,
+            REMOTE_SPARSE_REVIEWED_PAIRS_DIGEST,
+        )
+    )
+    if resume is not None:
+        checkpoint, status = resume
+        upload_chunked_source(
+            session,
+            checkpoint,
+            REMOTE_SPARSE_CHECKPOINT_STAGING,
+            staging / "sparse-checkpoint-parts",
+            chunk_bytes=SPARSE_CHUNK_BYTES,
+        )
+        run(
+            upload_command(
+                session,
+                status,
+                REMOTE_SPARSE_TRAINING_STATUS,
+            )
+        )
+
+
+def _write_sparse_remote_action(action: str, destination: Path) -> Path:
+    if action not in {
+        "clean-staging",
+        "pilot",
+        "run",
+        "pack-checkpoint",
+        "pack-results",
+    }:
+        raise ValueError(f"unknown sparse remote action: {action}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps({"action": action}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return destination
+
+
+def run_sparse_remote_action(
+    session: str,
+    action: str,
+    *,
+    timeout: int,
+) -> tuple[int, str]:
+    command_file = _write_sparse_remote_action(
+        action,
+        ROOT / ".colab-staging" / "qwen_sparse_refusal_command.json",
+    )
+    run(upload_command(session, command_file, REMOTE_SPARSE_COMMAND))
+    command = exec_command(
+        session,
+        PROJECT / "scripts" / "colab_run_sparse_refusal.py",
+        timeout=timeout,
+    )
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    return (
+        completed.returncode,
+        f"{completed.stdout or ''}{completed.stderr or ''}",
+    )
+
+
+def run_sparse_installer(
+    session: str,
+    *,
+    timeout: int,
+) -> tuple[int, str]:
+    command = exec_command(
+        session,
+        PROJECT / "scripts" / "colab_install_sparse_refusal.py",
+        timeout=timeout,
+    )
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    return (
+        completed.returncode,
+        f"{completed.stdout or ''}{completed.stderr or ''}",
+    )
+
+
+def sparse_output_has_failure(output: str) -> bool:
+    return any(marker.casefold() in output.casefold() for marker in SPARSE_FAILURE_MARKERS)
+
+
+def _extract_sparse_archive(
+    archive: Path,
+    project: Path,
+    *,
+    allowlist: frozenset[str],
+) -> tuple[Path, ...]:
+    installed: list[Path] = []
+    with tarfile.open(archive, "r:gz") as handle:
+        members = handle.getmembers()
+        names = [member.name.replace("\\", "/") for member in members]
+        if len(names) != len(set(names)):
+            raise ValueError("sparse archive contains duplicate members")
+        for member, name in zip(members, names, strict=True):
+            if (
+                name not in allowlist
+                or member.issym()
+                or member.islnk()
+                or not member.isfile()
+            ):
+                raise ValueError(f"sparse archive member is not allowlisted: {name}")
+        staging = Path(tempfile.mkdtemp(prefix="sparse-fetch-", dir=archive.parent))
+        try:
+            for member, name in zip(members, names, strict=True):
+                source = handle.extractfile(member)
+                if source is None:
+                    raise ValueError(f"sparse archive member is unreadable: {name}")
+                destination = staging / Path(name).name
+                with destination.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+            incoming: dict[Path, Path] = {}
+            backups: dict[Path, Path] = {}
+            try:
+                for member, name in zip(members, names, strict=True):
+                    source = staging / Path(name).name
+                    destination = project / Path(name)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = destination.with_name(
+                        destination.name + ".incoming"
+                    )
+                    incoming[destination] = temporary
+                    shutil.copyfile(source, temporary)
+                for destination in incoming:
+                    if destination.exists():
+                        backup = destination.with_name(
+                            destination.name + ".sparse-fetch-backup"
+                        )
+                        if backup.exists():
+                            backup.unlink()
+                        os.replace(destination, backup)
+                        backups[destination] = backup
+                for destination, temporary in incoming.items():
+                    os.replace(temporary, destination)
+                    installed.append(destination)
+            except Exception:
+                for destination in installed:
+                    if destination.exists():
+                        destination.unlink()
+                for destination, backup in backups.items():
+                    if backup.exists():
+                        os.replace(backup, destination)
+                installed.clear()
+                raise
+            finally:
+                for path in (*incoming.values(), *backups.values()):
+                    if path.exists():
+                        path.unlink()
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    return tuple(installed)
+
+
+def _fetch_sparse_archive(
+    session: str,
+    *,
+    action: str,
+    remote_archive: str,
+    local_name: str,
+    allowlist: frozenset[str],
+    project: Path,
+    timeout: int,
+) -> tuple[Path, ...]:
+    returncode, output = run_sparse_remote_action(
+        session,
+        action,
+        timeout=timeout,
+    )
+    if returncode != 0 or sparse_output_has_failure(output):
+        raise RuntimeError(f"sparse {action} failed")
+    local = ROOT / ".colab-staging" / local_name
+    local.parent.mkdir(parents=True, exist_ok=True)
+    run(download_command(session, remote_archive, local))
+    return _extract_sparse_archive(local, project, allowlist=allowlist)
+
+
+def fetch_sparse_checkpoint(
+    session: str,
+    *,
+    project: Path = PROJECT,
+    timeout: int = 600,
+) -> tuple[Path, ...]:
+    prefix = "artifacts/qwen25_coder_sparse_refusal"
+    return _fetch_sparse_archive(
+        session,
+        action="pack-checkpoint",
+        remote_archive=REMOTE_SPARSE_CHECKPOINT_ARCHIVE,
+        local_name="qwen_sparse_refusal_checkpoint.tar.gz",
+        allowlist=frozenset(
+            {
+                f"{prefix}/sae_checkpoint.pt",
+                f"{prefix}/training_status.json",
+            }
+        ),
+        project=project,
+        timeout=timeout,
+    )
+
+
+def fetch_sparse_results(
+    session: str,
+    *,
+    project: Path = PROJECT,
+    timeout: int = 600,
+) -> tuple[Path, ...]:
+    prefix = "results/qwen25_coder_sparse_refusal"
+    stages = (
+        "prepare",
+        "hardware_pilot",
+        "sae_fit",
+        "sae_quality",
+        "decompose",
+        "discover",
+        "select",
+        "test",
+        "review_export",
+        "review_merge",
+        "external_transfer",
+        "code_preservation",
+        "finalize",
+    )
+    allowlist = {
+        f"{prefix}/{index:02d}_{stage}.json"
+        for index, stage in enumerate(stages)
+    }
+    allowlist.update(
+        {
+            f"{prefix}/selection_freeze.json",
+            f"{prefix}/operational_error.json",
+            f"{prefix}/execution_manifest.json",
+        }
+    )
+    return _fetch_sparse_archive(
+        session,
+        action="pack-results",
+        remote_archive=REMOTE_SPARSE_RESULTS_ARCHIVE,
+        local_name="qwen_sparse_refusal_results.tar.gz",
+        allowlist=frozenset(allowlist),
+        project=project,
+        timeout=timeout,
+    )
+
+
+def _upload_sparse_review_labels(session: str, project: Path = PROJECT) -> None:
+    labels = (
+        project
+        / "artifacts"
+        / "qwen25_coder_sparse_refusal"
+        / "review"
+        / "responses_reviewed.jsonl"
+    )
+    if labels.is_file() and not labels.is_symlink():
+        run(
+            upload_command(
+                session,
+                labels,
+                (
+                    "/content/refusal_direction/artifacts/"
+                    "qwen25_coder_sparse_refusal/review/"
+                    "responses_reviewed.jsonl"
+                ),
+            )
+        )
+
+
+def _handle_sparse_failure(session: str) -> int:
+    try:
+        fetch_sparse_checkpoint(session)
+    except Exception:
+        print(
+            "WARNING: sparse checkpoint fetch failed; stopping session",
+            file=sys.stderr,
+        )
+    stopped = try_stop_session(session)
+    if not stopped:
+        print("A100 MAY STILL BE RUNNING", file=sys.stderr)
+    status = (
+        PROJECT
+        / "artifacts"
+        / "qwen25_coder_sparse_refusal"
+        / "training_status.json"
+    )
+    if status.is_file():
+        try:
+            payload = json.loads(status.read_text(encoding="utf-8"))
+            stage = payload.get("last_completed_stage") or payload.get("stage")
+            if isinstance(stage, str):
+                print(f"last_completed_stage={stage}", file=sys.stderr)
+        except (OSError, ValueError):
+            pass
+    return 1
+
+
 def upload_chunked_source(
     session: str,
     source: Path,
@@ -536,6 +994,8 @@ def upload_chunked_source(
 def bootstrap_scripts(profile: str) -> list[Path]:
     if profile == "qwen25-coder-lab":
         return [PROJECT / "scripts" / "colab_install_lab.py"]
+    if profile == SPARSE_REFUSAL:
+        return [PROJECT / "scripts" / "colab_install_sparse_refusal.py"]
     scripts = [PROJECT / "scripts" / "colab_bootstrap.py"]
     if profile == "qwen25-coder-dose":
         scripts.append(PROJECT / "scripts" / "colab_install_dose_source_direction.py")
@@ -683,6 +1143,11 @@ def main() -> int:
             "lab",
             "causal-jlens",
             "checkpoint-backup",
+            "sparse-prepare",
+            "sparse-pilot",
+            "sparse-run",
+            "sparse-fetch-checkpoint",
+            "sparse-fetch-results",
             "stop",
         ),
     )
@@ -719,6 +1184,7 @@ def main() -> int:
         code_eval_sources = None
         lab_sources = None
         causal_sources = None
+        sparse_sources = args.profile == SPARSE_REFUSAL
         if args.profile == "qwen25-coder-dose":
             direction = require_dose_source_direction(PROJECT)
         elif args.profile == "qwen25-coder-code-eval":
@@ -880,15 +1346,37 @@ def main() -> int:
                 ROOT / ".colab-staging" / "causal-v2-lens-parts",
                 chunk_bytes=CAUSAL_JLENS_LENS_CHUNK_BYTES,
             )
+        if sparse_sources:
+            upload_sparse_sources(session)
     elif args.action == "bootstrap":
-        for script in bootstrap_scripts(args.profile):
-            run(
-                exec_command(
-                    session,
-                    script,
-                    timeout=600,
-                )
+        if args.profile == SPARSE_REFUSAL:
+            returncode, output = run_sparse_installer(
+                session,
+                timeout=600,
             )
+            if returncode != 0 or sparse_output_has_failure(output):
+                return _handle_sparse_failure(session)
+        else:
+            for script in bootstrap_scripts(args.profile):
+                run(
+                    exec_command(
+                        session,
+                        script,
+                        timeout=600,
+                    )
+                )
+    elif args.action == "sparse-prepare":
+        if args.profile != SPARSE_REFUSAL:
+            parser.error(
+                f"sparse-prepare is only available for --profile {SPARSE_REFUSAL}"
+            )
+        upload_sparse_sources(session)
+        returncode, output = run_sparse_installer(
+            session,
+            timeout=args.timeout,
+        )
+        if returncode != 0 or sparse_output_has_failure(output):
+            return _handle_sparse_failure(session)
     elif args.action == "auth-hf":
         token = huggingface_token_path()
         if not token.is_file():
@@ -1017,6 +1505,34 @@ def main() -> int:
                 "qwen25-coder-causal-jlens"
             )
         run(causal_jlens_command(session, timeout=args.timeout))
+    elif args.action in ("sparse-pilot", "sparse-run"):
+        if args.profile != SPARSE_REFUSAL:
+            parser.error(
+                f"{args.action} is only available for --profile {SPARSE_REFUSAL}"
+            )
+        if args.action == "sparse-run":
+            _upload_sparse_review_labels(session)
+        returncode, output = run_sparse_remote_action(
+            session,
+            "pilot" if args.action == "sparse-pilot" else "run",
+            timeout=args.timeout,
+        )
+        if returncode != 0 or sparse_output_has_failure(output):
+            return _handle_sparse_failure(session)
+    elif args.action == "sparse-fetch-checkpoint":
+        if args.profile != SPARSE_REFUSAL:
+            parser.error(
+                "sparse-fetch-checkpoint is only available for --profile "
+                f"{SPARSE_REFUSAL}"
+            )
+        fetch_sparse_checkpoint(session, timeout=args.timeout)
+    elif args.action == "sparse-fetch-results":
+        if args.profile != SPARSE_REFUSAL:
+            parser.error(
+                "sparse-fetch-results is only available for --profile "
+                f"{SPARSE_REFUSAL}"
+            )
+        fetch_sparse_results(session, timeout=args.timeout)
     elif args.action == "lab":
         if args.profile != "qwen25-coder-lab":
             parser.error("lab is only available for --profile qwen25-coder-lab")
@@ -1088,7 +1604,7 @@ def main() -> int:
                         file=sys.stderr,
                     )
         finally:
-            if args.profile in {JLENS_V2, CAUSAL_JLENS}:
+            if args.profile in {JLENS_V2, CAUSAL_JLENS, SPARSE_REFUSAL}:
                 stop_ok = try_stop_session(session)
             else:
                 run(stop_command(session))
