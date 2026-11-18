@@ -49,6 +49,7 @@ SPARSE_RESULTS_ALLOWLIST = (
         )
     )),
     f"{SPARSE_RESULTS_DIR}/selection_freeze.json",
+    f"{SPARSE_RESULTS_DIR}/validation_receipt.json",
     f"{SPARSE_RESULTS_DIR}/operational_error.json",
     f"{SPARSE_RESULTS_DIR}/execution_manifest.json",
 )
@@ -306,6 +307,8 @@ def pack_results_archive(
     root: Path = REMOTE_ROOT,
     archive: Path = REMOTE_RESULTS_ARCHIVE,
 ) -> Path:
+    if (Path(root) / SPARSE_RESULTS_DIR / "12_finalize.json").is_file():
+        write_validation_receipt(root)
     return _pack_allowlisted(
         root,
         archive,
@@ -471,6 +474,162 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def write_validation_receipt(root: Path = REMOTE_ROOT) -> Path:
+    """Export deterministic, text-free inputs needed by the offline validator."""
+    from refusal_direction_replication.qwen_sparse_data import (
+        ReviewedPair,
+        split_reviewed_pairs,
+    )
+
+    project = Path(root)
+    results = project / SPARSE_RESULTS_DIR
+    artifacts = project / SPARSE_ARTIFACTS_DIR
+    config = json.loads(
+        (project / "configs" / SPARSE_PROFILE).read_text(encoding="utf-8")
+    )
+    reviewed_path = artifacts / "pairs" / "reviewed.jsonl"
+    source_rows = [
+        json.loads(line)
+        for line in reviewed_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    reviewed = [
+        ReviewedPair(
+            pair_id=str(row["pair_id"]),
+            category=str(row["category"]),
+            source_identity=str(row["source_identity"]),
+            offensive_prompt=str(row["offensive_prompt"]),
+            defensive_prompt=str(row["defensive_prompt"]),
+            intent_rationale=str(row["intent_rationale"]),
+            approved=bool(row["approved"]),
+        )
+        for row in source_rows
+    ]
+    split_by_id = {
+        row.pair_id: split
+        for split, rows in split_reviewed_pairs(reviewed).items()
+        for row in rows
+    }
+    pairs = []
+    for row in sorted(reviewed, key=lambda item: item.pair_id):
+        compact = row.compact()
+        pairs.append(
+            {
+                "pair_id": row.pair_id,
+                "split": split_by_id[row.pair_id],
+                "category": row.category,
+                "source_identity": row.source_identity,
+                "offensive_sha256": compact["offensive_sha256"],
+                "defensive_sha256": compact["defensive_sha256"],
+            }
+        )
+    corpus = json.loads(
+        (artifacts / "corpus_manifest.json").read_text(encoding="utf-8")
+    )
+    checkpoint = json.loads(
+        (artifacts / "checkpoint_status.json").read_text(encoding="utf-8")
+    )
+    private_path = artifacts / "review" / "private_manifest.json"
+    private = json.loads(private_path.read_text(encoding="utf-8"))
+    blind_path = artifacts / "review" / "blind_review.jsonl"
+    if private.get("blind_review_sha256") != _sha256_file(blind_path):
+        raise ValueError("private review manifest blind hash changed")
+    merge = json.loads(
+        (results / "09_review_merge.json").read_text(encoding="utf-8")
+    )["results"]
+    if (
+        private.get("blind_review_sha256") != merge.get("blind_review_sha256")
+        or private.get("test_split_sha256") != merge.get("test_split_sha256")
+    ):
+        raise ValueError("review merge differs from authenticated manifest")
+    labels = {
+        str(row["review_id"]): str(row["label"])
+        for row in merge.get("reviews", ())
+    }
+    assignments = private.get("assignments")
+    if (
+        not isinstance(assignments, list)
+        or len(assignments) != 512
+        or set(labels)
+        != {str(row.get("review_id")) for row in assignments}
+    ):
+        raise ValueError("review merge is not a 512-row manifest bijection")
+    reviews = [
+        {
+            **{
+                key: assignment[key]
+                for key in (
+                    "review_id",
+                    "pair_id",
+                    "side",
+                    "condition",
+                    "prompt_sha256",
+                    "generation_sha256",
+                )
+            },
+            "label": labels[str(assignment["review_id"])],
+        }
+        for assignment in sorted(
+            assignments,
+            key=lambda row: str(row["review_id"]),
+        )
+    ]
+    receipt = {
+        "schema_version": 1,
+        "profile": config,
+        "profile_sha256": _canonical_sha256(config),
+        "pair_split_sha256": _sha256_file(reviewed_path),
+        "pairs": pairs,
+        "corpus": {
+            "schema_version": corpus["schema_version"],
+            "manifest_sha256": _sha256_file(
+                artifacts / "corpus_manifest.json"
+            ),
+            "fit_tokens": corpus["fit_tokens"],
+            "holdout_tokens": corpus["holdout_tokens"],
+            "split_validation": corpus["split_validation"],
+            "sources": corpus["sources"],
+        },
+        "checkpoint_identity": checkpoint["identity"],
+        "review_manifest": {
+            "manifest_sha256": _sha256_file(private_path),
+            "blind_review_sha256": private["blind_review_sha256"],
+            "test_split_sha256": private["test_split_sha256"],
+            "review_count": 512,
+        },
+        "reviews": reviews,
+    }
+    destination = results / "validation_receipt.json"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".validation_receipt.",
+        suffix=".tmp",
+        dir=results,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(receipt, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
 def write_execution_manifest(root: Path = REMOTE_ROOT) -> Path:
     results_root = Path(root) / SPARSE_RESULTS_DIR
     files: list[dict[str, str]] = []
@@ -557,6 +716,11 @@ def remote_main() -> int:
             pass
         raise
     write_run_status(payload)
+    if (
+        str(payload.get("experiment", ""))
+        == "qwen_sparse_refusal_finalize"
+    ):
+        write_validation_receipt()
     write_execution_manifest()
     experiment = str(payload.get("experiment", "unknown"))
     results = payload.get("results")

@@ -13,7 +13,9 @@ import pytest
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT / "scripts" / "validate_qwen_sparse_refusal.py"
+REMOTE_SCRIPT = PROJECT / "scripts" / "colab_run_sparse_refusal.py"
 PROFILE = PROJECT / "configs" / "qwen25_coder_sparse_refusal.json"
+MODEL_REVISION = "c03e6d358207e414f1eca0bb1891e29f1db0e242"
 STAGES = (
     "prepare",
     "hardware_pilot",
@@ -190,6 +192,7 @@ def write_complete_sparse_fixture(root: Path) -> Path:
                         "label": "refuse" if refused else "answer",
                     }
                 )
+    blind_review_sha256 = _sha("blind-review")
     bootstrap = {
         metric: _bootstrap(reviews, metric)
         for metric in (
@@ -205,6 +208,9 @@ def write_complete_sparse_fixture(root: Path) -> Path:
             "example_id": f"{dataset}-{index}",
             "content_sha256": _sha(f"{dataset}-{index}"),
             "condition": condition,
+            "refused": False,
+            "kl_from_baseline": 0.1,
+            "invalid_generation": False,
         }
         for dataset in ("mitre", "mitre_frr")
         for index in range(32)
@@ -221,6 +227,10 @@ def write_complete_sparse_fixture(root: Path) -> Path:
             "example_id": f"humaneval_plus-{index}",
             "content_sha256": _sha(f"humaneval_plus-{index}"),
             "condition": condition,
+            "plus_pass": True,
+            "refused": False,
+            "kl_from_baseline": 0.0,
+            "invalid_generation": False,
         }
         for index in range(32)
         for condition in ("baseline", "dense", "filtered")
@@ -258,9 +268,23 @@ def write_complete_sparse_fixture(root: Path) -> Path:
             "corpus_sha256": _sha("corpus"),
             "model_revision": profile["model_revision"],
         },
-        "stage_timestamps": {
-            "select": "2026-11-17T10:00:00Z",
-            "test": "2026-11-17T10:01:00Z",
+        "review_manifest": {
+            "manifest_sha256": _sha("private-manifest"),
+            "blind_review_sha256": blind_review_sha256,
+            "test_split_sha256": _canonical_sha(
+                [
+                    {
+                        "pair_id": row["pair_id"],
+                        "offensive_sha256": row["offensive_sha256"],
+                        "defensive_sha256": row["defensive_sha256"],
+                    }
+                    for row in sorted(
+                        test_pairs,
+                        key=lambda item: item["pair_id"],
+                    )
+                ]
+            ),
+            "review_count": 512,
         },
         "observations": observations,
         "reviews": reviews,
@@ -268,12 +292,27 @@ def write_complete_sparse_fixture(root: Path) -> Path:
         "external_observations": external,
         "code_observations": code,
     }
-    _write(results / "validation_inputs.json", bundle)
+    bundle["pair_split_sha256"] = _sha("reviewed-jsonl-bytes")
+    _write(results / "validation_receipt.json", bundle)
 
     prior = None
     config_sha = _canonical_sha(profile)
-    pair_split_sha = _canonical_sha(pair_rows)
-    test_split_sha = _canonical_sha(test_pairs)
+    pair_split_sha = bundle["pair_split_sha256"]
+    test_split_sha = _canonical_sha(
+        [
+            {
+                "pair_id": row["pair_id"],
+                "offensive_sha256": row["offensive_sha256"],
+                "defensive_sha256": row["defensive_sha256"],
+            }
+            for row in sorted(test_pairs, key=lambda item: item["pair_id"])
+        ]
+    )
+    selection = {
+        "status": "selection_frozen",
+        "schema_version": 1,
+    }
+    selection["selection_freeze_sha256"] = _canonical_sha(selection)
     for index, stage in enumerate(STAGES):
         stage_results: dict[str, Any] = {"status": "completed"}
         if stage == "sae_quality":
@@ -294,21 +333,91 @@ def write_complete_sparse_fixture(root: Path) -> Path:
                 "norm": 1.0,
             }
         elif stage == "select":
-            stage_results |= {
-                "status": "selection_frozen",
-                "selection_freeze_sha256": _sha("selection"),
-            }
+            stage_results = dict(selection)
         elif stage == "test":
             stage_results |= {
-                "selection_freeze_sha256": _sha("selection"),
+                "selection_freeze_sha256": selection[
+                    "selection_freeze_sha256"
+                ],
                 "observations": observations,
             }
+        elif stage == "review_export":
+            stage_results |= {
+                "status": "review_pending",
+                "review_count": 512,
+                "blind_review_sha256": blind_review_sha256,
+                "test_split_sha256": test_split_sha,
+            }
         elif stage == "review_merge":
-            stage_results |= {"status": "review_complete", "review_count": 512}
+            stage_results |= {
+                "status": "review_complete",
+                "review_count": 512,
+                "blind_review_sha256": blind_review_sha256,
+                "test_split_sha256": test_split_sha,
+                "reviews": [
+                    {
+                        "review_id": row["review_id"],
+                        "label": row["label"],
+                    }
+                    for row in reviews
+                ],
+            }
         elif stage == "external_transfer":
-            stage_results |= {"observations": external}
+            stage_results |= {
+                "prepare_sha256": _sha("prepare"),
+                "selection_freeze_sha256": selection[
+                    "selection_freeze_sha256"
+                ],
+                "observations": external,
+                "metrics": {
+                    dataset: {
+                        condition: {
+                            "n": 32,
+                            "refusal_rate": 0.0,
+                            "mean_kl": 0.1,
+                            "invalid_generation_rate": 0.0,
+                        }
+                        for condition in (
+                            "baseline",
+                            "dense_addition",
+                            "dense_ablation",
+                            "filtered_addition",
+                            "filtered_ablation",
+                        )
+                    }
+                    for dataset in ("mitre", "mitre_frr")
+                },
+            }
         elif stage == "code_preservation":
-            stage_results |= {"observations": code}
+            stage_results |= {
+                "prepare_sha256": _sha("prepare"),
+                "selection_freeze_sha256": selection[
+                    "selection_freeze_sha256"
+                ],
+                "conditions": ["baseline", "dense", "filtered"],
+                "worker_outputs": {
+                    condition: [
+                        {
+                            key: value
+                            for key, value in row.items()
+                            if key != "condition"
+                        }
+                        for row in code
+                        if row["condition"] == condition
+                    ]
+                    for condition in ("baseline", "dense", "filtered")
+                },
+                "metrics": {
+                    condition: {
+                        "n": 32,
+                        "pass_at_1": 1.0,
+                        "refusal_rate": 0.0,
+                        "mean_kl": 0.0,
+                        "invalid_generation_rate": 0.0,
+                    }
+                    for condition in ("baseline", "dense", "filtered")
+                },
+            }
         elif stage == "finalize":
             stage_results |= {
                 "bootstrap": {
@@ -368,12 +477,17 @@ def write_complete_sparse_fixture(root: Path) -> Path:
 
 def write_mutated_sparse_fixture(root: Path, mutation: str) -> Path:
     results = write_complete_sparse_fixture(root)
-    bundle_path = results / "validation_inputs.json"
+    bundle_path = results / "validation_receipt.json"
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     if mutation == "duplicate_pair":
         bundle["pairs"][1]["pair_id"] = bundle["pairs"][0]["pair_id"]
     elif mutation == "wrong_bootstrap":
-        bundle["bootstrap"]["offensive_delta"]["estimate"] += 0.25
+        finalize_path = results / "12_finalize.json"
+        finalize = json.loads(finalize_path.read_text(encoding="utf-8"))
+        finalize["results"]["bootstrap"]["addition"]["offensive_delta"][
+            "estimate"
+        ] += 0.25
+        _write(finalize_path, finalize)
     elif mutation == "missing_review":
         bundle["reviews"].pop()
     elif mutation == "raw_text":
@@ -382,8 +496,37 @@ def write_mutated_sparse_fixture(root: Path, mutation: str) -> Path:
         bundle["checkpoint_identity"]["corpus_sha256"] = _sha("stale")
     elif mutation == "wrong_direction_hash":
         bundle["profile"]["direction_sha256"] = "0" * 64
+    elif mutation == "wrong_pair_hash":
+        bundle["pair_split_sha256"] = "0" * 64
+    elif mutation == "wrong_selection_hash":
+        select_path = results / "06_select.json"
+        select = json.loads(select_path.read_text(encoding="utf-8"))
+        select["results"]["selection_freeze_sha256"] = "0" * 64
+        _write(select_path, select)
+    elif mutation == "missing_pareto_status":
+        finalize_path = results / "12_finalize.json"
+        finalize = json.loads(finalize_path.read_text(encoding="utf-8"))
+        del finalize["results"]["scientific_statuses"]["addition"]
+        _write(finalize_path, finalize)
+    elif mutation == "review_auth":
+        bundle["review_manifest"]["blind_review_sha256"] = "0" * 64
+    elif mutation == "external_metric":
+        external_path = results / "10_external_transfer.json"
+        external = json.loads(external_path.read_text(encoding="utf-8"))
+        external["results"]["metrics"]["mitre"]["baseline"][
+            "refusal_rate"
+        ] = 0.5
+        _write(external_path, external)
+    elif mutation == "code_metric":
+        code_path = results / "11_code_preservation.json"
+        code = json.loads(code_path.read_text(encoding="utf-8"))
+        code["results"]["metrics"]["filtered"]["pass_at_1"] = 0.5
+        _write(code_path, code)
     elif mutation == "test_before_freeze":
-        bundle["stage_timestamps"]["test"] = "2026-11-17T09:59:00Z"
+        test_path = results / "07_test.json"
+        test = json.loads(test_path.read_text(encoding="utf-8"))
+        test["provenance"]["prior_stage_sha256"] = "0" * 64
+        _write(test_path, test)
     else:
         raise AssertionError(mutation)
     _write(bundle_path, bundle)
@@ -392,6 +535,7 @@ def write_mutated_sparse_fixture(root: Path, mutation: str) -> Path:
 
 def test_validator_accepts_complete_fixture(tmp_path: Path) -> None:
     fixture = write_complete_sparse_fixture(tmp_path)
+    assert not (fixture / "validation_inputs.json").exists()
     report = _load_validator().validate_sparse_results(fixture)
     assert report.failed == ()
     assert "pareto_recomputed" in report.passed
@@ -407,6 +551,12 @@ def test_validator_accepts_complete_fixture(tmp_path: Path) -> None:
         "raw_text",
         "stale_checkpoint_identity",
         "wrong_direction_hash",
+        "wrong_pair_hash",
+        "wrong_selection_hash",
+        "missing_pareto_status",
+        "review_auth",
+        "external_metric",
+        "code_metric",
     ),
 )
 def test_validator_rejects_invalid_fixture(
@@ -416,4 +566,151 @@ def test_validator_rejects_invalid_fixture(
     fixture = write_mutated_sparse_fixture(tmp_path, mutation)
     report = _load_validator().validate_sparse_results(fixture)
     assert report.failed
+
+
+def test_transport_allowlists_productive_validation_receipt() -> None:
+    runner = _load_module(REMOTE_SCRIPT, "sparse_remote_validation_test")
+    assert (
+        "results/qwen25_coder_sparse_refusal/validation_receipt.json"
+        in runner.SPARSE_RESULTS_ALLOWLIST
+    )
+
+
+def test_exporter_uses_real_reviewed_jsonl_bytes_and_review_manifest(
+    tmp_path: Path,
+) -> None:
+    from refusal_direction_replication.qwen_sparse_data import (
+        ReviewedPair,
+        split_reviewed_pairs,
+    )
+
+    runner = _load_module(REMOTE_SCRIPT, "sparse_remote_export_test")
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / PROFILE.name).write_bytes(PROFILE.read_bytes())
+    artifacts = (
+        tmp_path / "artifacts" / "qwen25_coder_sparse_refusal"
+    )
+    reviewed_path = artifacts / "pairs" / "reviewed.jsonl"
+    rows = [
+        {
+            "pair_id": f"pair-{index:04d}",
+            "category": f"category-{index % 8}",
+            "source_identity": f"source-{index:04d}",
+            "offensive_prompt": f"offensive prompt {index}",
+            "defensive_prompt": f"defensive prompt {index}",
+            "intent_rationale": "paired intent",
+            "approved": True,
+        }
+        for index in range(256)
+    ]
+    reviewed_path.parent.mkdir(parents=True)
+    reviewed_path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    reviewed = [ReviewedPair(**row) for row in rows]
+    test_rows = split_reviewed_pairs(reviewed)["test"]
+    test_pairs = [
+        {
+            "pair_id": row.pair_id,
+            "offensive_sha256": row.compact()["offensive_sha256"],
+            "defensive_sha256": row.compact()["defensive_sha256"],
+        }
+        for row in sorted(test_rows, key=lambda item: item.pair_id)
+    ]
+    test_split_sha256 = _canonical_sha(test_pairs)
+    _write(
+        artifacts / "corpus_manifest.json",
+        {
+            "schema_version": 4,
+            "fit_tokens": 4_750_000,
+            "holdout_tokens": 250_000,
+            "split_validation": {"disjoint": True},
+            "sources": {},
+        },
+    )
+    _write(
+        artifacts / "checkpoint_status.json",
+        {
+            "schema_version": 1,
+            "identity": {
+                "run_id": "run",
+                "implementation_commit": "4" * 40,
+                "config_sha256": _canonical_sha(
+                    json.loads(PROFILE.read_text(encoding="utf-8"))
+                ),
+                "corpus_sha256": _sha("corpus"),
+                "model_revision": MODEL_REVISION,
+            },
+            "checkpoint_sha256": _sha("checkpoint"),
+        },
+    )
+    blind_path = artifacts / "review" / "blind_review.jsonl"
+    blind_path.parent.mkdir(parents=True)
+    blind_path.write_text("{}\n", encoding="utf-8")
+    blind_sha256 = _file_sha(blind_path)
+    assignments = []
+    labels = []
+    for pair in test_pairs:
+        for side in ("offensive", "defensive"):
+            for condition in PRIMARY:
+                review_id = _sha(
+                    f"{pair['pair_id']}:{side}:{condition}"
+                )[:24]
+                assignments.append(
+                    {
+                        "review_id": review_id,
+                        "pair_id": pair["pair_id"],
+                        "side": side,
+                        "condition": condition,
+                        "prompt_sha256": pair[f"{side}_sha256"],
+                        "generation_sha256": _sha(f"generation:{review_id}"),
+                        "automatic_refusal": False,
+                    }
+                )
+                labels.append({"review_id": review_id, "label": "answer"})
+    _write(
+        artifacts / "review" / "private_manifest.json",
+        {
+            "schema_version": 1,
+            "seed": 2031,
+            "review_count": 512,
+            "blind_review_sha256": blind_sha256,
+            "test_split_sha256": test_split_sha256,
+            "assignments": assignments,
+        },
+    )
+    results = tmp_path / "results" / "qwen25_coder_sparse_refusal"
+    _write(
+        results / "09_review_merge.json",
+        {
+            "results": {
+                "status": "review_complete",
+                "review_count": 512,
+                "blind_review_sha256": blind_sha256,
+                "test_split_sha256": test_split_sha256,
+                "reviews": labels,
+            }
+        },
+    )
+
+    receipt_path = runner.write_validation_receipt(tmp_path)
+    first_bytes = receipt_path.read_bytes()
+    runner.write_validation_receipt(tmp_path)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+    assert receipt_path.read_bytes() == first_bytes
+    assert receipt["pair_split_sha256"] == _file_sha(reviewed_path)
+    assert receipt["review_manifest"]["blind_review_sha256"] == blind_sha256
+    assert receipt["review_manifest"]["test_split_sha256"] == test_split_sha256
+    assert len(receipt["reviews"]) == 512
+    assert "offensive_prompt" not in receipt_path.read_text(encoding="utf-8")
+
+
+def _load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
