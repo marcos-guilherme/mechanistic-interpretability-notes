@@ -176,9 +176,14 @@ LAB_PROFILE = "qwen25_coder_7b_lab.json"
 LAB_ARTIFACTS_DIR = "artifacts/qwen25_coder_7b_lab"
 LAB_DIRECTION_RELATIVE = CODE_EVAL_DIRECTION_RELATIVE
 LAB_LENS_RELATIVE = CODE_EVAL_LENS_RELATIVE
+LAB_LENS_V2_RELATIVE = (
+    Path("artifacts") / "qwen25_coder_7b_jlens_v2" / JLENS_V2_FINAL_LENS_NAME
+)
 REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
 REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
 REMOTE_LAB_LENS_MANIFEST = "/content/lab_source_lens.pt.manifest.json"
+REMOTE_LAB_LENS_V2_STAGING = "/content/lab_source_lens_v2.pt"
+REMOTE_LAB_LENS_V2_MANIFEST = "/content/lab_source_lens_v2.pt.manifest.json"
 REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
 ARTIFACT_CHUNK_BYTES = 64 * 1024**2
 LAB_LENS_CHUNK_BYTES = 16 * 1024**2
@@ -195,6 +200,7 @@ LAB_STATUS_FIELDS = frozenset(
         "pid",
         "direction_sha256",
         "lens_sha256",
+        "lens_v2_sha256",
     }
 )
 LAB_STATUS_REQUIRED_FIELDS = ("profile", "state", "gpu", "share_ready")
@@ -898,13 +904,23 @@ def _lab_expected_hashes(
     *,
     expected_direction_sha256: str | None,
     expected_lens_sha256: str | None,
-) -> tuple[str, str]:
-    if expected_direction_sha256 and expected_lens_sha256:
-        return expected_direction_sha256, expected_lens_sha256
+    expected_lens_v2_sha256: str | None,
+) -> tuple[str, str, str]:
+    if (
+        expected_direction_sha256
+        and expected_lens_sha256
+        and expected_lens_v2_sha256
+    ):
+        return (
+            expected_direction_sha256,
+            expected_lens_sha256,
+            expected_lens_v2_sha256,
+        )
     config = load_lab_profile_config(project)
     return (
         expected_direction_sha256 or str(config["direction_sha256"]),
         expected_lens_sha256 or str(config["lens_sha256"]),
+        expected_lens_v2_sha256 or str(config["lens_v2_sha256"]),
     )
 
 
@@ -953,14 +969,17 @@ def require_local_lab_sources(
     *,
     expected_direction_sha256: str | None = None,
     expected_lens_sha256: str | None = None,
-) -> tuple[Path, Path]:
-    direction_hash, lens_hash = _lab_expected_hashes(
+    expected_lens_v2_sha256: str | None = None,
+) -> tuple[Path, Path, Path]:
+    direction_hash, lens_hash, lens_v2_hash = _lab_expected_hashes(
         project,
         expected_direction_sha256=expected_direction_sha256,
         expected_lens_sha256=expected_lens_sha256,
+        expected_lens_v2_sha256=expected_lens_v2_sha256,
     )
     direction = project / LAB_DIRECTION_RELATIVE
     lens = project / LAB_LENS_RELATIVE
+    lens_v2 = project / LAB_LENS_V2_RELATIVE
     _validate_lab_source(
         direction,
         label="direction",
@@ -973,9 +992,16 @@ def require_local_lab_sources(
         max_bytes=MAX_LAB_LENS_BYTES,
         expected_sha256=lens_hash,
     )
+    _validate_lab_source(
+        lens_v2,
+        label="lens v2",
+        max_bytes=MAX_LAB_LENS_BYTES,
+        expected_sha256=lens_v2_hash,
+    )
     return (
         _assert_lab_source_destination(project, direction, LAB_DIRECTION_RELATIVE),
         _assert_lab_source_destination(project, lens, LAB_LENS_RELATIVE),
+        _assert_lab_source_destination(project, lens_v2, LAB_LENS_V2_RELATIVE),
     )
 
 
@@ -983,32 +1009,54 @@ def atomic_install_lab_sources(
     *,
     staged_direction: Path,
     staged_lens: Path,
+    staged_lens_v2: Path,
     project: Path,
     expected_direction_sha256: str | None = None,
     expected_lens_sha256: str | None = None,
-) -> tuple[Path, Path]:
-    direction_hash, lens_hash = _lab_expected_hashes(
+    expected_lens_v2_sha256: str | None = None,
+) -> tuple[Path, Path, Path]:
+    """Install direction, v1 lens and v2 lens as one rollback-safe triple."""
+
+    direction_hash, lens_hash, lens_v2_hash = _lab_expected_hashes(
         project,
         expected_direction_sha256=expected_direction_sha256,
         expected_lens_sha256=expected_lens_sha256,
+        expected_lens_v2_sha256=expected_lens_v2_sha256,
     )
-    _validate_lab_source(
-        staged_direction,
-        label="direction staging",
-        max_bytes=MAX_LAB_DIRECTION_BYTES,
-        expected_sha256=direction_hash,
+    staged = (
+        (
+            staged_direction,
+            "direction staging",
+            MAX_LAB_DIRECTION_BYTES,
+            direction_hash,
+        ),
+        (staged_lens, "lens staging", MAX_LAB_LENS_BYTES, lens_hash),
+        (staged_lens_v2, "lens v2 staging", MAX_LAB_LENS_BYTES, lens_v2_hash),
     )
-    _validate_lab_source(
-        staged_lens,
-        label="lens staging",
-        max_bytes=MAX_LAB_LENS_BYTES,
-        expected_sha256=lens_hash,
-    )
+    for path, label, max_bytes, expected in staged:
+        _validate_lab_source(
+            path,
+            label=label,
+            max_bytes=max_bytes,
+            expected_sha256=expected,
+        )
     destinations = (
         project / LAB_DIRECTION_RELATIVE,
         project / LAB_LENS_RELATIVE,
+        project / LAB_LENS_V2_RELATIVE,
     )
-    relatives = (LAB_DIRECTION_RELATIVE, LAB_LENS_RELATIVE)
+    relatives = (
+        LAB_DIRECTION_RELATIVE,
+        LAB_LENS_RELATIVE,
+        LAB_LENS_V2_RELATIVE,
+    )
+    prefixes = (".lab_direction.", ".lab_lens.", ".lab_lens_v2.")
+    limits = (
+        MAX_LAB_DIRECTION_BYTES,
+        MAX_LAB_LENS_BYTES,
+        MAX_LAB_LENS_BYTES,
+    )
+    staged_paths = (staged_direction, staged_lens, staged_lens_v2)
     for destination, relative in zip(destinations, relatives):
         destination.parent.mkdir(parents=True, exist_ok=True)
         _assert_lab_source_destination(project, destination, relative)
@@ -1033,22 +1081,20 @@ def atomic_install_lab_sources(
                     had_original=had_original,
                 )
             )
-        _stream_install_regular_file(
-            staged=staged_direction,
-            destination=destinations[0],
-            max_bytes=MAX_LAB_DIRECTION_BYTES,
-            prefix=".lab_direction.",
-        )
-        _stream_install_regular_file(
-            staged=staged_lens,
-            destination=destinations[1],
-            max_bytes=MAX_LAB_LENS_BYTES,
-            prefix=".lab_lens.",
-        )
+        for staged_path, destination, max_bytes, prefix in zip(
+            staged_paths, destinations, limits, prefixes
+        ):
+            _stream_install_regular_file(
+                staged=staged_path,
+                destination=destination,
+                max_bytes=max_bytes,
+                prefix=prefix,
+            )
         return require_local_lab_sources(
             project,
             expected_direction_sha256=direction_hash,
             expected_lens_sha256=lens_hash,
+            expected_lens_v2_sha256=lens_v2_hash,
         )
     except Exception:
         _rollback_install_records(records)
@@ -1144,7 +1190,7 @@ def validate_lab_operational_status(payload: Any) -> dict[str, Any]:
         pid = payload["pid"]
         if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
             raise ValueError("lab status pid is invalid")
-    for hash_key in ("direction_sha256", "lens_sha256"):
+    for hash_key in ("direction_sha256", "lens_sha256", "lens_v2_sha256"):
         if hash_key not in payload:
             continue
         digest = payload[hash_key]

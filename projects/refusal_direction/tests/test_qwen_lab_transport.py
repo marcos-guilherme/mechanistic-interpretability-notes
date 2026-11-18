@@ -19,7 +19,10 @@ from refusal_direction_replication.qwen_lab_app import (
     FROZEN_DIRECTION_SHA256,
     GRADIO_PIN_VERSION,
 )
-from refusal_direction_replication.qwen_lab_readout import FROZEN_LENS_SHA256
+from refusal_direction_replication.qwen_lab_readout import (
+    FROZEN_LENS_SHA256,
+    FROZEN_LENS_V2_SHA256,
+)
 from refusal_direction_replication.qwen_jlens import JLENS_UPSTREAM_COMMIT
 
 
@@ -60,6 +63,24 @@ def _write_bytes(path: Path, payload: bytes) -> Path:
     return path
 
 
+def _seed_lab_sources(project: Path) -> tuple[Path, Path, Path]:
+    direction = _write_bytes(
+        project / "artifacts/qwen25_coder_7b/selected_direction.pt",
+        b"ok-direction",
+    )
+    lens = _write_bytes(
+        project / "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt",
+        b"ok-lens",
+    )
+    lens_v2 = _write_bytes(
+        project
+        / "artifacts/qwen25_coder_7b_jlens_v2"
+        / "qwen25_coder_7b_jacobian_lens_v2.pt",
+        b"ok-lens-v2",
+    )
+    return direction, lens, lens_v2
+
+
 def test_lab_config_pins_model_artifacts_and_omits_datasets_and_fetch() -> None:
     assert LAB_CONFIG.is_file()
     config = json.loads(LAB_CONFIG.read_text(encoding="utf-8"))
@@ -75,8 +96,13 @@ def test_lab_config_pins_model_artifacts_and_omits_datasets_and_fetch() -> None:
         config["source_lens"]
         == "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
     )
+    assert config["source_lens_v2"] == (
+        "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt"
+    )
     assert config["direction_sha256"] == FROZEN_DIRECTION_SHA256
     assert config["lens_sha256"] == FROZEN_LENS_SHA256
+    assert config["lens_v2_sha256"] == FROZEN_LENS_V2_SHA256
+    assert config["default_jlens_version"] == "v2"
     assert config["artifacts_dir"] == "artifacts/qwen25_coder_7b_lab"
     assert "results_dir" not in config
     assert "dataset_repo_id" not in config
@@ -86,6 +112,31 @@ def test_lab_config_pins_model_artifacts_and_omits_datasets_and_fetch() -> None:
     assert "mitre" not in blob
     assert "code_search_net" not in blob
     assert "humaneval" not in blob
+
+
+def test_lab_transport_pins_frozen_lens_v2_path_hash_and_staging() -> None:
+    from refusal_direction_replication.qwen_colab_transport import (
+        LAB_LENS_V2_RELATIVE,
+        REMOTE_LAB_LENS_V2_MANIFEST,
+        REMOTE_LAB_LENS_V2_STAGING,
+    )
+
+    assert LAB_LENS_V2_RELATIVE == Path(
+        "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt"
+    )
+    assert REMOTE_LAB_LENS_V2_STAGING == "/content/lab_source_lens_v2.pt"
+    assert REMOTE_LAB_LENS_V2_MANIFEST == "/content/lab_source_lens_v2.pt.manifest.json"
+    assert FROZEN_LENS_V2_SHA256 == (
+        "b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a"
+    )
+    run_text = RUN_SCRIPT.read_text(encoding="utf-8")
+    assert "--lens-v2-path" in run_text
+    install_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert "lab_source_lens_v2" in install_text
+    assert "expected_lens_v2_sha256" in install_text
+    assert "lens_v2_sha256" in install_text
+    clean_text = CLEAN_CHUNKS_SCRIPT.read_text(encoding="utf-8")
+    assert "lab_source_lens_v2" in clean_text
 
 
 def test_lab_profile_uses_dedicated_session_and_forces_a100(
@@ -195,6 +246,7 @@ def test_lab_sync_uploads_direction_and_lens_parts_without_tarring_lens(
     from refusal_direction_replication.qwen_colab_transport import (
         REMOTE_LAB_DIRECTION_STAGING,
         REMOTE_LAB_LENS_STAGING,
+        REMOTE_LAB_LENS_V2_STAGING,
     )
 
     module = _orchestrator()
@@ -203,8 +255,14 @@ def test_lab_sync_uploads_direction_and_lens_parts_without_tarring_lens(
     (project / "hello.py").write_text("print('ok')\n", encoding="utf-8")
     direction = project / "artifacts/qwen25_coder_7b/selected_direction.pt"
     lens = project / "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
+    lens_v2 = (
+        project
+        / "artifacts/qwen25_coder_7b_jlens_v2"
+        / "qwen25_coder_7b_jacobian_lens_v2.pt"
+    )
     _write_bytes(direction, b"direction-bytes")
     _write_bytes(lens, os.urandom(128 * 1024 + 3))
+    _write_bytes(lens_v2, os.urandom(64 * 1024 + 7))
     commands: list[list[str]] = []
     monkeypatch.setattr(module, "PROJECT", project)
     monkeypatch.setattr(module, "ROOT", tmp_path)
@@ -213,7 +271,7 @@ def test_lab_sync_uploads_direction_and_lens_parts_without_tarring_lens(
     monkeypatch.setattr(
         module,
         "require_lab_sources",
-        lambda _project: (direction, lens),
+        lambda _project: (direction, lens, lens_v2),
     )
     monkeypatch.setattr(
         sys,
@@ -225,6 +283,7 @@ def test_lab_sync_uploads_direction_and_lens_parts_without_tarring_lens(
     from refusal_direction_replication.qwen_colab_transport import (
         LAB_LENS_CHUNK_BYTES,
         REMOTE_LAB_LENS_MANIFEST,
+        REMOTE_LAB_LENS_V2_MANIFEST,
     )
 
     assert module.CODE_EVAL_LENS_CHUNK_BYTES == 64 * 1024**2
@@ -245,14 +304,19 @@ def test_lab_sync_uploads_direction_and_lens_parts_without_tarring_lens(
     assert clean_indexes[0] < part_indexes[0]
     assert REMOTE_LAB_DIRECTION_STAGING in uploaded
     assert REMOTE_LAB_LENS_MANIFEST in uploaded
+    assert REMOTE_LAB_LENS_V2_MANIFEST in uploaded
     assert any(
         str(item).startswith(REMOTE_LAB_LENS_STAGING + ".part") for item in uploaded
+    )
+    assert any(
+        str(item).startswith(REMOTE_LAB_LENS_V2_STAGING + ".part") for item in uploaded
     )
     archive = tmp_path / ".colab-staging" / "refusal_direction.tar.gz"
     with tarfile.open(archive, "r:gz") as handle:
         names = handle.getnames()
     assert "refusal_direction/hello.py" in names
     assert not any("jacobian_lens.pt" in name for name in names)
+    assert not any("jacobian_lens_v2.pt" in name for name in names)
     assert not any("selected_direction.pt" in name for name in names)
     assert not any("artifacts" in name.replace("\\", "/") for name in names)
 
@@ -265,23 +329,28 @@ def test_require_local_lab_sources_rejects_link_wrong_hash_and_size(
     from refusal_direction_replication.qwen_colab_transport import require_local_lab_sources
 
     project = tmp_path / "project"
-    direction = project / "artifacts/qwen25_coder_7b/selected_direction.pt"
-    lens = project / "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
-    payload_dir = b"ok-direction"
-    payload_lens = b"ok-lens"
-    _write_bytes(direction, payload_dir)
-    _write_bytes(lens, payload_lens)
+    direction, lens, lens_v2 = _seed_lab_sources(project)
     assert require_local_lab_sources(
         project,
         expected_direction_sha256=sha256_file(direction),
         expected_lens_sha256=sha256_file(lens),
-    ) == (direction, lens)
+        expected_lens_v2_sha256=sha256_file(lens_v2),
+    ) == (direction, lens, lens_v2)
 
     with pytest.raises(ValueError, match="sha256"):
         require_local_lab_sources(
             project,
             expected_direction_sha256="0" * 64,
             expected_lens_sha256=sha256_file(lens),
+            expected_lens_v2_sha256=sha256_file(lens_v2),
+        )
+
+    with pytest.raises(ValueError, match="sha256"):
+        require_local_lab_sources(
+            project,
+            expected_direction_sha256=sha256_file(direction),
+            expected_lens_sha256=sha256_file(lens),
+            expected_lens_v2_sha256="0" * 64,
         )
 
     monkeypatch.setattr(transport, "path_is_link_or_junction", lambda path: path == direction)
@@ -290,6 +359,7 @@ def test_require_local_lab_sources_rejects_link_wrong_hash_and_size(
             project,
             expected_direction_sha256=sha256_file(direction),
             expected_lens_sha256=sha256_file(lens),
+            expected_lens_v2_sha256=sha256_file(lens_v2),
         )
     monkeypatch.setattr(transport, "path_is_link_or_junction", lambda path: False)
 
@@ -300,6 +370,17 @@ def test_require_local_lab_sources_rejects_link_wrong_hash_and_size(
             project,
             expected_direction_sha256=sha256_file(direction),
             expected_lens_sha256=sha256_file(lens),
+            expected_lens_v2_sha256=sha256_file(lens_v2),
+        )
+
+    monkeypatch.setattr(transport, "MAX_LAB_LENS_BYTES", 800 * 1024**2)
+    lens_v2.unlink()
+    with pytest.raises(FileNotFoundError, match="lens"):
+        require_local_lab_sources(
+            project,
+            expected_direction_sha256=sha256_file(direction),
+            expected_lens_sha256=sha256_file(lens),
+            expected_lens_v2_sha256="0" * 64,
         )
 
 
@@ -310,42 +391,103 @@ def test_atomic_lab_install_verifies_hashes_and_rolls_back(tmp_path: Path) -> No
     )
 
     project = tmp_path / "project"
-    direction = project / "artifacts/qwen25_coder_7b/selected_direction.pt"
-    lens = project / "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
+    direction, lens, lens_v2 = _seed_lab_sources(project)
     _write_bytes(direction, b"old-direction")
     _write_bytes(lens, b"old-lens")
+    _write_bytes(lens_v2, b"old-lens-v2")
     staged_direction = tmp_path / "direction.pt"
     staged_lens = tmp_path / "lens.pt"
+    staged_lens_v2 = tmp_path / "lens_v2.pt"
     staged_direction.write_bytes(b"new-direction")
     staged_lens.write_bytes(b"new-lens")
+    staged_lens_v2.write_bytes(b"new-lens-v2")
     installed = atomic_install_lab_sources(
         staged_direction=staged_direction,
         staged_lens=staged_lens,
+        staged_lens_v2=staged_lens_v2,
         project=project,
         expected_direction_sha256=sha256_file(staged_direction),
         expected_lens_sha256=sha256_file(staged_lens),
+        expected_lens_v2_sha256=sha256_file(staged_lens_v2),
     )
-    assert installed == (direction, lens)
+    assert installed == (direction, lens, lens_v2)
     assert direction.read_bytes() == b"new-direction"
     assert lens.read_bytes() == b"new-lens"
+    assert lens_v2.read_bytes() == b"new-lens-v2"
 
     staged_direction.write_bytes(b"rollback-direction")
     staged_lens.write_bytes(b"rollback-lens")
+    staged_lens_v2.write_bytes(b"rollback-lens-v2")
     with pytest.raises(ValueError, match="sha256"):
         atomic_install_lab_sources(
             staged_direction=staged_direction,
             staged_lens=staged_lens,
+            staged_lens_v2=staged_lens_v2,
             project=project,
             expected_direction_sha256=sha256_file(staged_direction),
             expected_lens_sha256="f" * 64,
+            expected_lens_v2_sha256=sha256_file(staged_lens_v2),
         )
     assert direction.read_bytes() == b"new-direction"
     assert lens.read_bytes() == b"new-lens"
+    assert lens_v2.read_bytes() == b"new-lens-v2"
+
+    with pytest.raises(ValueError, match="sha256"):
+        atomic_install_lab_sources(
+            staged_direction=staged_direction,
+            staged_lens=staged_lens,
+            staged_lens_v2=staged_lens_v2,
+            project=project,
+            expected_direction_sha256=sha256_file(staged_direction),
+            expected_lens_sha256=sha256_file(staged_lens),
+            expected_lens_v2_sha256="f" * 64,
+        )
+    assert direction.read_bytes() == b"new-direction"
+    assert lens.read_bytes() == b"new-lens"
+    assert lens_v2.read_bytes() == b"new-lens-v2"
     assert require_local_lab_sources(
         project,
         expected_direction_sha256=sha256_file(direction),
         expected_lens_sha256=sha256_file(lens),
-    ) == (direction, lens)
+        expected_lens_v2_sha256=sha256_file(lens_v2),
+    ) == (direction, lens, lens_v2)
+
+
+def test_atomic_lab_install_rolls_back_when_v2_stream_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import refusal_direction_replication.qwen_colab_transport as transport
+
+    project = tmp_path / "project"
+    direction, lens, lens_v2 = _seed_lab_sources(project)
+    original = (direction.read_bytes(), lens.read_bytes(), lens_v2.read_bytes())
+    staged_direction = tmp_path / "direction.pt"
+    staged_lens = tmp_path / "lens.pt"
+    staged_lens_v2 = tmp_path / "lens_v2.pt"
+    staged_direction.write_bytes(b"new-direction")
+    staged_lens.write_bytes(b"new-lens")
+    staged_lens_v2.write_bytes(b"new-lens-v2")
+    real_stream = transport._stream_install_regular_file
+
+    def fail_v2_stream(**kwargs):
+        destination = kwargs["destination"]
+        if destination.name == "qwen25_coder_7b_jacobian_lens_v2.pt":
+            raise OSError("disk full")
+        return real_stream(**kwargs)
+
+    monkeypatch.setattr(transport, "_stream_install_regular_file", fail_v2_stream)
+    with pytest.raises(OSError, match="disk full"):
+        transport.atomic_install_lab_sources(
+            staged_direction=staged_direction,
+            staged_lens=staged_lens,
+            staged_lens_v2=staged_lens_v2,
+            project=project,
+            expected_direction_sha256=sha256_file(staged_direction),
+            expected_lens_sha256=sha256_file(staged_lens),
+            expected_lens_v2_sha256=sha256_file(staged_lens_v2),
+        )
+    assert (direction.read_bytes(), lens.read_bytes(), lens_v2.read_bytes()) == original
 
 
 def test_lab_installer_reassembles_parts_atomically_and_pins_dependencies(
@@ -360,6 +502,9 @@ def test_lab_installer_reassembles_parts_atomically_and_pins_dependencies(
     assert "--no-deps" in install_text
     assert "fetch_upstream_splits" not in install_text
     assert "/content/refusal_direction/src" in install_text
+    assert "lab_source_lens_v2" in install_text
+    assert "expected_lens_v2_sha256" in install_text
+    assert "lens_v2_sha256" in install_text
 
     module = _load_script(INSTALL_SCRIPT, "install_lab")
     destination = tmp_path / "lab_source_lens.pt"
@@ -382,6 +527,23 @@ def test_lab_installer_reassembles_parts_atomically_and_pins_dependencies(
     assert module.assemble_staged_lens() == destination
     assert destination.read_bytes() == b"alphabeta"
     assert not list(tmp_path.glob("lab_source_lens.pt.part*"))
+
+    destination_v2 = tmp_path / "lab_source_lens_v2.pt"
+    monkeypatch.setattr(module, "REMOTE_LAB_LENS_V2_STAGING", str(destination_v2))
+    part0_v2 = tmp_path / "lab_source_lens_v2.pt.part000"
+    part1_v2 = tmp_path / "lab_source_lens_v2.pt.part001"
+    part0_v2.write_bytes(b"gamma")
+    part1_v2.write_bytes(b"delta")
+    source_v2 = tmp_path / "source_v2.pt"
+    source_v2.write_bytes(b"gammadelta")
+    write_artifact_chunk_manifest(
+        source_v2,
+        [part0_v2, part1_v2],
+        tmp_path / "lab_source_lens_v2.pt.manifest.json",
+    )
+    assert module.assemble_staged_lens_v2() == destination_v2
+    assert destination_v2.read_bytes() == b"gammadelta"
+    assert not list(tmp_path.glob("lab_source_lens_v2.pt.part*"))
 
 
 def test_lab_installer_rejects_noncontiguous_parts(
@@ -577,6 +739,49 @@ def test_qwen_run_lab_consumes_auth_file_before_launch_and_stays_fail_closed(
     missing = tmp_path / "missing.json"
     with pytest.raises((ValueError, FileNotFoundError)):
         module.main(["--share", "--auth-file", str(missing)])
+
+
+def test_qwen_run_lab_forwards_lens_v2_path_to_bootstrap(tmp_path: Path) -> None:
+    module = _load_script(RUN_SCRIPT, "qwen_run_lab_lens_v2")
+    captured: dict[str, object] = {}
+    launch = MagicMock()
+    direction = tmp_path / "direction.pt"
+    lens = tmp_path / "lens.pt"
+    lens_v2 = tmp_path / "lens_v2.pt"
+    direction.write_bytes(b"direction")
+    lens.write_bytes(b"lens")
+    lens_v2.write_bytes(b"lens-v2")
+
+    def fake_bootstrap(root, **kwargs):
+        del root
+        captured.update(kwargs)
+        return SimpleNamespace(
+            engine=SimpleNamespace(),
+            preflight_summary={"device_name": "A100"},
+        )
+
+    with patch.object(module, "bootstrap_intervention_lab", fake_bootstrap), patch.object(
+        module,
+        "build_gradio_app",
+        return_value=SimpleNamespace(launch=launch),
+    ):
+        module.main(
+            [
+                "--no-share",
+                "--server-name",
+                "127.0.0.1",
+                "--direction-path",
+                str(direction),
+                "--lens-path",
+                str(lens),
+                "--lens-v2-path",
+                str(lens_v2),
+            ]
+        )
+    assert Path(captured["direction_path"]) == direction
+    assert Path(captured["lens_path"]) == lens
+    assert Path(captured["lens_v2_path"]) == lens_v2
+    launch.assert_called_once()
 
 
 def test_partial_auth_file_is_deleted_and_rejected(tmp_path: Path) -> None:
@@ -1192,3 +1397,10 @@ def test_jlens_no_deps_keeps_project_transformers_and_records_smoke_id() -> None
     window = compatibility_section[max(0, smoke_index - 400) : smoke_index + 400]
     assert "não é uma declaração de compatibilidade geral" in window
     assert "a100" not in window
+    assert "qwen25_coder_7b_jacobian_lens_v2.pt" in docs
+    assert FROZEN_LENS_V2_SHA256 in docs
+    assert "v2 (contexto longo)" in docs
+    assert "v1 (100 amostras)" in docs
+    assert "--lens-v2-path" in docs
+    assert "lab_source_lens_v2" in docs
+    assert "source_lens_v2" in docs

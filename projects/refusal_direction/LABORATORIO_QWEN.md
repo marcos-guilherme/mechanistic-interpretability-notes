@@ -13,7 +13,9 @@ O desenho aprovado em 16 de novembro de 2026 está em
 O laboratório existe para conversar com `Qwen/Qwen2.5-Coder-7B-Instruct` na
 revisão fixa do estudo, aplicar baseline, ablação, adição ou controle na
 direção congelada e acompanhar, passo a passo, o texto gerado e o top-k da
-J-lens numa camada escolhida.
+J-lens numa camada escolhida. A interface escolhe entre J-lens
+`v2 (contexto longo)` (padrão) e `v1 (100 amostras)`; o modelo Qwen permanece
+fixo. A lente selecionada vale para todos os tokens daquela geração.
 
 É ferramenta de exploração visual, não um novo protocolo de avaliação. Não
 executa código gerado, não roda MITRE nem HumanEval+, não compara as quatro
@@ -31,9 +33,10 @@ Três camadas separadas no código:
 1. **`InterventionEngine`** (`qwen_lab_runtime.py`): carrega modelo, tokenizer,
    direção e hooks; gera token a token; captura a ativação da camada pedida;
    respeita cancelamento; remove hooks em `finally`.
-2. **`LiveJLensReadout`** (`qwen_lab_readout.py`): valida a lente congelada,
-   recebe a ativação do passo corrente e devolve logits e top-k numéricos, sem
-   lógica de apresentação.
+2. **`LiveJLensReadout` e `LensReadoutRegistry`** (`qwen_lab_readout.py`):
+   validam as duas lentes congeladas, recebem a ativação do passo corrente e
+   devolvem logits e top-k numéricos da versão escolhida, sem lógica de
+   apresentação.
 3. **Controller e Gradio** (`qwen_lab_app.py`): valida entradas, orquestra uma
    sessão de geração, faz streaming para os painéis, bloqueia controles durante
    a execução, cuida da exportação explícita e do login da interface.
@@ -59,13 +62,18 @@ Configuração em `configs/qwen25_coder_7b_lab.json`:
   `581d398613e5602a5af361e1c34d3a92ea82ba8e`;
 - direção copiada de `artifacts/qwen25_coder_7b/selected_direction.pt`, hash
   `0b1cff5e...` (completo no JSON);
-- lente copiada de
+- J-lens v1 copiada de
   `artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt`, hash
-  `b700a78c...` (completo no JSON);
+  `b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e`;
+- J-lens v2 copiada de
+  `artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt`, hash
+  `b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a`
+  (`source_lens_v2` / `lens_v2_sha256` na config);
 - presets: ablação 20%, adição 50%, controle aleatório 20% com seed 1042.
 
 O preflight na subida falha fechado se revisão, dimensões, finitude, CUDA ou
-hashes não batem. Não há seletor de modelo na interface.
+hashes não batem. As duas lentes sobem juntas; só a selecionada participa do
+readout. Não há seletor de modelo na interface.
 
 ## Como interpretar a J-lens
 
@@ -98,11 +106,15 @@ uv tool install google-colab-cli==0.7.5
 gcloud auth application-default login --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory
 ```
 
-Confirme que os dois `.pt` locais existem e que os SHA-256 coincidem com
-`configs/qwen25_coder_7b_lab.json`. O `sync` do perfil lab limpa partes remotas
-antigas, envia direção e lente em partes de 16MiB com manifesto SHA-256 e falha
-se tamanho, contagem ou hash não conferirem. O perfil code-eval continua a usar
-partes de 64MiB.
+Confirme que os três `.pt` locais existem (direção, J-lens v1 e J-lens v2) e
+que os SHA-256 coincidem com `configs/qwen25_coder_7b_lab.json`. O `sync` do
+perfil lab limpa partes remotas antigas, envia a direção inteira e as duas
+lentes em partes de 16MiB com manifesto SHA-256 (`lab_source_lens.pt` e
+`lab_source_lens_v2.pt`) e falha se tamanho, contagem ou hash não conferirem.
+O instalador remoto remonta as duas lentes e as instala atomicamente nos
+caminhos congelados. Sobrescreva o caminho da v2 com `--lens-v2-path` em
+`qwen_run_lab.py` se precisar apontar para um artefato já extraído. O perfil
+code-eval continua a usar partes de 64MiB.
 
 ## Comandos do perfil lab
 
@@ -127,10 +139,10 @@ obrigatório ao terminar, mesmo se `lab` falhar depois que a VM subiu.
 ### O que cada comando faz
 
 - **start**: abre VM A100 com nome de sessão fixo do perfil.
-- **sync**: envia código do projeto e artefatos congelados (sem datasets).
+- **sync**: envia código do projeto e os três artefatos congelados (sem datasets).
 - **bootstrap**: roda o instalador remoto, fixa Gradio 5.49.1 e instala J-lens
   com `--no-deps` de propósito para manter o Transformers do `pyproject.toml`;
-  remonta a lente com manifesto e valida hashes declarados na config.
+  remonta as lentes v1 e v2 com manifesto e valida hashes declarados na config.
 - **auth-hf**: transfere o token HF já salvo localmente, sem imprimi-lo.
 - **lab**: gera usuário e senha locais, envia arquivo de auth de uso único,
   inicia o servidor Gradio em background e imprime URL pública, credenciais e
@@ -197,7 +209,9 @@ Smoke mínimo acordado no desenho:
 3. Usar um prompt inofensivo e curto de programação (não MITRE, não executar
    código gerado).
 4. Rodar **baseline** e **ablação 20%** com temperatura 0, camada J-lens 18,
-   top-k 5, limite de 6 novos tokens.
+   top-k 5, limite de 6 novos tokens. A J-lens padrão é `v2 (contexto longo)`;
+   compare com `v1 (100 amostras)` numa geração seguinte, sem trocar de lente
+   no meio do texto.
 5. Confirmar que ambos atingem o passo 6 com estado `max_tokens` (ou
    equivalente documentado na UI) e que token emitido e top-k da lente
    atualizam em sincronia a cada passo.

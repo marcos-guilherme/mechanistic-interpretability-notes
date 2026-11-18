@@ -41,7 +41,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--lens-path",
         type=Path,
         default=None,
-        help="Caminho explícito da J-lens ajustada.",
+        help="Caminho explícito da J-lens v1 (100 amostras).",
+    )
+    parser.add_argument(
+        "--lens-v2-path",
+        type=Path,
+        default=None,
+        help="Caminho explícito da J-lens v2 (contexto longo).",
     )
     parser.add_argument("--server-name", default="0.0.0.0")
     parser.add_argument("--server-port", type=int, default=7860)
@@ -76,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         args.root,
         direction_path=args.direction_path,
         lens_path=args.lens_path,
+        lens_v2_path=args.lens_v2_path,
     )
     demo = build_gradio_app(
         bundle.engine,

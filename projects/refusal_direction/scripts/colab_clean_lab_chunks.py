@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 REMOTE_LAB_LENS_STAGING = Path("/content/lab_source_lens.pt")
+REMOTE_LAB_LENS_V2_STAGING = Path("/content/lab_source_lens_v2.pt")
 
 
 def clean_lab_chunk_files(destination: Path) -> None:
@@ -29,6 +30,7 @@ def clean_lab_chunk_files(destination: Path) -> None:
 
 def main() -> int:
     clean_lab_chunk_files(REMOTE_LAB_LENS_STAGING)
+    clean_lab_chunk_files(REMOTE_LAB_LENS_V2_STAGING)
     return 0
 
 

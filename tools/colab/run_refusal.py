@@ -74,6 +74,8 @@ REMOTE_CODE_EVAL_LENS_STAGING = "/content/code_eval_source_lens.pt"
 REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
 REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
 REMOTE_LAB_LENS_MANIFEST = "/content/lab_source_lens.pt.manifest.json"
+REMOTE_LAB_LENS_V2_STAGING = "/content/lab_source_lens_v2.pt"
+REMOTE_LAB_LENS_V2_MANIFEST = "/content/lab_source_lens_v2.pt.manifest.json"
 REMOTE_LAB_AUTH_FILE = "/content/qwen_lab_auth.json"
 A100_PROFILES = frozenset(
     {
@@ -536,7 +538,7 @@ def require_code_eval_sources(project: Path) -> tuple[Path, Path]:
     return require_local_code_eval_sources(project)
 
 
-def require_lab_sources(project: Path) -> tuple[Path, Path]:
+def require_lab_sources(project: Path) -> tuple[Path, Path, Path]:
     sys.path.insert(0, str(project / "src"))
     from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
         require_local_lab_sources,
@@ -1115,9 +1117,10 @@ def cleanup_lab_local_staging(root: Path) -> None:
             auth.unlink()
         except FileNotFoundError:
             pass
-    parts_dir = staging / "lab-lens-parts"
-    if parts_dir.exists():
-        shutil.rmtree(parts_dir, ignore_errors=True)
+    for parts_name in ("lab-lens-parts", "lab-lens-v2-parts"):
+        parts_dir = staging / parts_name
+        if parts_dir.exists():
+            shutil.rmtree(parts_dir, ignore_errors=True)
 
 
 def extract_public_lab_url(text: str) -> str:
@@ -1310,7 +1313,7 @@ def main() -> int:
                     )
                 )
         if lab_sources is not None:
-            source_direction, source_lens = lab_sources
+            source_direction, source_lens, source_lens_v2 = lab_sources
             run(
                 exec_command(
                     session,
@@ -1325,40 +1328,20 @@ def main() -> int:
                     REMOTE_LAB_DIRECTION_STAGING,
                 )
             )
-            part_prefix = Path(REMOTE_LAB_LENS_STAGING).name + ".part"
-            lens_parts = split_artifact_file(
+            upload_chunked_source(
+                session,
                 source_lens,
+                REMOTE_LAB_LENS_STAGING,
                 ROOT / ".colab-staging" / "lab-lens-parts",
                 chunk_bytes=LAB_LENS_CHUNK_BYTES,
-                part_prefix=part_prefix,
             )
-            sys.path.insert(0, str(PROJECT / "src"))
-            from refusal_direction_replication.qwen_colab_transport import (  # noqa: WPS433
-                write_artifact_chunk_manifest,
+            upload_chunked_source(
+                session,
+                source_lens_v2,
+                REMOTE_LAB_LENS_V2_STAGING,
+                ROOT / ".colab-staging" / "lab-lens-v2-parts",
+                chunk_bytes=LAB_LENS_CHUNK_BYTES,
             )
-
-            manifest_path = (
-                ROOT
-                / ".colab-staging"
-                / "lab-lens-parts"
-                / (Path(REMOTE_LAB_LENS_STAGING).name + ".manifest.json")
-            )
-            write_artifact_chunk_manifest(source_lens, lens_parts, manifest_path)
-            run(
-                upload_command(
-                    session,
-                    manifest_path,
-                    REMOTE_LAB_LENS_MANIFEST,
-                )
-            )
-            for index, part in enumerate(lens_parts):
-                run(
-                    upload_command(
-                        session,
-                        part,
-                        f"{REMOTE_LAB_LENS_STAGING}.part{index:03d}",
-                    )
-                )
         if args.profile == "qwen25-coder-jlens":
             for local_path, remote in optional_jlens_resume_bundle(PROJECT):
                 run(upload_command(session, local_path, remote))

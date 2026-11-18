@@ -24,6 +24,7 @@ ARCHIVE_ROOT = "refusal_direction"
 _SRC = "/content/refusal_direction/src"
 REMOTE_LAB_DIRECTION_STAGING = "/content/lab_source_direction.pt"
 REMOTE_LAB_LENS_STAGING = "/content/lab_source_lens.pt"
+REMOTE_LAB_LENS_V2_STAGING = "/content/lab_source_lens_v2.pt"
 JLENS_COMMIT = "581d398613e5602a5af361e1c34d3a92ea82ba8e"
 GRADIO_SPEC = "gradio==5.49.1"
 JLENS_SPEC = (
@@ -146,6 +147,21 @@ def assemble_staged_lens() -> Path:
     )
 
 
+def assemble_staged_lens_v2() -> Path:
+    if _SRC not in sys.path:
+        sys.path.insert(0, _SRC)
+    from refusal_direction_replication.qwen_colab_transport import (
+        assemble_chunked_file,
+    )
+
+    destination = Path(REMOTE_LAB_LENS_V2_STAGING)
+    return assemble_chunked_file(
+        destination,
+        manifest_path=destination.with_name(destination.name + ".manifest.json"),
+        require_manifest=True,
+    )
+
+
 def _assert_gradio_pin() -> None:
     from refusal_direction_replication.qwen_lab_app import GRADIO_PIN_VERSION
 
@@ -192,12 +208,15 @@ def main() -> int:
     if config.get("runtime_compatibility_smoke") != RUNTIME_COMPATIBILITY_SMOKE:
         raise ValueError("runtime_compatibility_smoke does not match the recorded identifier")
     staged_lens = assemble_staged_lens()
+    staged_lens_v2 = assemble_staged_lens_v2()
     atomic_install_lab_sources(
         staged_direction=Path(REMOTE_LAB_DIRECTION_STAGING),
         staged_lens=staged_lens,
+        staged_lens_v2=staged_lens_v2,
         project=REMOTE_ROOT,
         expected_direction_sha256=str(config["direction_sha256"]),
         expected_lens_sha256=str(config["lens_sha256"]),
+        expected_lens_v2_sha256=str(config["lens_v2_sha256"]),
     )
     return 0
 
