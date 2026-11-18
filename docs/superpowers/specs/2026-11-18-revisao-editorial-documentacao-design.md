@@ -16,6 +16,8 @@ O texto deve:
 - remover tom promocional, institucional ou genérico;
 - substituir rótulos criados para a documentação, como “atlas observacional”,
   por descrições diretas do experimento;
+- retirar nomes de arquivos, trechos de código e referências internas quando
+  eles não ajudam a compreender, reproduzir ou conferir um resultado;
 - preservar números, estados experimentais, limitações e distinções entre
   observação e causalidade.
 
@@ -29,6 +31,8 @@ reescritos.
 O termo “atlas observacional” será substituído por expressões contextuais como
 “avaliação da J-lens em 93 prompts” ou “análise sem intervenção”, conforme a
 frase. “Portal” será evitado quando “documentação” ou “site” for mais natural.
+Links técnicos essenciais serão mantidos nas seções de resultados e
+reprodução, mas não repetidos a cada parágrafo da narrativa.
 
 ## Verificação
 
