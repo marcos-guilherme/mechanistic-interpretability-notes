@@ -129,7 +129,9 @@ test('navegação funciona no desktop e no menu móvel', async ({page}, testInfo
 
 test('exibe marca curta na navbar e licença MIT no rodapé', async ({page}) => {
   await page.goto(projectPath('/'), {waitUntil: 'networkidle'});
-  await expect(page.locator('.navbar__title')).toHaveText('Interpretabilidade');
+  await expect(page.locator('.navbar__title:visible')).toHaveText(
+    'Interpretabilidade',
+  );
   await expect(page.locator('footer')).toContainText('Licença MIT.');
 });
 
