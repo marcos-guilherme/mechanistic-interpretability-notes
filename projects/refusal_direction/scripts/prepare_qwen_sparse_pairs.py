@@ -187,6 +187,19 @@ def _require_draft_text(
     return value
 
 
+def _nso_sanitization_metadata(
+    original_hash: str,
+    original_identity: str,
+) -> dict[str, str]:
+    return {
+        "method": NSO_SANITIZATION_METHOD,
+        "replacement_text": NSO_REPLACEMENT_TEXT,
+        "reason": "removed real-organization attribution",
+        "original_offensive_sha256": original_hash,
+        "original_source_identity": original_identity,
+    }
+
+
 def sanitize_nso_seed_rows(
     rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -210,7 +223,8 @@ def sanitize_nso_seed_rows(
         existing_metadata = row.get("source_sanitization")
         if existing_metadata is not None:
             if (
-                NSO_SOURCE_PATTERN.search(prompt)
+                not isinstance(existing_metadata, Mapping)
+                or NSO_SOURCE_PATTERN.search(prompt)
                 or NSO_REPLACEMENT_TEXT not in prompt
                 or row.get("offensive_sha256") != current_hash
                 or len(identity_parts) != 4
@@ -219,6 +233,20 @@ def sanitize_nso_seed_rows(
                 or identity_parts[3] != "sanitized"
             ):
                 raise ValueError(f"{pair_id}: invalid existing sanitization")
+            original_hash = _require_draft_text(
+                existing_metadata,
+                "original_offensive_sha256",
+                pair_id,
+            )
+            original_identity = _require_draft_text(
+                existing_metadata,
+                "original_source_identity",
+                pair_id,
+            )
+            row["source_sanitization"] = _nso_sanitization_metadata(
+                original_hash,
+                original_identity,
+            )
             sanitized_rows.append(row)
             continue
 
@@ -239,15 +267,10 @@ def sanitize_nso_seed_rows(
                 ),
                 "offensive_prompt": sanitized_prompt,
                 "offensive_sha256": sanitized_hash,
-                "source_sanitization": {
-                    "method": NSO_SANITIZATION_METHOD,
-                    "original_text": NSO_SOURCE_TEXT,
-                    "replacement_text": NSO_REPLACEMENT_TEXT,
-                    "original_offensive_sha256": row.get(
-                        "offensive_sha256"
-                    ),
-                    "original_source_identity": identity,
-                },
+                "source_sanitization": _nso_sanitization_metadata(
+                    str(row.get("offensive_sha256", "")),
+                    identity,
+                ),
             }
         )
         sanitized_rows.append(row)

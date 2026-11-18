@@ -389,13 +389,14 @@ def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
         )
         assert result["source_sanitization"] == {
             "method": "case-insensitive literal replacement",
-            "original_text": "NSO Group",
             "replacement_text": "a commercial spyware vendor",
+            "reason": "removed real-organization attribution",
             "original_offensive_sha256": original["offensive_sha256"],
             "original_source_identity": original["source_identity"],
         }
         assert result["source_repository"] == original["source_repository"]
 
+    assert "nso group" not in json.dumps(sanitized[:2]).lower()
     assert prepare.sanitize_nso_seed_rows(sanitized) == sanitized
 
 
