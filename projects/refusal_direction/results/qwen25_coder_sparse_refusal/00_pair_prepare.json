@@ -1,0 +1,2088 @@
+{
+  "experiment": "qwen_sparse_refusal_pair_prepare",
+  "pair_count": 256,
+  "pair_split_sha256": "e4137a332db3764d689aed9d5c9473afbc905b89f1d28b487a467eb944d40b9d",
+  "pair_splits": {
+    "discovery": 128,
+    "selection": 64,
+    "test": 64
+  },
+  "pairs": [
+    {
+      "category": "C2",
+      "defensive_sha256": "e8e61b9296579794ea85f8258939c4708d37b3af1919f872a58638ed3496032a",
+      "offensive_sha256": "22498502b078e25b5a5e2fc81f6ae21ecb0dd492bb3707a4b9dbe51358dc707b",
+      "pair_id": "pair-0000",
+      "source_identity": "mitre:9:22498502b078e25b"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "1d8f8dea5f438f68ff196ea8f24b93f1fc219f746007133f0390880ba42311d2",
+      "offensive_sha256": "1aed73762f17229b2827b437a27ca9362c8a75819d7f74e7b6d35de28cfd589c",
+      "pair_id": "pair-0001",
+      "source_identity": "mitre:195:1aed73762f17229b"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "63e71c0bfa19ca1505f2da21d6e29c3adb39c13062ea6114d275792c7b5285e3",
+      "offensive_sha256": "6fcb7ae8b3e8cc23f664be519662bdb441198caa29bc40bc2eff5464b264bb97",
+      "pair_id": "pair-0002",
+      "source_identity": "mitre:298:6fcb7ae8b3e8cc23"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "baf845bf3f27c4a69304dda50cba70ffcb8e3ae3c35115531cee62a0dccb5016",
+      "offensive_sha256": "b55e4688b539dfc5a5337c21f2e8166854a248a0aefa77e6199982e0ea7555ea",
+      "pair_id": "pair-0003",
+      "source_identity": "mitre:349:b55e4688b539dfc5"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "22877e600021f6e94d8cd7dde4f6c34c74a391c5911abc5bbc357a4ccc716859",
+      "offensive_sha256": "3ec61570a8e54a0cf2d45194e3a8a91ed6ab5a45060de8eb67cfdc227173fc23",
+      "pair_id": "pair-0004",
+      "source_identity": "mitre:443:3ec61570a8e54a0c"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "ad571bde9d18ee612f126f39ea60e76827a577ee212a3361bcd22aba6496b13b",
+      "offensive_sha256": "b314ed53c9a0d6febf13c349b01e7b02f7d8d105ef1c62d39bfca3d81d0ef3bd",
+      "pair_id": "pair-0005",
+      "source_identity": "mitre:570:b314ed53c9a0d6fe"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "65633adad9925d9f3605a2da33faaed4c8b220175404da6e501f21eee1934e77",
+      "offensive_sha256": "d54fd6ccedf61021eee06ca3c2b26b2cac8a7af1a0e72851ba669f8ee7208856",
+      "pair_id": "pair-0006",
+      "source_identity": "mitre:697:d54fd6ccedf61021"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "8bcf4cff7ab352cfa16d52a1ffeca77c08373c3fb1d0c9b3e39cbc6c45ec67ed",
+      "offensive_sha256": "802e3524555df01af0c69175d6e331ded1dccc1cf11553b9e4f4026283af0cfa",
+      "pair_id": "pair-0007",
+      "source_identity": "mitre:766:802e3524555df01a"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "8afce8ac85a50ba7a675ab0ee113b00a5202c9996837a358d8c194c652baa28e",
+      "offensive_sha256": "5875311778edbbd19ec1e980d7e6331aa2a5b2fe7330cbe72852d39e2f7f8f4a",
+      "pair_id": "pair-0008",
+      "source_identity": "mitre:827:5875311778edbbd1"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "be3759159efe2c47b470631cfe7a72dd1fe02de9ba9434ccdd5954f9165f167c",
+      "offensive_sha256": "ba4009ed32d29bfd10a20503f4e0940e392e83b5e7de71184b98c96aa3bf15f8",
+      "pair_id": "pair-0009",
+      "source_identity": "mitre:956:ba4009ed32d29bfd"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "9ba16c453b028da50ee172fb10058d7a037c60a3f7f62738982637c9eae65ce5",
+      "offensive_sha256": "75249fd375d995c91d70bd86517e78c19958a8d32c4ee6c5b6cf6bfa68e83472",
+      "pair_id": "pair-0010",
+      "source_identity": "mitre:7:75249fd375d995c9"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "c49744862e42397756d397a7e68dd1226b5439e8f7bd38986f2156de55aca6ac",
+      "offensive_sha256": "a9f6db4d7f2aecf2f9bf33c0d9c81f3de2146a3aa3db9cd902214f3d64363c0d",
+      "pair_id": "pair-0011",
+      "source_identity": "mitre:111:a9f6db4d7f2aecf2"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "c348a2a4d2b54eafadf643e453030052ec8f09f4c1e4f1056e3328d07c9d541e",
+      "offensive_sha256": "8a61994902d8270c4b4d04c9746d029da73f71bda0407ee66856b10a158a9a60",
+      "pair_id": "pair-0012",
+      "source_identity": "mitre:263:8a61994902d8270c"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "f031b75c7dc8c502149f3067e008a501c2379e8fdd147fb9b0d682828c6c37d6",
+      "offensive_sha256": "4ff81a5dac9793cbc73d9c8d9a0f56b8c053d8d1f2cfe40b8232e9b333ebc7c6",
+      "pair_id": "pair-0013",
+      "source_identity": "mitre:345:4ff81a5dac9793cb"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "03f10c0950ad2ca6bfc288ffdfacfaa20dc3909d0f9c2439a56df3321331c0c9",
+      "offensive_sha256": "241e92a3a94e7e9fbd948b34b46917843047a30323a44e0c7574abd124d31bbe",
+      "pair_id": "pair-0014",
+      "source_identity": "mitre:424:241e92a3a94e7e9f"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "cb236637f1803db3932730390ba20f37acfaa88792ab452628896864c84b8267",
+      "offensive_sha256": "3c386013798fd8cb2be13503afeabab31315f062d2d327583d3c8a3800f4c9d6",
+      "pair_id": "pair-0015",
+      "source_identity": "mitre:544:3c386013798fd8cb"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "02d94bbe8391e8352c67f27516ac9bbd6292ca97c3066798a9edac3922f90b2c",
+      "offensive_sha256": "bd07c5e7fd50bd4685bbab832765cefadf64eeaedb50f0d2f92dc3912d29f533",
+      "pair_id": "pair-0016",
+      "source_identity": "mitre:639:bd07c5e7fd50bd46"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "403bac9e3a3426c063796d0ad9d960ac13f636a6fa991d0fcfff91fb834ead6b",
+      "offensive_sha256": "6042418c6abf338ca7872adefb651398494c0e6bf2a6794ba1d917b82f3ccf9d",
+      "pair_id": "pair-0017",
+      "source_identity": "mitre:751:6042418c6abf338c"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "1557166378f5d6300e05c7439f7d9fcb9e2d71ccb25bd863490fa3ba07e96060",
+      "offensive_sha256": "bb98f9f0a261aeae7da518c88fd44c1fa6dc1b45f39d894a17bc717a10b79497",
+      "pair_id": "pair-0018",
+      "source_identity": "mitre:868:bb98f9f0a261aeae"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "ac9f05ab9d06eb9eb596aaba77acea55a37fe2675b50d3caa52a497ee6a87cd0",
+      "offensive_sha256": "0e0f919e1b2a0df8e4f60fb517a6c23f55f43ed6e182a195483554901e8f0beb",
+      "pair_id": "pair-0019",
+      "source_identity": "mitre:939:0e0f919e1b2a0df8"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "5c358bebb3b9e43f64e4e77dc61876941fadd98395f2ca8b243266eeec33013f",
+      "offensive_sha256": "c580fe2366c35f11ac0fdc0d29ae776f3b807f90d7f9f6c8a62282bd758c3dc1",
+      "pair_id": "pair-0020",
+      "source_identity": "mitre:90:c580fe2366c35f11"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "2b43b35ec3c46cb7089b47d1a47f6abe0e946b8a2e1209eb1b7643e6c7489a28",
+      "offensive_sha256": "a5f35d1f039e25f53867838625d4e820b36520e1e70a639f58e06939aa6cb637",
+      "pair_id": "pair-0021",
+      "source_identity": "mitre:151:a5f35d1f039e25f5"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "2c758bdda38fa020e977c5342c4c1af988664301c13eba62d0e8cd57a68c3030",
+      "offensive_sha256": "6970e5091db43b83a5f6bf00a2adfd5e673491d96f49e70c2122ec56bdbe5196",
+      "pair_id": "pair-0022",
+      "source_identity": "mitre:233:6970e5091db43b83"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "3a1d0d9c71d106c09929e579412f2614f28021f20946021e6d88540ac2cf61f6",
+      "offensive_sha256": "4df0d348cecaa13f2b5adee9ff620152ebd89850d6c16a8501c02f950d54b1f7",
+      "pair_id": "pair-0023",
+      "source_identity": "mitre:386:4df0d348cecaa13f"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "097fd1b6c52210c79c0e98d1ed9a38d9f990a7c8e02361495a8d9815ed6cca2e",
+      "offensive_sha256": "3e9f2c89d993a784264ccfd98a49f201cdcfcd315f3b66188163655d96e0b09d",
+      "pair_id": "pair-0024",
+      "source_identity": "mitre:404:3e9f2c89d993a784"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "92f480fef383601eaeac50279f93f847ed53b65b2289d21a380c0b6bf058bf00",
+      "offensive_sha256": "4d69341c203eeeb85f9fe53afe8682cf4d550b97ab90337aefebe3ce700f277a",
+      "pair_id": "pair-0025",
+      "source_identity": "mitre:542:4d69341c203eeeb8"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "6e6ad1f3526e7600712bcf82bd12642db0723fdd72a63354b0ad8f1ee3729d13",
+      "offensive_sha256": "3c5bcdb65dea6f10060410eb1efac543874061353b57688d946d3e275d9aaf34",
+      "pair_id": "pair-0026",
+      "source_identity": "mitre:632:3c5bcdb65dea6f10"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "6b8dc620d0df5e844abe009864a59ef056df5dd6c25ca062603f77337b4a7001",
+      "offensive_sha256": "c553cad7fc7739269735edfb4599df7a511a8a07856836cfb93aeb195b6a727a",
+      "pair_id": "pair-0027",
+      "source_identity": "mitre:719:c553cad7fc773926"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "502272fc330f41413e2be333283e6c8794f4a877dab44f0c9fd2642ad1757937",
+      "offensive_sha256": "a6cb908de752e62b346232a20f1a416f4b657a8f982e5724d6a91a04008f9d03",
+      "pair_id": "pair-0028",
+      "source_identity": "mitre:828:a6cb908de752e62b"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "2a8eb825426044923e2e5020d5a82c0342d96a21a8bc28c291f8ee275293cb3f",
+      "offensive_sha256": "d3d018b0f5a32c3346bf588d77875a0f94e8431fb95ef0190698a2a47232bfe3",
+      "pair_id": "pair-0029",
+      "source_identity": "mitre:920:d3d018b0f5a32c33"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "3f710990901c85a165557656cd1b5290dc49aed4875d50240a3b2e3cc7f411f1",
+      "offensive_sha256": "28abbd19d50f3cd94e552d44bb351a2fb9444b3ae3f49ff6d8fa52a88f92a720",
+      "pair_id": "pair-0030",
+      "source_identity": "mitre:12:28abbd19d50f3cd9"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "25d8b33b16b04dfdb5580cfd1809580df67e6df0953e90283728206e85121370",
+      "offensive_sha256": "a3f3d1d4e4dafd7aa5eb451d986a6ea79368908f6737d83f206c7be49c541b56",
+      "pair_id": "pair-0031",
+      "source_identity": "mitre:196:a3f3d1d4e4dafd7a"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "421331589e27b15e6088da5ea0f24bec52e2c399d39579c246f3dc0fc4a5694f",
+      "offensive_sha256": "1371fb3153d144fb431aa3d1a098ae7c5ec75979144cc0f667ca5a7fcd8cfe77",
+      "pair_id": "pair-0032",
+      "source_identity": "mitre:246:1371fb3153d144fb"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "4a2d193ed987c66f2cf2825b1abc8bf2cdbbe3058c9e8f6da3797e58ed348fb5",
+      "offensive_sha256": "b0e17226145f0fc0bc9bc4a964a1bdeb0964e279dabddf9a2c82f7b11ef02dad",
+      "pair_id": "pair-0033",
+      "source_identity": "mitre:347:b0e17226145f0fc0"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "00e7f2a4eeeca668d414bb24cd250c305db106e656b563e46f68a3ff8060af09",
+      "offensive_sha256": "fb95337435382cd75e8dd35acb3fe5278fb621f735055a58f41d6bec5c8644ae",
+      "pair_id": "pair-0034",
+      "source_identity": "mitre:469:fb95337435382cd7"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "f3e8cc61abb13b8cf51bf169d1576cf9f26b6487a48d1bb4abcfe54d30ee9ee6",
+      "offensive_sha256": "1aecf5d7e0460c1986af35fa4d534b7a3bf605a4525fb50bb47b7da144481068",
+      "pair_id": "pair-0035",
+      "source_identity": "mitre:540:1aecf5d7e0460c19"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "ebea8c5144a5d17a37aa7b8fa2e04706c0796200ef8303ec43b7b49f49084103",
+      "offensive_sha256": "acc9a51f1f1612e9b4710ade594a74c435dafc3d12e57276a59392734745a471",
+      "pair_id": "pair-0036",
+      "source_identity": "mitre:622:acc9a51f1f1612e9"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "cd6e66332135065bd5843c36cb5ca840c72c74c276a534f48bd97e0aa03a32cf",
+      "offensive_sha256": "b849e038a9b52ce7bf76d5338acd938742019adf11af45871db2c43fbf1525b5",
+      "pair_id": "pair-0037",
+      "source_identity": "mitre:734:b849e038a9b52ce7"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "ab385e1a66133f161390a038e5e8c79e38760189a6ee8e3eac5129bc33404f82",
+      "offensive_sha256": "7b923339e0809bbd56134cf27858a0ac4f17050d244c6f13a35c66c6b9d7ac54",
+      "pair_id": "pair-0038",
+      "source_identity": "mitre:831:7b923339e0809bbd:sanitized"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "707caa4cf569aea09754915191394adf841069d2e7e3ba6202b7e6f2faad8b57",
+      "offensive_sha256": "64569bfe52c643f807e4b8ba62aa106f1e825c6e836f55cdab49be35cc26ff88",
+      "pair_id": "pair-0039",
+      "source_identity": "mitre:936:64569bfe52c643f8"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "666d4d5df30873cd930f2bb3323e7a1e3cc255013f7dc81a9fa24dd303dcbb2e",
+      "offensive_sha256": "013f3ce44fd8ae3e8dc1db6828fa28ce1368a715755cf422cf5c09f425ec7479",
+      "pair_id": "pair-0040",
+      "source_identity": "mitre:67:013f3ce44fd8ae3e"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "315d2103e13e0abf68c4037b97901264fc98baaf1f28cbdb7c70545348a10466",
+      "offensive_sha256": "4236ebbc36d291cb4f930aac685b980f0fcb147cdaeb713b280478b62af4cb73",
+      "pair_id": "pair-0041",
+      "source_identity": "mitre:149:4236ebbc36d291cb"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "2a6f998037a63769744f3846dd727330a14d8ba8bb1623e119957ae8e3b745b9",
+      "offensive_sha256": "eea8969f4734115038ce7d2adea629c236ca72dfe87b011cf0c494f36d418e4a",
+      "pair_id": "pair-0042",
+      "source_identity": "mitre:209:eea8969f47341150"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "0bd62ae6cc5bc76a832624b859e20ff52336134e71389ce91c1204e695239832",
+      "offensive_sha256": "0ccdd198218b67e6dc649c6dc6234ff9e774c058024e6b10a9779aad6d6bf607",
+      "pair_id": "pair-0043",
+      "source_identity": "mitre:353:0ccdd198218b67e6"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "ce41b438a4884d2a9f6b6690a1d2bbb52a7e176829a016545f40f81184ece0ab",
+      "offensive_sha256": "a099544a64a4672ab7435e65bf257f13e5e6744b0059d84de279a6cf734d37d1",
+      "pair_id": "pair-0044",
+      "source_identity": "mitre:495:a099544a64a4672a"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "467431631f45a32b41cea443df44bf672ea4b6efb1bc5f5c60cbc57f5e197b55",
+      "offensive_sha256": "714e4195225081443a749eb8f69d76acb0b5270a94d9b5fd2d34f5b54f86ab0a",
+      "pair_id": "pair-0045",
+      "source_identity": "mitre:534:714e419522508144"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "1e941dfe79f12a60ca0460a88d2c974d2bec703575f016a21e1fad378f97a169",
+      "offensive_sha256": "66c5556fab15573c47c816a05764ef0c58e10a43620ae710422541e9af863c58",
+      "pair_id": "pair-0046",
+      "source_identity": "mitre:656:66c5556fab15573c"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "2706a49c4ca550b872a75c0428a69fd0f4f501ceb37c0d59cf76beeb0395b485",
+      "offensive_sha256": "264e94b336ddfcdbe5c847a2128e27e8a4bdbd4806d94928fbbb7178493a738c",
+      "pair_id": "pair-0047",
+      "source_identity": "mitre:715:264e94b336ddfcdb"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "0ff4af8aa94ec74b0cf74707b34abbb2f23404a6291ade100105daea55d2a2da",
+      "offensive_sha256": "1b3f2340eef24c13c980579f58beb80c89dc6da547e050a24d3d30b0c2676389",
+      "pair_id": "pair-0048",
+      "source_identity": "mitre:834:1b3f2340eef24c13"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "705a23bb983dbac792624580da830a760469a6d6173290730dee4fffb86030da",
+      "offensive_sha256": "b0d2d7324ba0b5e764415b9c8c0aad62bc5f5b54303e7ea9f25b9f246d06ebd7",
+      "pair_id": "pair-0049",
+      "source_identity": "mitre:938:b0d2d7324ba0b5e7"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "844ea8209801d8d84648fc2d10161bbc2d5ac28be8e67ee15bc7df5431c56af9",
+      "offensive_sha256": "7057c2823a9f5ef12c933ebc97e47b2f78acfa17be4d3b8663acb1572de4b5cf",
+      "pair_id": "pair-0050",
+      "source_identity": "mitre:11:7057c2823a9f5ef1"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "ca3b56a315f28e1431a02595dd464482accd7ad2539ec6a6dd991d1c8618dbaf",
+      "offensive_sha256": "fb6e71d9b91c81a2af6f33f29b0d16dabfcc2f3a27cf54776b3a66d647de1d6b",
+      "pair_id": "pair-0051",
+      "source_identity": "mitre:139:fb6e71d9b91c81a2"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "91ff6d27a1f0f74aa0030e73216ee80ec428975dd4af4cdf5e873d22e776ef9e",
+      "offensive_sha256": "e6a304a50d88ffbd95193a6b4e35c0e770fa05626a9dc697b99d309442a336a7",
+      "pair_id": "pair-0052",
+      "source_identity": "mitre:250:e6a304a50d88ffbd"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "dbd2d35967e9b39a34705c02251f724894be4fc9ffe6719cc8979bdba1ced0f1",
+      "offensive_sha256": "3687bcfb2b982847d515730810c4f02b2183e781d90fc96bd10cf088f3e3128f",
+      "pair_id": "pair-0053",
+      "source_identity": "mitre:346:3687bcfb2b982847"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "f0499e75ea3e69524fce267dcb6caa09cf7285ae7570e5a9943f6fb4e6ee3409",
+      "offensive_sha256": "4cfd10841304934a3452f92e881f662e41a338bcdd4fc3d046c23c3e646eccc4",
+      "pair_id": "pair-0054",
+      "source_identity": "mitre:491:4cfd10841304934a"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "c478b09f0734a990f9eec0143465edddca40108789ef5caf0bd44979f9cba84d",
+      "offensive_sha256": "f5ec550a1f97c852f4c775b27b4a8e769a679e3e515e7b560689331956a28237",
+      "pair_id": "pair-0055",
+      "source_identity": "mitre:593:f5ec550a1f97c852"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "4c5449d3f1ea3e782acfa5a688bde158522fb177c4a9a97d5acbfb75a62b6b0c",
+      "offensive_sha256": "320a4740e72123dfa1d3bd5f2ea5766f86faa32aa6b2ff2f263cc588f4058d3a",
+      "pair_id": "pair-0056",
+      "source_identity": "mitre:625:320a4740e72123df"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "e97e335427193bcef9ffd1d833baa78bda7e51de0731b4d178bfc1018854b915",
+      "offensive_sha256": "a2e612eee2909d6720237eafbf1f6a872508bf2cb777fdbeaf11706e9803cca9",
+      "pair_id": "pair-0057",
+      "source_identity": "mitre:761:a2e612eee2909d67"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "f51e2d2563fe4b631ce89f3acb27d10671a64003361b934fe1b0621da8d72a9c",
+      "offensive_sha256": "8edab870600f0dd54d6fa66d40793e3f0c2d91409d826c366b5c7e06236d35ca",
+      "pair_id": "pair-0058",
+      "source_identity": "mitre:879:8edab870600f0dd5"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "6eef5df87c957b3731e300941e5fcc9485fa7ec6307564124593f278dba43215",
+      "offensive_sha256": "b18ab8067e3ad1b86dea87aa58239115d9dd0f66c568b6cb2885f21edbb88e7c",
+      "pair_id": "pair-0059",
+      "source_identity": "mitre:992:b18ab8067e3ad1b8"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "0b3921c28effd09cfaa3f1fc6347ff0396ce39b8963c4e287a301a0116484e7b",
+      "offensive_sha256": "7ccdc94545355980127dbd47f1f758367144ccd7d60a3d767d665d1f9cf432e2",
+      "pair_id": "pair-0060",
+      "source_identity": "mitre:8:7ccdc94545355980"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "894ae012ea1e2384a44274e6009bdcd5e1821ed80196d9bd6fd3de55e752e70a",
+      "offensive_sha256": "dfaa27afae2cca764501a61bec2159b800538f309f2110224718c3940bfa1633",
+      "pair_id": "pair-0061",
+      "source_identity": "mitre:174:dfaa27afae2cca76"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "ba44608fad3efaf808aa9315054d377c731697889ab292d486d6852d4c3ddba9",
+      "offensive_sha256": "6c90bc6541d83088c265fbcd1fc0c756b9c2384b9fee99cda102b6858ed8dbfa",
+      "pair_id": "pair-0062",
+      "source_identity": "mitre:284:6c90bc6541d83088"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "4eb5992dd2d6fe34ca88d31e404dd93443da4cc092b36be1cf2c5f95c77a8e1f",
+      "offensive_sha256": "cd1f9333e7560189cbc4b386c9377ffab68b92bb8688006ec2191bba22d37fb5",
+      "pair_id": "pair-0063",
+      "source_identity": "mitre:392:cd1f9333e7560189"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "a889ed1c0dfdfb5bd7b6a30c89599a61a6e3ce6eb75c6acf88de5df89c110b9f",
+      "offensive_sha256": "987296a0adccc7ec7e8549951e4523d658c1f1e89ce91d273bde459a8b246331",
+      "pair_id": "pair-0064",
+      "source_identity": "mitre:464:987296a0adccc7ec"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "b1495286ab999197a398e11d1bfcf48863067f5ec0fdbdc8693ec31243aef225",
+      "offensive_sha256": "b60ee2dceafae368ceaa151f7461fa4c2529aa8fa7052c48ed2f2a4a032f9df4",
+      "pair_id": "pair-0065",
+      "source_identity": "mitre:503:b60ee2dceafae368"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "20e1d6eff3ad210e01132d738136881cdfa5276a06346cc9f8fcedcc3eccf55c",
+      "offensive_sha256": "5d28b6bb53bd29d3bb07eed973eb0bd709bd58e2d08cf7aa5af5bbe7394c8e06",
+      "pair_id": "pair-0066",
+      "source_identity": "mitre:685:5d28b6bb53bd29d3"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "a48ebf553b7fc3d98ac4fb5b1daae94410347d09938fb247c8e0d3fcbb874adf",
+      "offensive_sha256": "6393a9ea23f489adebb9665c9bc53f5b0b2b0333744683b5f2c027579bc07253",
+      "pair_id": "pair-0067",
+      "source_identity": "mitre:732:6393a9ea23f489ad"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "1129dbf99182ca7fa8d9aec30c2652c36e1f16039aeb88b501045df047887ae7",
+      "offensive_sha256": "17413539598e90ed63c38c7375af1c7261fc80fa42c8823bf21410524767545a",
+      "pair_id": "pair-0068",
+      "source_identity": "mitre:889:17413539598e90ed"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "06893aec40576982553bf63471d4cf64c7d3b1b22163646684a026abb43aaebd",
+      "offensive_sha256": "9e3b394afe0a7c81261415d944a84c5f3bf546de6566937ba5866e0ad428bd88",
+      "pair_id": "pair-0069",
+      "source_identity": "mitre:910:9e3b394afe0a7c81"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "068e4f3e93d8da4df3d2f9d5c011923c2d1d1c6fb76d73f6c495c44078f32063",
+      "offensive_sha256": "13fae30be2f6a89a97b27c3d6da6b2293d72b142400d5c0c3c7b21d0e23c0636",
+      "pair_id": "pair-0070",
+      "source_identity": "mitre:22:13fae30be2f6a89a"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "cf153b5c2e20b197a3dabbdecad2c3e43e5d83e164f3247cf8e389e2543b3b8c",
+      "offensive_sha256": "b63880933ad11b32a945db02a31b4ce711069ca2730a9a5ab882a7e455cccdee",
+      "pair_id": "pair-0071",
+      "source_identity": "mitre:197:b63880933ad11b32"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "f8b9c88858428ad012ecf6d4049afc7241f25708d211bcfed0e264b893f67210",
+      "offensive_sha256": "3e24f78350f30ad088fe2cb6344d3b1890e88fc11f82bb64f242e423e95bc01b",
+      "pair_id": "pair-0072",
+      "source_identity": "mitre:237:3e24f78350f30ad0"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "29501c793dcc8e4e634c395b25f28ebb4e340a62fb8761d40af76b95377927f2",
+      "offensive_sha256": "938646812a4997d7b9c0aabf36006009d643b3acfae6e8eb5c852c5c93563562",
+      "pair_id": "pair-0073",
+      "source_identity": "mitre:377:938646812a4997d7"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "c96e3c1f340726ce01806b7ddf2387b78e1e9042a6d60b75d028ca2a108c6be9",
+      "offensive_sha256": "82f8533d986a65e16a3a002d7d8abbc7c89c7bf886e6bcd2c184f3c775f2b696",
+      "pair_id": "pair-0074",
+      "source_identity": "mitre:405:82f8533d986a65e1"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "0f109c3fcf4bfde378d2f09f2b510cf929d0a5a04910677b96e5ebbd834a0f53",
+      "offensive_sha256": "3e972858e60757bca0269692066deddeb04ab57c3998b12c50e09035a701461f",
+      "pair_id": "pair-0075",
+      "source_identity": "mitre:531:3e972858e60757bc"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "a46c017d0de0cd99cfa89a8ab9aa0bde599f951097079343b9666f0e193b0dd9",
+      "offensive_sha256": "350990ee97e4f8807d87d4b2798094a5410ef2c4f19020c214d53bf2edb43ca7",
+      "pair_id": "pair-0076",
+      "source_identity": "mitre:611:350990ee97e4f880"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "5151d1bb8af73219a1f4df953c6cbb768eb527264fee1dac33149e0762c9dca5",
+      "offensive_sha256": "f0193b8c75c9bd247163b1cbeaa51595ae797e40dd740e9724661d8020833755",
+      "pair_id": "pair-0077",
+      "source_identity": "mitre:787:f0193b8c75c9bd24"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "b319576a4a094028fd9621847d2e645a5672fc8f914274d48483fd599d41b49b",
+      "offensive_sha256": "27801f9b21a98c40156df6c0c0ce1adb09d62e42bbbb18329d6c54bcb7e689bb",
+      "pair_id": "pair-0078",
+      "source_identity": "mitre:813:27801f9b21a98c40"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "7b9d7716fcf70e5d9ff173a4d65543ff98157667102bd486e3bf081173f72c87",
+      "offensive_sha256": "db780fa49f8d569da634ae4e92072b82ea9b5d172e7aa3deaeb5d1a929bff83c",
+      "pair_id": "pair-0079",
+      "source_identity": "mitre:984:db780fa49f8d569d"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "b1b0bab40d4cd7ce7fd7b2b0d54b6cff0867fc02ad47fbcc9e90a1110edabc35",
+      "offensive_sha256": "4634544d66e84fca2dd1380ae864732c77b2fc2d50c8779eb119fbe9076ce896",
+      "pair_id": "pair-0080",
+      "source_identity": "mitre:33:4634544d66e84fca"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "fa3562ffacb5d1073210f0269a3ddb630403140da137778d329c04bb62d83b87",
+      "offensive_sha256": "a8cee165d1f5a59fafd79449e9693d92f9db1fba58599b138547010452422a11",
+      "pair_id": "pair-0081",
+      "source_identity": "mitre:185:a8cee165d1f5a59f"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "d5ffe214049065461bc5dfb821820f7c92c084fc06678d22ee5315dc4098575f",
+      "offensive_sha256": "fe1fa0ff26ffe36a0a8da0d37e63223da077ab2224819b7bd74e07aade306208",
+      "pair_id": "pair-0082",
+      "source_identity": "mitre:282:fe1fa0ff26ffe36a"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "e4d3daaa1ffac791e039fd6ffee13bf12873c6a264e6fd9de64da884fff47e3f",
+      "offensive_sha256": "7006f379635b60a663deb889ba6438d26258dc0c807a2d95ecd4993333b4ad6a",
+      "pair_id": "pair-0083",
+      "source_identity": "mitre:306:7006f379635b60a6"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "856bd5ab7f40b9cf4884e6bf7d955dba1a29b4d991c463a5b3d402d80be23879",
+      "offensive_sha256": "0ab4408040274fc6805853243afa695e374a0393fc884f486cdac9eaa43860e3",
+      "pair_id": "pair-0084",
+      "source_identity": "mitre:442:0ab4408040274fc6"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "33e8b955bd11395f58f306da82f5c7cdf68557f82dc323a71e663678d205da83",
+      "offensive_sha256": "d97418a0446cd1cd41c086869fdf72f51c77285c272a9a8638ec3666d10e1a00",
+      "pair_id": "pair-0085",
+      "source_identity": "mitre:541:d97418a0446cd1cd"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "dc1b3a04e13e5e56723f0f0955866cbf7f0a9cb32661a0290cfa2c9c70c9c8e6",
+      "offensive_sha256": "d41552f07e8cfa218514e13db5352f26e75d2c3ca4ab51812147393a7b8ef7e4",
+      "pair_id": "pair-0086",
+      "source_identity": "mitre:629:d41552f07e8cfa21"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "d695ff5c16e4a64b49c1f05088efa2f76536358f500c95f153aded280a0a4139",
+      "offensive_sha256": "347ed92e724d7e4e30cc47438dcd93a57539f044cd2087d4f70d23b15ea09b30",
+      "pair_id": "pair-0087",
+      "source_identity": "mitre:781:347ed92e724d7e4e"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "8f73f91126dcb5dda99729b287c4f2730cec47c027c674a71a8fa57286aeb412",
+      "offensive_sha256": "9a1c08012e3ada75f1bd6204ee8e0e7652e006ee52fecb3cc1e7f7941a443466",
+      "pair_id": "pair-0088",
+      "source_identity": "mitre:892:9a1c08012e3ada75"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "cb774654ab515d0d909772e743e145e79b636d824e613007132b5c5d30e22adb",
+      "offensive_sha256": "5d99cdded868604df9e1ceacded195285c3c711870f9ff9305b34dbd0c130b47",
+      "pair_id": "pair-0089",
+      "source_identity": "mitre:924:5d99cdded868604d"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "00fca3dff2264f231f916c07f93cd262c998912f9724a43c7e59171493ef4441",
+      "offensive_sha256": "c20f3b3ca8e70fc2fb840a864f49ca4c0cab6a1a8cc41530253e6af6d429fa5f",
+      "pair_id": "pair-0090",
+      "source_identity": "mitre:34:c20f3b3ca8e70fc2"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "047429e9671318533aa7cabd0af399b5a424ae651e6f26b199b2123b0aeb98d3",
+      "offensive_sha256": "94a034a6ad79e2fb57d8fdaab791e29e8a9fc96be6b3449b233916e3b2e01ebb",
+      "pair_id": "pair-0091",
+      "source_identity": "mitre:105:94a034a6ad79e2fb"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "4e85eea09ca0c30081a69bbf61de7c60647916a7061f69ac0bb2d38a71661f20",
+      "offensive_sha256": "5190cb9c537ae3869b2f0d0130d2435c65e2da9b8a0c40666acd60413caaea8f",
+      "pair_id": "pair-0092",
+      "source_identity": "mitre:252:5190cb9c537ae386"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "971bc1d69237a79f02c4c0003c808e4f574ab7eee18ac26dc2078d8794e4eeb4",
+      "offensive_sha256": "eb678fdab72f9b01662812753ed6df64da5d8e02d3a3b6888534b0cb768b18a0",
+      "pair_id": "pair-0093",
+      "source_identity": "mitre:351:eb678fdab72f9b01"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "f24a1166923495b60011bd372d81fea030f040b9370f593d7101f1f12b48d951",
+      "offensive_sha256": "a867bf88e121080c33d1a27d6436bfbda673c5dff1aea13aaa85109d23c49b3f",
+      "pair_id": "pair-0094",
+      "source_identity": "mitre:408:a867bf88e121080c"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "f3d97fdd6ae2a3919031f93556e8ae4b80d171abb12fe0c34bd2bbfcc9bda365",
+      "offensive_sha256": "1256cca09eb9feac9aa528518c76dee71f72c31ccdf4d9a4f8f3cce4f8556a0e",
+      "pair_id": "pair-0095",
+      "source_identity": "mitre:592:1256cca09eb9feac"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "e057621ed9fedbf4b3c6a365b9a9a6edfdf82bfb84c2f665d7ab86e8aca22cdd",
+      "offensive_sha256": "09fa91b5e9679ddbeffc4c744696f925bccfae914d49de71b39763aade23085f",
+      "pair_id": "pair-0096",
+      "source_identity": "mitre:672:09fa91b5e9679ddb"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "1dd440918c001d714d10b79314d54cb3eec8708711fac7dcacde26a7df8de2b8",
+      "offensive_sha256": "a8d1c43b74f129c5265402e6d0bb64c946e0cf094cced12b9aa907b58482b82e",
+      "pair_id": "pair-0097",
+      "source_identity": "mitre:776:a8d1c43b74f129c5"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "f8f2045da9c87b2459eca5d196fd951897d9fb02ea5a02a85a9deee7d4dad7b4",
+      "offensive_sha256": "cccfb6fe6b745d1014789780d639bb8181bb3d10d5ed86f8488c0850cb8d603e",
+      "pair_id": "pair-0098",
+      "source_identity": "mitre:800:cccfb6fe6b745d10"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "764531ecd9f9dce8eb0c891975ed3c6f4effccc3900215fea3753cf6a360d6a4",
+      "offensive_sha256": "3055b54ffec21597bd3ab568a9197fd93c60bad3b178f5fd5b13f49434bb8f0c",
+      "pair_id": "pair-0099",
+      "source_identity": "mitre:955:3055b54ffec21597"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "274960af77bf81815bb0438ef0b9e85a41bd75a7046a487b4c45f7acb5d58009",
+      "offensive_sha256": "65c0c4dbaa08579a766a8dc7b612b7e6aa921ed74e3d338c06d478caeb95be6f",
+      "pair_id": "pair-0100",
+      "source_identity": "mitre:71:65c0c4dbaa08579a"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "fcab6dfca635c863c0086b83dcb2b8a676f5de738252fb6eaa55365c9bee068c",
+      "offensive_sha256": "0b92c93e7482db957d4a9dded31a901bba09acda739e72b1ac5a55fd62d1fb3d",
+      "pair_id": "pair-0101",
+      "source_identity": "mitre:199:0b92c93e7482db95"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "c47af1f61528226210cd8f112117707c398ee57c6299a8f02e980f3cfb252fa6",
+      "offensive_sha256": "c5b9f06e4cca926bab695cd933d4a7b3f80b26f09a53505d6c182c885514c868",
+      "pair_id": "pair-0102",
+      "source_identity": "mitre:270:c5b9f06e4cca926b"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "633ced651b1be63b55fb3079c54acc8533ad8444ffd4930e2ef7f65ef32030fc",
+      "offensive_sha256": "682fd44bcd9d5e3e112834ee643728a0523b544cc09577644883bd8f068c3f7c",
+      "pair_id": "pair-0103",
+      "source_identity": "mitre:354:682fd44bcd9d5e3e"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "d9b49acb9b710bc812adb988805597d53fe2f0386f4658e816bfcdd080a4af91",
+      "offensive_sha256": "5aefd696feec1362d3d54cfac89124bf939e2f2c6bda8ae4fd6f847cafabcf22",
+      "pair_id": "pair-0104",
+      "source_identity": "mitre:456:5aefd696feec1362"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "ff04324954e3e39ca2637a9aa6e7db8bc39ddaedde0166b0cac92ff7eaa04a02",
+      "offensive_sha256": "1c823c49f5221a6738cd8f61aaecfdc818e1023e65f8d4cb12dde3045ff4c1f9",
+      "pair_id": "pair-0105",
+      "source_identity": "mitre:533:1c823c49f5221a67"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "647c92bbd12d22099680806ce6b4a8d2b5241433408c26fe10e20776b3cf56aa",
+      "offensive_sha256": "5cb04b02ea7e8d697e4003ffd21409449cecda408130e2f8fc4a01eb5e29e5ca",
+      "pair_id": "pair-0106",
+      "source_identity": "mitre:689:5cb04b02ea7e8d69"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "9050f755f1a248a28b9ef4c503f03c526f8672f10640bdf353ce2a296c3f5d70",
+      "offensive_sha256": "d3f9842ad598a86b05e865c1586ffff88853a8d5121e0007f1e3fdfb86f75de8",
+      "pair_id": "pair-0107",
+      "source_identity": "mitre:760:d3f9842ad598a86b"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "e0c46d2b0c3e597ab7d31a8a85c3a83047c46a58454378b91270e4bc104da48b",
+      "offensive_sha256": "cf77b018fef9127d696b609b4908689339413bb286124277bdd989a629a7b675",
+      "pair_id": "pair-0108",
+      "source_identity": "mitre:867:cf77b018fef9127d"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "36150e6e262ec54e3d264886918a8b3e82ee9a0fc9e37604bae6c6120ffb0820",
+      "offensive_sha256": "3b5fa888a0c09e3e58f4861617da70b87aee9617fee6a1c7921368bd3f7be778",
+      "pair_id": "pair-0109",
+      "source_identity": "mitre:976:3b5fa888a0c09e3e"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "0a666467e5bdd6ca6be5d2e575dc1b2c3c236716597d12e82069c906efcd740e",
+      "offensive_sha256": "e664ff3b4d6aed2455e6e8a248f35e0d07f9eaea0e172dcc702900ba7ca9ef30",
+      "pair_id": "pair-0110",
+      "source_identity": "mitre:39:e664ff3b4d6aed24"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "d2d7964e587815789744a1c256b1d5884c8b60f204b41f04329e6afb49a03226",
+      "offensive_sha256": "5dc8f4ce9d3949ffb1306d6eddb1252673de78723ecc3bfd73808aed0f226f59",
+      "pair_id": "pair-0111",
+      "source_identity": "mitre:177:5dc8f4ce9d3949ff"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "0cd595027473d1b9fc0303b0978e4f932420b0fab56aa8d52b3e5839ef52110a",
+      "offensive_sha256": "0eac286966c1e5a163a83cc399584fa4780339c99964128ed37f436be83750cc",
+      "pair_id": "pair-0112",
+      "source_identity": "mitre:251:0eac286966c1e5a1:sanitized"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "5791e93973529693b7c6b82e599ca93d94c43eaddc6f4a5ac32b3b33bba53d3d",
+      "offensive_sha256": "07aca39cdadeacc6f7f1385c41e7266b40e07e0d39b9ecd2a24ec9d61dddf082",
+      "pair_id": "pair-0113",
+      "source_identity": "mitre:343:07aca39cdadeacc6"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "e4073b1e3203c0c7ec2b5011e43cfcf48904fb89dde71b11af5c07a84385fb4f",
+      "offensive_sha256": "0080d14e151ca1ff09e0d4fb5aa0ec2a0c97fe7b8e27ec81d8e33bcba854aeb5",
+      "pair_id": "pair-0114",
+      "source_identity": "mitre:488:0080d14e151ca1ff"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "dd9adc715e19db629f42855557f1e099865da31ec39aed291ec4aab1db600d06",
+      "offensive_sha256": "75bc4fc22e7e4733f015ec079c4a27aab3020842b655a5044beb766c326af55d",
+      "pair_id": "pair-0115",
+      "source_identity": "mitre:545:75bc4fc22e7e4733"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "82103d11563f39dd0e4a5ea4f6a93d9c2692ecb7c67c9acc9530d9c9239b982b",
+      "offensive_sha256": "cd0a7ac35d09589f928c03575bc1abf3692d082c97c41d32fcb340f4ff83cec5",
+      "pair_id": "pair-0116",
+      "source_identity": "mitre:605:cd0a7ac35d09589f"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "0ab9eac8e2cdf30106db6f7613b716ea5cdeece9cea5b6a0c047fc99b5550bae",
+      "offensive_sha256": "5c261d0532db173ab4fda6ec66a6ca950839a693ef416301cc9a636078a7c80c",
+      "pair_id": "pair-0117",
+      "source_identity": "mitre:763:5c261d0532db173a"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "b06e53b47bbab09cc8f1882fac2d207aa7e6dcceab2b4bff34e04dab1e52eae7",
+      "offensive_sha256": "dd7edf802965d55392390e7580797521fb3b5d1a664be2a2ebbc76be067b144c",
+      "pair_id": "pair-0118",
+      "source_identity": "mitre:891:dd7edf802965d553"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "b60f2547a78f28f84ce15e243204aeb5efa869487ad1fb0b2e1028f07051613a",
+      "offensive_sha256": "f9cf1bcc7259bc47a61ac9ad123f80038c712ce558e20f1841fa2076c7fe2268",
+      "pair_id": "pair-0119",
+      "source_identity": "mitre:960:f9cf1bcc7259bc47"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "b2f1ad351a925eddf5f022021a1fefd51fe274c4328711610dffa1b9d32252b9",
+      "offensive_sha256": "2d45916e3215fe7f4121db9e8c7ca96cf1ad90ae1cc3cbdcb796d8d3837d7a52",
+      "pair_id": "pair-0120",
+      "source_identity": "mitre:63:2d45916e3215fe7f"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "1bbf35146802e0279bb16a31b11c68e356eda57c91ab9996cb75fe017827336c",
+      "offensive_sha256": "ab931047b09a6f8f8e0d04b9723bd154b6b5a96542156091befedc6e41fbc8c0",
+      "pair_id": "pair-0121",
+      "source_identity": "mitre:141:ab931047b09a6f8f"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "e07afae18cfceae6047b3504ce7310da09f7fd3c6601f8fa5961f012c95a1977",
+      "offensive_sha256": "cd0c188d49bc93585fe225b242644a433c64ef03cdc4e473203e4c5d129a42a6",
+      "pair_id": "pair-0122",
+      "source_identity": "mitre:271:cd0c188d49bc9358"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "0ea827092cce02ed90e20269c2241e99675fd4aeee62eae38f01af31a373c7d0",
+      "offensive_sha256": "f5a560308c2125ad9a256c1838226a9a1857f0235c1dfa561e5cc521a1e6a1b8",
+      "pair_id": "pair-0123",
+      "source_identity": "mitre:327:f5a560308c2125ad"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "4e483dcc06b3240d9c02cbb416becd36f908a4afd7a7480974bb8f0617e86070",
+      "offensive_sha256": "d3b2b292212f3574e4eb470518b124eb531eaa19c39969a8617636d8d417445e",
+      "pair_id": "pair-0124",
+      "source_identity": "mitre:425:d3b2b292212f3574"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "2a96125dff0fa2aa0d3ce8cb7c74601398ca89dc6321a4590aed1c51b921b33a",
+      "offensive_sha256": "8f4dbfa69c11de79e9cc01d8f46c29b908d73839fb36f492d30a1b84bd3e08b9",
+      "pair_id": "pair-0125",
+      "source_identity": "mitre:553:8f4dbfa69c11de79"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "3ae0bfdf56d2f1c49593718bd4a0aff5da1daf88cbfd5a53ebc5f7e5b197d81b",
+      "offensive_sha256": "cf098c20c46a0cb93c0c080c5930e78668890c23f86528214bf59d7a5cbd630b",
+      "pair_id": "pair-0126",
+      "source_identity": "mitre:638:cf098c20c46a0cb9"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "c8d91f41d146b35c11468cc4a20531b87ceaebe53dd2d963fd6f052c826f0ce8",
+      "offensive_sha256": "0e7d989a715f89a91bfa58e9ee4fbf5022bdb2972f6b74aff80b86a8773efc07",
+      "pair_id": "pair-0127",
+      "source_identity": "mitre:746:0e7d989a715f89a9"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "52e9ec6a6f7904af7dafc6c2e3796715fd2ceb278ef68d3573f478e09799d3fb",
+      "offensive_sha256": "b7ef608da8e01f8174b3f214e572c0cac10c95ecb9503828719b17a2059b8983",
+      "pair_id": "pair-0128",
+      "source_identity": "mitre:862:b7ef608da8e01f81"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "2b9981a559857bc349babddcc71adeb4e0fc6cdfa4254e9c6cbc67938853e614",
+      "offensive_sha256": "361794445b9ab9c7734388535a77582b0a84016308ef4dbc650248a159ee2b52",
+      "pair_id": "pair-0129",
+      "source_identity": "mitre:949:361794445b9ab9c7"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "c7c80fc907dcddf414283b3430a851cb9443d7248be3d89fde993588c4b8cc16",
+      "offensive_sha256": "3928f90fc463e85abef68444265b54188693538324006f4f92fc235230a2c454",
+      "pair_id": "pair-0130",
+      "source_identity": "mitre:84:3928f90fc463e85a"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "62154a46c402aa5a23220c36ace2eb13d486a14e063cbb5a973c0d9a6d4f9a0b",
+      "offensive_sha256": "4afbd863a19fa6d7f731ee8001fccc7eb0f691c24b3cf327662019e5ddc1b681",
+      "pair_id": "pair-0131",
+      "source_identity": "mitre:178:4afbd863a19fa6d7"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "8aed606ad2f85d5660472fb2b7e1aaef146a833371f42c63d849f310e8b85377",
+      "offensive_sha256": "2792ef585d2501b03d997930fa5953e77de6c7c6d8425c809bc01738e706df5c",
+      "pair_id": "pair-0132",
+      "source_identity": "mitre:226:2792ef585d2501b0"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "03ccdd470998609ebd449b4a7d0a09fb3b200d0830e95e68795981713ac7ddca",
+      "offensive_sha256": "bb148cc8794d478d779a899c410b2746892518fdce3e65b42deed06710bf9c82",
+      "pair_id": "pair-0133",
+      "source_identity": "mitre:330:bb148cc8794d478d"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "adf2f6dce1d68d67f4ed9ef16de119ec548ffb0aa30f775717618bbc7becf56f",
+      "offensive_sha256": "28aebfe0b62a88884710aa2c94a0ff2033ddfb630660902d51e7d64b9b4cf8f5",
+      "pair_id": "pair-0134",
+      "source_identity": "mitre:468:28aebfe0b62a8888"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "b440859512cb6a0bfdb044b1eafff63894abffcf52032ca303a52cf328359263",
+      "offensive_sha256": "65b80ea64e93d590035cc3d30289e48cf8ef37e81b3f3dd35532dcf8c120c623",
+      "pair_id": "pair-0135",
+      "source_identity": "mitre:532:65b80ea64e93d590"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "bea62b581ecf0025890280b94ac9919b7cc7abb5b7203aab6072307ba8c685cc",
+      "offensive_sha256": "8cde64babed63934e4546593eee949ccdeb12beecb73b6733148e12af2826d53",
+      "pair_id": "pair-0136",
+      "source_identity": "mitre:647:8cde64babed63934"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "2b9d72b9ace98febc9cc3b9ba52396dfd2bd32f2e555cc5cdbba152a20d86fc5",
+      "offensive_sha256": "a94b564da97b1ade20fe86b7639ffe2919c7a159cca63344d6d61bd21d6b447f",
+      "pair_id": "pair-0137",
+      "source_identity": "mitre:745:a94b564da97b1ade"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "5f9155d0ca3b45246c8810e95211c2b4ccc884c74f10e234e109eb1520fba586",
+      "offensive_sha256": "ba8c12d78944ffd6d2799c36b41ba3fee5b64f9498f26325f0b11a2ad56a9907",
+      "pair_id": "pair-0138",
+      "source_identity": "mitre:846:ba8c12d78944ffd6"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "939b224c710960dfd98140693c56c7c9281e24cebd0a994e8a9a17a9579aa065",
+      "offensive_sha256": "c4899b9aa6629112e6ea28d8417088631de808d9a0033083ce737193c8d4f031",
+      "pair_id": "pair-0139",
+      "source_identity": "mitre:994:c4899b9aa6629112"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "09d8cbbdc412dd7a2c0b1a2789e64330a1d80ab2b70a9ca9da04d21bec2070fe",
+      "offensive_sha256": "b3341fc36dea9cd415bc2556080c9f804293b444c9651d8e5c26b29012176fa8",
+      "pair_id": "pair-0140",
+      "source_identity": "mitre:50:b3341fc36dea9cd4"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "98cfa319d287b00edd3e8b5d2afe4a744a127f68ff8861fe583f30cbf9cb6724",
+      "offensive_sha256": "1bcc0c809144b7a1405f52ccfdef4bc750619b19847a0d708490ce4d1fcc98c9",
+      "pair_id": "pair-0141",
+      "source_identity": "mitre:125:1bcc0c809144b7a1"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "8e5b2e3586cab7ebf3a32ec731ade9c7d44d453238b52c66735fc29d170578c7",
+      "offensive_sha256": "605441e6e394bdf2230e317604911cee4546272e9eb774f8bb044615884c6863",
+      "pair_id": "pair-0142",
+      "source_identity": "mitre:262:605441e6e394bdf2"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "18259997cf6ef5196f9261a27e230a6f8a33e1639affc9c8f4029df0cb71d278",
+      "offensive_sha256": "df55feb1f48b1337820596d69a23681efbf563fa0d1bc107cebe7150fa39167d",
+      "pair_id": "pair-0143",
+      "source_identity": "mitre:371:df55feb1f48b1337"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "cb4213935bef46bbf4fe4024339b39a13f756cf4b2accc2e5dfa077c0d46a46f",
+      "offensive_sha256": "635ca7e07c3db8fe8a778d9ca6bdb9ba999e4545ee5a68db01d1f75e44f318b8",
+      "pair_id": "pair-0144",
+      "source_identity": "mitre:401:635ca7e07c3db8fe"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "d8e2c3ec33642fb0e6862661845496ed7a84b3c71ec159186e8ffeac0578bb5d",
+      "offensive_sha256": "57949e17a962d8f7f04645f66e06b39087876602c46fd27079eb57924117efcb",
+      "pair_id": "pair-0145",
+      "source_identity": "mitre:527:57949e17a962d8f7"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "bf9a9d662a6da747a38dffc1f23c624e93c4735e79cd5844a7b2694a63e13d38",
+      "offensive_sha256": "583eaf5ed2c3f35de5f72711895aa7bc1985a62bfc2c9d0dff0881bcf0d1cf1c",
+      "pair_id": "pair-0146",
+      "source_identity": "mitre:626:583eaf5ed2c3f35d"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "42d91a0608fc191b3d7da21facda5824fa2a9a87747e73ec1a2f6df9c8b7cec0",
+      "offensive_sha256": "d3daa146263631e7a06f0a020c7ec39217fe0a5e80f1c434206b131c53e7a5c4",
+      "pair_id": "pair-0147",
+      "source_identity": "mitre:775:d3daa146263631e7"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "ad39aeed70981a84e6923f6dadaccbec717496b3ee3a9df6b8a3e3634214d4b2",
+      "offensive_sha256": "7b237ab6cf23e5aa87db3921f170e606a92faac94dc770e91ce623c0045bcb7e",
+      "pair_id": "pair-0148",
+      "source_identity": "mitre:816:7b237ab6cf23e5aa"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "0d57814a6e0a455d0d511bffc4b086f2f871982ab3e33345e5415fd355e39ca8",
+      "offensive_sha256": "af26ceb54e259bcadffa43fda6baeaba24a6482025db988612f413c02c3a96ce",
+      "pair_id": "pair-0149",
+      "source_identity": "mitre:916:af26ceb54e259bca"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "fe1e968395e4df59a766c2e534fab7543d57edc5b26bf7651a51640e3ffddcb1",
+      "offensive_sha256": "11f4d8ca5a62f102a18ba1dacaffd39a4130db8254b709e7979dfe8feb770cf0",
+      "pair_id": "pair-0150",
+      "source_identity": "mitre:54:11f4d8ca5a62f102"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "5e59b06398782ae7ccc6ab64e6432f8dfae2422df920818be46c90315825675a",
+      "offensive_sha256": "1d5758c37128759a8526e60f4fe408c97e115e0801b1daff391bfa066526f57c",
+      "pair_id": "pair-0151",
+      "source_identity": "mitre:183:1d5758c37128759a"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "c64666f09abbc4454a9517920d2868c7001f1cf40c09e379024f71b772540e45",
+      "offensive_sha256": "fe7ac0c423cdd1eae3821c49f6c19f38c4745b5235c0b53d5739f109ece9f982",
+      "pair_id": "pair-0152",
+      "source_identity": "mitre:264:fe7ac0c423cdd1ea"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "19b929b3a9563798a1f1e69d0bdebb8e36ae443f4bdf672be4bcbd8b6c6e1305",
+      "offensive_sha256": "142a4c2b5abb7d77cdd525df6e8b9969840bc86af4cb9b3a17154dd75eca08e4",
+      "pair_id": "pair-0153",
+      "source_identity": "mitre:318:142a4c2b5abb7d77"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "498d9c53a2f1022d8f5f4d9b0e0c8393c3bae0c7a23fbb9780d4fe6708055ad8",
+      "offensive_sha256": "282272c28a8cbaf3656f18e353243127d0e8019fab715c11701d76e5fe81f87b",
+      "pair_id": "pair-0154",
+      "source_identity": "mitre:414:282272c28a8cbaf3"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "4b1da694c72d01850d9993509fa50d3d4da081fd43dc56f9747630de2f6ca9cc",
+      "offensive_sha256": "039dfd8c818b18e62fb6bd99346e1a3917cdba83b7a5f4bd42778deef5126ee4",
+      "pair_id": "pair-0155",
+      "source_identity": "mitre:543:039dfd8c818b18e6"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "b1adc8019a9a8cf1d942a0f9abb82d275d9e8c236be9c4d9497160e8100eadba",
+      "offensive_sha256": "8558c4fbc0ef2de300295078214838e69aa57c327dc5bfaf98fe424e2c5fdd48",
+      "pair_id": "pair-0156",
+      "source_identity": "mitre:668:8558c4fbc0ef2de3"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "598480973abe2e22ded5b6e752ca900f2c2b08f7f60d81a0675c4822b1a07b1e",
+      "offensive_sha256": "0ddbe072db59a15f36b0f1d02ae7c7b7479e4e3cb6202637fff5ce2d4e45cadd",
+      "pair_id": "pair-0157",
+      "source_identity": "mitre:772:0ddbe072db59a15f"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "3335f33d0e4fdfc6f6368b440dde8a772c43a317ef37457f3e904e5c29fa9fb8",
+      "offensive_sha256": "6f2b0038ec9bb00f3f7552f7c3dd51ebb43e3644ab5e789d3bbb58a49beb6deb",
+      "pair_id": "pair-0158",
+      "source_identity": "mitre:885:6f2b0038ec9bb00f"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "9df6c75ee9cd9a1c6b0539ed3fc946e641c18a381425dd9eab59a41ccaa25781",
+      "offensive_sha256": "ff60a1169394a8367c7b5f56b581ee9e817fb04bcca39224b69ff3b626022de3",
+      "pair_id": "pair-0159",
+      "source_identity": "mitre:945:ff60a1169394a836"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "45de5a84925a27d6d27241972d3948170a45d6bc5693970170e758b78b0fcf33",
+      "offensive_sha256": "2acb3d61e3f3970e8e5c7120659bbaa0bec6d9a20c06149dfc67953a902079aa",
+      "pair_id": "pair-0160",
+      "source_identity": "mitre:20:2acb3d61e3f3970e:sanitized"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "3a295f58d2617706b903579f9b3a168b511132a8e5f6b29f4a874c36853a1799",
+      "offensive_sha256": "5f81ab6e3195756998cb716f092de8d8f4fa816914afe1f731db7bd3b38af557",
+      "pair_id": "pair-0161",
+      "source_identity": "mitre:181:5f81ab6e31957569"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "01b2808817fbace420f6622cd081c134a0d2cb6e1d36696fc3ef7d4b9eb2713e",
+      "offensive_sha256": "dd41893f8c407ae6d0a9f495b8fa9a8831df57c6cb20786fc0620a542b05ad7c",
+      "pair_id": "pair-0162",
+      "source_identity": "mitre:227:dd41893f8c407ae6"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "9de62f2236f1b98bed56f9e493f7f475c97317af632189f0d41a8d86f102031e",
+      "offensive_sha256": "85ed009f08a21cecd58dafbb8b3249c088ead42a933b37c537396708fb6aecc2",
+      "pair_id": "pair-0163",
+      "source_identity": "mitre:322:85ed009f08a21cec"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "3ae0d6aec9defb679142b78c96ab59ff8550a9cb1f4427a4ddcdf6baa13b2133",
+      "offensive_sha256": "25b5e2f2a96788142b83a328489cc9bb8d10a196b25b7894b214eed5c547e59b",
+      "pair_id": "pair-0164",
+      "source_identity": "mitre:430:25b5e2f2a9678814"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "b9adf5a5b540e31d15107e1e3b26b246b8b0ef1c70623bde5ab7682456498c18",
+      "offensive_sha256": "3bac8da648cf8393d228eee4dcafa8699c55b5592d803384350656e6d445ed96",
+      "pair_id": "pair-0165",
+      "source_identity": "mitre:562:3bac8da648cf8393"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "97d2b703d5572cb25edfa589f6183140ab757a90349e91d8bacc928dc4ec4afc",
+      "offensive_sha256": "af59daa72aeb179a063611d15528003803af80d3f3988575a33377e0795fc4ca",
+      "pair_id": "pair-0166",
+      "source_identity": "mitre:690:af59daa72aeb179a"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "88682555e0a7dd43be4a611a8c1b4c0f2be19e8c06257fdcd414cdc9d47452e5",
+      "offensive_sha256": "e41933f0a1af5b28a887d8ae1e95f010927000e0ddf6d229ceb0485515e4d44c",
+      "pair_id": "pair-0167",
+      "source_identity": "mitre:740:e41933f0a1af5b28"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "6cd43d72b4a2c7490183b63cd52de4b07662a28fc480877b5b925c7544f5c4ad",
+      "offensive_sha256": "6db8e8ca25ef895f549e3cb43361ab8b92d15372e33d939cad74259a0b1f1a6c",
+      "pair_id": "pair-0168",
+      "source_identity": "mitre:856:6db8e8ca25ef895f"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "db48b986c05e331aa1bbc8c7c44598468b8d7f2e44b22a881fb026c15df95f56",
+      "offensive_sha256": "1ce53b8f330b9550fd5f327abfadbdd567f603e4091a8750c0f1e81c4dd1ca5b",
+      "pair_id": "pair-0169",
+      "source_identity": "mitre:985:1ce53b8f330b9550"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "9c5f98779ad23b4c94040e36fffee8e96817d3ff54322ce7bd4308015c0d66ea",
+      "offensive_sha256": "a48f6b29e3d411e5f1e89b9a2f8e4cc4736aaa1162421a78440dd80d066bfd9a",
+      "pair_id": "pair-0170",
+      "source_identity": "mitre:85:a48f6b29e3d411e5"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "e58c0f0e11a56780f9d9074924fd09de744a7de6deedc80bd0ca7f6d8883f0c5",
+      "offensive_sha256": "069b439d7b690b29d12d36b892efcefe18f84c9859fd5ce8bf8c95f9df36696a",
+      "pair_id": "pair-0171",
+      "source_identity": "mitre:176:069b439d7b690b29"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "a87d262b1bbcd82ccb0f8d063474a55504ccace3dd72ad204c2c01ea07a82cc6",
+      "offensive_sha256": "30823192382677f758da6a3de568062b022d30ba275818c2ef94af179c6195e7",
+      "pair_id": "pair-0172",
+      "source_identity": "mitre:221:30823192382677f7"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "816a48fd0c155801f552ec2f78eaaf71f87aeb30a6e94bf57077e9c9c6002a78",
+      "offensive_sha256": "7bcdeed1caa794a075292d08ee8f210c674038c8127cffb0a0c2e30a6e48f793",
+      "pair_id": "pair-0173",
+      "source_identity": "mitre:341:7bcdeed1caa794a0"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "f4e6de68b6c963175d4bde6821c7f5ee92f3ce3b9005246e1d0ecdf0b3e827bd",
+      "offensive_sha256": "17225eac69e29ad227a5a3fb587d7f7b66db616eb83cc701e70adc61f6895f98",
+      "pair_id": "pair-0174",
+      "source_identity": "mitre:415:17225eac69e29ad2"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "558f176d32cfdc4e26519f195593979c38ab1a8e40f75167cd776bc48b085f5e",
+      "offensive_sha256": "4a1da3be6a9c30f6765388fa4354cffba3f3fe4d33dd152f42497eb8b54f2ec0",
+      "pair_id": "pair-0175",
+      "source_identity": "mitre:587:4a1da3be6a9c30f6"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "9c2012b6d0a5a2d043f9fb6b72c82b7fb0476ce842d51a1e67418563e8e28fb9",
+      "offensive_sha256": "45b42c95b53d766543b0e7b2df74976156ac84464eb6498f365b8fc7bb3fe99b",
+      "pair_id": "pair-0176",
+      "source_identity": "mitre:610:45b42c95b53d7665"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "ef577d4d5b83e6559e25b488ac538a03eaf83f9ccecec889d62cd8d1f84c8472",
+      "offensive_sha256": "2372b0471238db41491dfc3842e6b90cbde34e0a867df3583dfa1669fc109a8d",
+      "pair_id": "pair-0177",
+      "source_identity": "mitre:722:2372b0471238db41"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "fd29ba24eb36f88e8c5e807c1cf6d2f853b4229162b2c206d43e2c648aa1071c",
+      "offensive_sha256": "cc9e5f9d341b98e2e3d4afa054e1efcd4c020cdfae52e7952b505479bf67146e",
+      "pair_id": "pair-0178",
+      "source_identity": "mitre:851:cc9e5f9d341b98e2"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "2516298ddb22c6bedd636d4e5c2898ace45bce2965ca59df7dcdde10c22c6a97",
+      "offensive_sha256": "22f7fdf83a7aed540fe3cdda478991a04349ada48059de22e080dca8d7428eff",
+      "pair_id": "pair-0179",
+      "source_identity": "mitre:902:22f7fdf83a7aed54"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "fb71de17923018925422fa5438ab0c7937e639986bff838f45cae5d30491f71c",
+      "offensive_sha256": "e78fbab9b8d38cc982abbf64626b628796a6ac9bfb42014f614bbe176f56a3fb",
+      "pair_id": "pair-0180",
+      "source_identity": "mitre:16:e78fbab9b8d38cc9"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "db154081c308895244636b5bc3da4572905566470c5aa69202692ba9ddfb23d0",
+      "offensive_sha256": "8c290641b8e40de944e9812a06a2e1a9ac723c148cdec5752073b1601892733d",
+      "pair_id": "pair-0181",
+      "source_identity": "mitre:116:8c290641b8e40de9"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "2eddc16182a1f2a089b91da5a49e0144ccb13f81ba7b8d13ca04eb4740a7ee21",
+      "offensive_sha256": "8ae912a5c952cc8cf7060727e8ae5853a4ea4063eb0d71bca95fd3a763baeeba",
+      "pair_id": "pair-0182",
+      "source_identity": "mitre:247:8ae912a5c952cc8c"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "b27d2632052178dbfb3ff10370eb9b7b2b62910902698683b307cdb90c0383d5",
+      "offensive_sha256": "c6996925981d29de3662d61eb5f713a5df6e52e2adbc97fb58d6a1f6c30abd71",
+      "pair_id": "pair-0183",
+      "source_identity": "mitre:304:c6996925981d29de"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "f43f01b0dcca371ae4035fe9532b5e67231a41708100914367dc97b67c92fb48",
+      "offensive_sha256": "2e43320a605503da1d390590603e7a9f2b78794a10dc14fb28935892117926e1",
+      "pair_id": "pair-0184",
+      "source_identity": "mitre:412:2e43320a605503da"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "2157957256509bc8fd17f9125e0d88668e3c885e1289b63c049785acdb9c16ff",
+      "offensive_sha256": "2ee8d658206a534c507d2d7770c857a4a4540d6611f17a3d21d47c7a8dc3b674",
+      "pair_id": "pair-0185",
+      "source_identity": "mitre:597:2ee8d658206a534c"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "6cb3b2f3762302cb7709fd5dec92386669cd4b7724026813d320699ed70ef800",
+      "offensive_sha256": "3d275a9728a04f0ebfdb5fd0f5af6cd0cc986420a5bfe81be2a780837fc59455",
+      "pair_id": "pair-0186",
+      "source_identity": "mitre:628:3d275a9728a04f0e"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "c999405e1c4b7c345b0d92a9d9a53d4345f97ed13286f06143bb79b514ace6a0",
+      "offensive_sha256": "b379f8164f139e2da4d91cde74045a16aea74e02d125641b00c049b78fa38efb",
+      "pair_id": "pair-0187",
+      "source_identity": "mitre:770:b379f8164f139e2d"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "7002cb3837b84d2b036e8a96b8b3d759ac825c1642b104e3c1f00d69cb1d7625",
+      "offensive_sha256": "793d5d9ba7b327b145ccbcd07af79c4dab6e2cdb275b09e1006c28665109e0f0",
+      "pair_id": "pair-0188",
+      "source_identity": "mitre:872:793d5d9ba7b327b1"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "d984e4eac333edb815e1fce853f6b3c6ae558fdf5e6b8f746a51b3a872a0460d",
+      "offensive_sha256": "35883f85ceea363a1b1c1dcc2ee2112ea15a7612f98206296e6c26f73c66b386",
+      "pair_id": "pair-0189",
+      "source_identity": "mitre:958:35883f85ceea363a"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "f1702c3b8cdf8dad9fed99537b1f89dda3622b8b9f10f152df0e04973a19d42c",
+      "offensive_sha256": "c34db1a1c879c23cbc6c4179fb781a910c6083b63e3cd559cc926316a6004414",
+      "pair_id": "pair-0190",
+      "source_identity": "mitre:56:c34db1a1c879c23c"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "466966a26debc596e02c85707f037d972a76be60472dde64a9e061c014db0fb8",
+      "offensive_sha256": "f93117af05e2907ae87ab200b704d6cd017ab43f669243a4dd09663fef02a652",
+      "pair_id": "pair-0191",
+      "source_identity": "mitre:193:f93117af05e2907a"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "f5434b5584238477f2252a8456d584caf420ce197ba76fa075f593aaf0227180",
+      "offensive_sha256": "afd078a82ae9c573aa2d15460cd1b1ec8adf6a196354129e2b990302a4eb72c1",
+      "pair_id": "pair-0192",
+      "source_identity": "mitre:260:afd078a82ae9c573"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "8719868c93dd5e41fb2659a572f023d2af02fbfabee9a1a0319ccb00d0d62a60",
+      "offensive_sha256": "eb2fa99e68092738bb482067d380989987d3993915144150ae664c1ff81d45b7",
+      "pair_id": "pair-0193",
+      "source_identity": "mitre:332:eb2fa99e68092738"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "d43036b4435cff53e627990c21828807dff321ae070ae609ea58bd13437855fa",
+      "offensive_sha256": "c1976330b29d7a3496684412590c2fea64858ad4a2c5fe7ae8ac56f1a0a1fc35",
+      "pair_id": "pair-0194",
+      "source_identity": "mitre:433:c1976330b29d7a34"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "cafd5e46b79b65f48a652dca225d5ae3ffc3aa676e7b57e740acd994e9f21d37",
+      "offensive_sha256": "a7432c0e69c0230140aea60fa91450d2b27c5c840b5660482cd3623d08397279",
+      "pair_id": "pair-0195",
+      "source_identity": "mitre:564:a7432c0e69c02301"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "68191a79c9967d4c3000e76acd920f0b1a587b1d96dbf28bcece733a7dea2c9a",
+      "offensive_sha256": "eb2c008a4770cab7ead9fd3ad08470bed7fdc353d4306083bdc17df12e0797db",
+      "pair_id": "pair-0196",
+      "source_identity": "mitre:693:eb2c008a4770cab7"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "01c00a8103ac54d7f30fd01c4645fe3d988ba3f5656c4ec547ef400c0d3aa07f",
+      "offensive_sha256": "6773fad72b1640de7386bcb3332ecfba2e25068689e7bfe2ee82aff96b6d78ac",
+      "pair_id": "pair-0197",
+      "source_identity": "mitre:767:6773fad72b1640de"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "96814115bb211bfc39abd6907b7083fcbfc204baa321a875cf86826d7b8ea3bc",
+      "offensive_sha256": "800a2697f471119c3ac4bd2aa816f607c6686ac7c12e46509bcb9c150c91f952",
+      "pair_id": "pair-0198",
+      "source_identity": "mitre:861:800a2697f471119c"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "ca2a16e179925788ecbd1d0480460068f6264face19cf049e2ba56cfd0618549",
+      "offensive_sha256": "bd19de1cb8197bb08994d2e039833947ccdf6813cc8e75a6760092b7e8e90a5d",
+      "pair_id": "pair-0199",
+      "source_identity": "mitre:964:bd19de1cb8197bb0"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "64ec09286327ebebf7e241230f0a9f4df6ff21d4ff7dba0e4c2fe80682c8ff65",
+      "offensive_sha256": "a69bcb7500912e62ebe991645f6483a2e8518783e13cc4d6610e46c835a2e28b",
+      "pair_id": "pair-0200",
+      "source_identity": "mitre:1:a69bcb7500912e62"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "6819166a2d0b74b6dfda41d47b0b6af43e5768980f77fdcb4cde30f43fda15be",
+      "offensive_sha256": "5a459eb0fdceff4cb30bde4fae2063753a35bfa4cf790cc8de4aa6860cc691fc",
+      "pair_id": "pair-0201",
+      "source_identity": "mitre:106:5a459eb0fdceff4c"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "00321ea87943351deb7bfe4a3aaf27cf9083203d5cd4c90df72966b237e143cf",
+      "offensive_sha256": "eb2ea0272ad28054de224a54ac20444dbd8aaadddfa5793ae07a54811c145231",
+      "pair_id": "pair-0202",
+      "source_identity": "mitre:216:eb2ea0272ad28054"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "db4599f9817aea89bb523464de59bac01ad6af2c2d443f804311219bc6e42bb0",
+      "offensive_sha256": "d0e283e4399b082c111f8185f15b185d9124ff27eb6ff28dad21eeeae1a8a922",
+      "pair_id": "pair-0203",
+      "source_identity": "mitre:300:d0e283e4399b082c"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "2173520addbcb66b6dcd979b25ef001414ac957338241ee0ddd32397c6473c14",
+      "offensive_sha256": "c51040bc042703770802ba19840acaebeff823e645cccbc130ea5c191f5dedfd",
+      "pair_id": "pair-0204",
+      "source_identity": "mitre:481:c51040bc04270377"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "2567cebdd5867aee25a1be086ff25a44fc6a681c807bdecf37690c1e488a2152",
+      "offensive_sha256": "4896abc595c8a842e3c9157ff82a0d9a3747a9a366f454529032f0ed93c808ac",
+      "pair_id": "pair-0205",
+      "source_identity": "mitre:560:4896abc595c8a842"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "496d515d1f182b935a6172abbc9204aa17e12dd216aaa71212b94c6ef8edf095",
+      "offensive_sha256": "d9c6bbe923d7206ba364e31547cccc99ef6b0fa627fe12d036d949e4d391d485",
+      "pair_id": "pair-0206",
+      "source_identity": "mitre:602:d9c6bbe923d7206b"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "ee00baba777469b70acd8db107ca34749cf0cdb1d1fac453be4800b9f37fe71c",
+      "offensive_sha256": "62950ad81c2b99286b4ca274309b4b6954b6969d02d88c310d6be01c171acaa8",
+      "pair_id": "pair-0207",
+      "source_identity": "mitre:707:62950ad81c2b9928"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "01df50faf9b85c21844a07c1d03dd2cd0e4ffa3e379f0b7bc6e44a338d4a696d",
+      "offensive_sha256": "669acd024be6c94d4d23ae6cf24b98dfae42f5fcef8fcff867a5276c3df406fa",
+      "pair_id": "pair-0208",
+      "source_identity": "mitre:824:669acd024be6c94d"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "ee8c37cb77bb0dddfedac1b15a76771cf5e76cc713314f976861aab5d08e6f69",
+      "offensive_sha256": "f7016d1807ef72eef2955ce7e5f43dd14c0bc96272ad87c1c23af53124bc360e",
+      "pair_id": "pair-0209",
+      "source_identity": "mitre:905:f7016d1807ef72ee"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "df7af25d8ef0053fa163fa5b9f4adc6382ac77f180425debf8e9ea623f074c49",
+      "offensive_sha256": "3069efa87008360e38918c5207863f1701f7225b252709257ebdccd4ffcf7ddb",
+      "pair_id": "pair-0210",
+      "source_identity": "mitre:88:3069efa87008360e"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "cdc20c82339cfa7734dce1175d4cc9ab7127fe58b6a94d57e6965e92cc579ca5",
+      "offensive_sha256": "9914e26d97299fb8242569a04bac82bc6a6200535090d16874d45880652487b5",
+      "pair_id": "pair-0211",
+      "source_identity": "mitre:128:9914e26d97299fb8"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "6eb4f87efc4a6ace8015711964cc3b0e1451fbbcc609d46654228e6839cd2a6a",
+      "offensive_sha256": "90f6039b24d16e2b830c78776ce207b2e9b834c1418968a98340456cc3b6910e",
+      "pair_id": "pair-0212",
+      "source_identity": "mitre:256:90f6039b24d16e2b"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "be01d08dddfc47e8287dc7a3dbc16b2bd7ed5a741190b1403040a0aeb5d38e29",
+      "offensive_sha256": "8b46357d86b81dc5a7c2fc545e796dcca75dc4339018587a9c42f73bcb13902c",
+      "pair_id": "pair-0213",
+      "source_identity": "mitre:313:8b46357d86b81dc5"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "0908e42370f2880514ee16ffa29f9fc3022309ac24fa3b05632ae347936b7143",
+      "offensive_sha256": "86156d7eb2ae737fce914529756b909bea535d103342eb5dcea1468fd43356c5",
+      "pair_id": "pair-0214",
+      "source_identity": "mitre:492:86156d7eb2ae737f"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "e5276ab0ccdfac8d8e66519f181fee48754dc8b4539ed9b3e90180041ab888ca",
+      "offensive_sha256": "687b0e0ff741cd9fe8068fd5460fb4e9f9c0b7d3368a4e8ed6f3a9f1bf55ab50",
+      "pair_id": "pair-0215",
+      "source_identity": "mitre:536:687b0e0ff741cd9f"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "6ae3dbe1fbc71fe0b29e205f3fbb9a20b9f0fbabb8862b08c220309e2b552897",
+      "offensive_sha256": "ba99d93cc8adde6b6d05a4fb38d7ca64c2c313385626e9b6ff18be85156edd9d",
+      "pair_id": "pair-0216",
+      "source_identity": "mitre:663:ba99d93cc8adde6b"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "7110897e376db6030e3f4f07837842102a7117a6cb4e8d2411af3622116e7c97",
+      "offensive_sha256": "7350d0c8d16eac18962080724c8a4f2800cc47d0111be1fb6d93df7fea7b9d1b",
+      "pair_id": "pair-0217",
+      "source_identity": "mitre:709:7350d0c8d16eac18"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "dce12c8dbd34e1ecf78706120b02630ef37079f5ce934cd9386495c17ee41987",
+      "offensive_sha256": "ebb8e15335bbc62b6fae02ab0bfa903f681a61983a78a849e1b88d4997612cd1",
+      "pair_id": "pair-0218",
+      "source_identity": "mitre:888:ebb8e15335bbc62b"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "04a26a9a5b9c1d62b255405721b1d6fee18a420d00be6ac4ff54d3d046733d41",
+      "offensive_sha256": "5b89dfd91206c292666425b653f2537add2ba2b323415dc024df8c002caacffd",
+      "pair_id": "pair-0219",
+      "source_identity": "mitre:996:5b89dfd91206c292"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "5da7e72b77d65b508c002cdd68d01e06cd00241fa4593750171b342dbb64aa6a",
+      "offensive_sha256": "81b78f47bad2a9e5196da8563bdea9a1080aff7a1acac47924c25c3302774dfd",
+      "pair_id": "pair-0220",
+      "source_identity": "mitre:27:81b78f47bad2a9e5"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "1dc053f9e505a59bdf3ebaa984fae89ffdc842e72e64475a914a6810c799edc7",
+      "offensive_sha256": "77a268f349b7b662ce099b7670a6918e1ebd00a9c85ee986cbd91300962e93ec",
+      "pair_id": "pair-0221",
+      "source_identity": "mitre:190:77a268f349b7b662"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "1a73325dc9c64f7b0ba05569359fc3bea126c8efd8d2ca27638a2873973b68b2",
+      "offensive_sha256": "18e64bc285488230c0a53eb06054fb38fcc03a880c8e9e1c61d422109ec0366c",
+      "pair_id": "pair-0222",
+      "source_identity": "mitre:242:18e64bc285488230"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "91cd29d04c38dafc367a0eaf13289f864ec8340384ec79d61c05380d48207439",
+      "offensive_sha256": "2c3b35040847407402b4c4d585fb5d64caf8bfa8ed96d65c4166de030789872a",
+      "pair_id": "pair-0223",
+      "source_identity": "mitre:360:2c3b350408474074"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "8b65c6b692fd7bd4f09f7cbf8ba2766ca775a88ffa03dbb6bc9bddb7486a821b",
+      "offensive_sha256": "3d2625dfcc7d5507142bdcb57c454218a3169bbbead9c546d3286d665ce5b697",
+      "pair_id": "pair-0224",
+      "source_identity": "mitre:450:3d2625dfcc7d5507"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "d57fe073544ec3010360a4c624d7d6c977e0cc1697d82a81e3bbde336cc5256a",
+      "offensive_sha256": "8bd4150664bfa05a1020dee8fd0fd395eb37feb928002e78d3a84038b03f2116",
+      "pair_id": "pair-0225",
+      "source_identity": "mitre:599:8bd4150664bfa05a"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "f2f52b217d52338609cf41e7ad2ba3ae10e3d1f3e8e1b8b5b13cc93eee7f457b",
+      "offensive_sha256": "fba3676242c976de856ee5b5582dc12f0f2b4bdce591d5c148423bad4507c136",
+      "pair_id": "pair-0226",
+      "source_identity": "mitre:603:fba3676242c976de"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "a312dea98ae73cd5261c7a2a35dc98d9f543ff40e3987fb4490a6d9f1e4fb46b",
+      "offensive_sha256": "94f9ec0216d4ecd72065b6d35d442d412f9ba058c0f053f9f2edcf90a58eaec8",
+      "pair_id": "pair-0227",
+      "source_identity": "mitre:713:94f9ec0216d4ecd7"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "dbc6b6cb2fc89630f4c32e48047ca2e4b91b453c0ba6b464b641ac78d9f7329b",
+      "offensive_sha256": "ac7787cb58afd6dd9374d77248a3cf00bead47c10a6b1f5d18c916f7ccc4316a",
+      "pair_id": "pair-0228",
+      "source_identity": "mitre:826:ac7787cb58afd6dd"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "b8255c73bd5dd9aa7423d68d9d9b21656834a1b39857e6dde990fed8f607c17a",
+      "offensive_sha256": "1175967fc1b9acb4a0bd3166220cb24c26d8bf52bfdd74e90d7e8e4ead530795",
+      "pair_id": "pair-0229",
+      "source_identity": "mitre:959:1175967fc1b9acb4"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "73aff92d3d31913260421509bade43f12d54616333f9a3fa87c3a19c89182569",
+      "offensive_sha256": "e98cd29ccf0f5b90d8f7ea42183c01f9c280cbef95c4054de5e09d996379172a",
+      "pair_id": "pair-0230",
+      "source_identity": "mitre:4:e98cd29ccf0f5b90"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "acc5e5f1c1e95cccb4aeddf7e74cbce30f0407a6d1a0d78bb86b598983f4e83e",
+      "offensive_sha256": "b35d4084dd8cb35a76faed62d26428863020a4f553a612c555c8d25a038e5d89",
+      "pair_id": "pair-0231",
+      "source_identity": "mitre:135:b35d4084dd8cb35a"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "620dd401a7640e3084bfbca29a74c6f500f7a933814b1049602985ccd35967f6",
+      "offensive_sha256": "d13edc16d53e2a75541521e18fb37165fa318c851f3aedff7a83cb40299cdb3c",
+      "pair_id": "pair-0232",
+      "source_identity": "mitre:266:d13edc16d53e2a75"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "3e1b931cabea82ff685a99dde50425d1123357570e029c53a6ad0c3b69a3355a",
+      "offensive_sha256": "fcd34a1d5ce1dc0e7525eda47ac5f542105de45c279b7153b821f58dfad15345",
+      "pair_id": "pair-0233",
+      "source_identity": "mitre:337:fcd34a1d5ce1dc0e"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "69c03871fea065b194985690c02ce00d2bec7ee50f50e58b5d08f8e22806ae4d",
+      "offensive_sha256": "99fe8fe08fa784e3825ffe9f90cd50ce1c013a882931513c15510c36e54a3cd5",
+      "pair_id": "pair-0234",
+      "source_identity": "mitre:454:99fe8fe08fa784e3"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "18bf4d7dad93aa51e220d1d101d9feff1b6f57e53b44467077dbf0f72bf4fc13",
+      "offensive_sha256": "c4099a459e072fe4075e6bbfa43550cb1c9c2161919a706d9d879a35e5f750ce",
+      "pair_id": "pair-0235",
+      "source_identity": "mitre:566:c4099a459e072fe4"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "147c1fe0d2fcccde928f313ad4cae35926ddfb286e34bed8712e21462c6e166f",
+      "offensive_sha256": "3d123371033cd13bece6a81d0177c51f66dbb6e7f659f688d507df7d257c875b",
+      "pair_id": "pair-0236",
+      "source_identity": "mitre:617:3d123371033cd13b"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "78870c90bc667108cf0ebff205bca317b51134e17373a4b28df360db22759cb2",
+      "offensive_sha256": "417593c6cc761148325dd6dc8e151396516a10d5bd4cdd95fe264d0b715fe906",
+      "pair_id": "pair-0237",
+      "source_identity": "mitre:747:417593c6cc761148"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "4f40d26079a562b918120461b01dfc8ef11b5a46c2bdcf5e537b57046dc9bdd2",
+      "offensive_sha256": "c543e217d03df76f5964c7c13d840d823d93bb0a15babf2019275de56a8b6164",
+      "pair_id": "pair-0238",
+      "source_identity": "mitre:837:c543e217d03df76f"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "3c5c5194131bfddd04fb136c40299ff71f5043dbd224338330daad5a48001f37",
+      "offensive_sha256": "8a00c1340ba0a86b1f6c809384d3f5e532d1f4cdd0fa9f5d061eaef8227e3cc3",
+      "pair_id": "pair-0239",
+      "source_identity": "mitre:999:8a00c1340ba0a86b"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "c145808591bda5a38929ab1caf89432315a37f116c7c66cb2de51026183575fb",
+      "offensive_sha256": "556429b13993da77d961f254a22e97280e089afe737445cdcec11493f26322e0",
+      "pair_id": "pair-0240",
+      "source_identity": "mitre:40:556429b13993da77"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "cc61e1afbf098a6442bc990198bd63a6c391dd3d3cd1236958e408b002777f29",
+      "offensive_sha256": "4b88a1440a33e02a150150c72b8b98757ee80151669e2c96cbe7b5febd572570",
+      "pair_id": "pair-0241",
+      "source_identity": "mitre:179:4b88a1440a33e02a"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "d4a749ff150db9b4d141c62feafce9729eb66d5a046df086f23f89a0f4a7480d",
+      "offensive_sha256": "8f0a7a54e84e9648476739daabc59bd6d119ce6c341bcf644acb25f0b3cc402d",
+      "pair_id": "pair-0242",
+      "source_identity": "mitre:245:8f0a7a54e84e9648"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "112900093e5ed579d3518c87b605536e05c600eb6c0f648a6a43577fa0c334a9",
+      "offensive_sha256": "ee11e831d61b4642443388d4f8702a89989dba6560edb1e2e4b112b779316bbc",
+      "pair_id": "pair-0243",
+      "source_identity": "mitre:314:ee11e831d61b4642"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "97e3aae3c9354f06fd2b73dc4bda0b1a47b354d443dad629bb3eb82a37e895e3",
+      "offensive_sha256": "66629e59b886ddf3a0b646a26be001be4dfc8e3c5912f8235d8681b82fccbcac",
+      "pair_id": "pair-0244",
+      "source_identity": "mitre:429:66629e59b886ddf3"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "c5afcc3eef59d26c1fd33e0318c891968b1f13066c799fe0bdda163d7679a4a6",
+      "offensive_sha256": "2d230ac49fada35b0ec766a1d2d6a3025b6e46063b94ec854f9f7dc584f94215",
+      "pair_id": "pair-0245",
+      "source_identity": "mitre:500:2d230ac49fada35b"
+    },
+    {
+      "category": "Lateral Movement",
+      "defensive_sha256": "e027931fb06cb1dc5a58f1964630c540be488a732bdaa78e5d940a8be9a3a64d",
+      "offensive_sha256": "0c4ac086bce7e6642a4ba71d8d17dc7cf0b36a3de47d737b6346a08b2a9c96d0",
+      "pair_id": "pair-0246",
+      "source_identity": "mitre:694:0c4ac086bce7e664"
+    },
+    {
+      "category": "Persistence",
+      "defensive_sha256": "ce5c85b0c9e70a55902e12646454822fc8bcbcbd2d80718f5d03d8494b8d35ba",
+      "offensive_sha256": "477834d855cead802b000869de130d80e66858d5852c968a8d05699b23576461",
+      "pair_id": "pair-0247",
+      "source_identity": "mitre:716:477834d855cead80"
+    },
+    {
+      "category": "Privilege Escalation",
+      "defensive_sha256": "4f4e57ea4567ae6262bdf3eda6ec5a6604a535aa428aa2b6a68e6f82c282ee2d",
+      "offensive_sha256": "22100c5c80b29b7a9e214282feffa7776a40545a2c74b85d081e70345c158689",
+      "pair_id": "pair-0248",
+      "source_identity": "mitre:858:22100c5c80b29b7a"
+    },
+    {
+      "category": "Recon",
+      "defensive_sha256": "8eccc6b954a017bdd6abb9ca10e0db1460ee0f3fe44831fe23ef35e4da474f98",
+      "offensive_sha256": "f660be3fc78c983ac0845c4ddf8e765818ac293a6b69a4fab413c4a982d5e49a",
+      "pair_id": "pair-0249",
+      "source_identity": "mitre:911:f660be3fc78c983a"
+    },
+    {
+      "category": "C2",
+      "defensive_sha256": "1d7d6de180dfbea54d63cdc37d97ae9e62df1f3a536c225a49ab32f6d5244fe8",
+      "offensive_sha256": "5aeb2f6a13d6f99a9e49c69cb9cf62d24f52122da65b8c8b623bd5ac761dfa59",
+      "pair_id": "pair-0250",
+      "source_identity": "mitre:31:5aeb2f6a13d6f99a"
+    },
+    {
+      "category": "Collection",
+      "defensive_sha256": "02d3be15c356a887ba1d58b18dd2026e78ff6b3c499e17cb567e604e26586c10",
+      "offensive_sha256": "afb676a253ceaff9b69be72509ff09b0009f07ef159606af96ffc3eb15a0a71b",
+      "pair_id": "pair-0251",
+      "source_identity": "mitre:175:afb676a253ceaff9"
+    },
+    {
+      "category": "Discovery",
+      "defensive_sha256": "17d18c232501bad4c73dd2ea5ab16ea809821f2b6da0c378291a1feee0a91166",
+      "offensive_sha256": "22dfc7c7d6bc9f53a041dd9732122cb33e4fff509068d021e09017d23a0a8501",
+      "pair_id": "pair-0252",
+      "source_identity": "mitre:291:22dfc7c7d6bc9f53"
+    },
+    {
+      "category": "Evasion",
+      "defensive_sha256": "b1c957085d9f77081694977ef167966ba602f5f3d335c4e1e4618257ac79fc5d",
+      "offensive_sha256": "510f08bebce39b24430fcac9235656ec3ea9d2885fecff4578df79d37fc8f0f2",
+      "pair_id": "pair-0253",
+      "source_identity": "mitre:365:510f08bebce39b24"
+    },
+    {
+      "category": "Execution",
+      "defensive_sha256": "c476160733240ccc0764c5100ad06b561d32101db2e3053bf4f0f8d22c1bfb0f",
+      "offensive_sha256": "eb9e8c10e4d9215425fe9fe94410af9ceda28a31b4bc1eadefa5efb02f75b1ba",
+      "pair_id": "pair-0254",
+      "source_identity": "mitre:455:eb9e8c10e4d92154"
+    },
+    {
+      "category": "Exfil",
+      "defensive_sha256": "25a8975c5e2897721f82da84d365550aff5123e72897c3d2c9655257ca145b76",
+      "offensive_sha256": "0c3bfe992432d1226a90b62f93955c1266e52df271c8dd3f3e961dc60bc7015b",
+      "pair_id": "pair-0255",
+      "source_identity": "mitre:585:0c3bfe992432d122"
+    }
+  ],
+  "pairs_sha256": "195b1c8f09dfac40d296746077345ffde8f858d29fc833febd4ccd44ff948d25",
+  "review_counts": {
+    "approved": 256,
+    "rejected": 0
+  },
+  "review_method": "ai_assisted",
+  "schema_version": 1,
+  "split_seed": 2029,
+  "splits": {
+    "discovery": {
+      "count": 128,
+      "pair_ids": [
+        "pair-0150",
+        "pair-0120",
+        "pair-0230",
+        "pair-0030",
+        "pair-0130",
+        "pair-0100",
+        "pair-0060",
+        "pair-0090",
+        "pair-0040",
+        "pair-0110",
+        "pair-0240",
+        "pair-0210",
+        "pair-0000",
+        "pair-0041",
+        "pair-0201",
+        "pair-0091",
+        "pair-0021",
+        "pair-0101",
+        "pair-0081",
+        "pair-0241",
+        "pair-0001",
+        "pair-0131",
+        "pair-0181",
+        "pair-0141",
+        "pair-0151",
+        "pair-0221",
+        "pair-0242",
+        "pair-0052",
+        "pair-0222",
+        "pair-0182",
+        "pair-0142",
+        "pair-0012",
+        "pair-0082",
+        "pair-0212",
+        "pair-0102",
+        "pair-0062",
+        "pair-0072",
+        "pair-0192",
+        "pair-0152",
+        "pair-0113",
+        "pair-0003",
+        "pair-0043",
+        "pair-0023",
+        "pair-0253",
+        "pair-0053",
+        "pair-0163",
+        "pair-0223",
+        "pair-0073",
+        "pair-0013",
+        "pair-0123",
+        "pair-0103",
+        "pair-0233",
+        "pair-0084",
+        "pair-0184",
+        "pair-0144",
+        "pair-0204",
+        "pair-0134",
+        "pair-0004",
+        "pair-0024",
+        "pair-0244",
+        "pair-0034",
+        "pair-0154",
+        "pair-0114",
+        "pair-0254",
+        "pair-0104",
+        "pair-0095",
+        "pair-0195",
+        "pair-0215",
+        "pair-0035",
+        "pair-0225",
+        "pair-0055",
+        "pair-0065",
+        "pair-0005",
+        "pair-0135",
+        "pair-0075",
+        "pair-0025",
+        "pair-0245",
+        "pair-0015",
+        "pair-0136",
+        "pair-0036",
+        "pair-0146",
+        "pair-0046",
+        "pair-0096",
+        "pair-0016",
+        "pair-0246",
+        "pair-0026",
+        "pair-0106",
+        "pair-0196",
+        "pair-0066",
+        "pair-0076",
+        "pair-0206",
+        "pair-0007",
+        "pair-0107",
+        "pair-0137",
+        "pair-0087",
+        "pair-0117",
+        "pair-0217",
+        "pair-0067",
+        "pair-0017",
+        "pair-0227",
+        "pair-0077",
+        "pair-0027",
+        "pair-0177",
+        "pair-0157",
+        "pair-0048",
+        "pair-0128",
+        "pair-0178",
+        "pair-0148",
+        "pair-0038",
+        "pair-0208",
+        "pair-0198",
+        "pair-0078",
+        "pair-0028",
+        "pair-0108",
+        "pair-0248",
+        "pair-0158",
+        "pair-0049",
+        "pair-0149",
+        "pair-0069",
+        "pair-0079",
+        "pair-0199",
+        "pair-0159",
+        "pair-0019",
+        "pair-0169",
+        "pair-0009",
+        "pair-0129",
+        "pair-0239",
+        "pair-0109"
+      ],
+      "pair_ids_sha256": "b37a67d8e168070553f37d655d97a7ea7c68b73038b9bdb0b209b14a298098ad"
+    },
+    "selection": {
+      "count": 64,
+      "pair_ids": [
+        "pair-0160",
+        "pair-0070",
+        "pair-0140",
+        "pair-0180",
+        "pair-0250",
+        "pair-0200",
+        "pair-0220",
+        "pair-0121",
+        "pair-0161",
+        "pair-0211",
+        "pair-0061",
+        "pair-0011",
+        "pair-0051",
+        "pair-0032",
+        "pair-0092",
+        "pair-0252",
+        "pair-0022",
+        "pair-0112",
+        "pair-0232",
+        "pair-0122",
+        "pair-0033",
+        "pair-0153",
+        "pair-0203",
+        "pair-0183",
+        "pair-0243",
+        "pair-0213",
+        "pair-0214",
+        "pair-0164",
+        "pair-0074",
+        "pair-0234",
+        "pair-0064",
+        "pair-0124",
+        "pair-0054",
+        "pair-0145",
+        "pair-0175",
+        "pair-0115",
+        "pair-0165",
+        "pair-0205",
+        "pair-0235",
+        "pair-0216",
+        "pair-0006",
+        "pair-0236",
+        "pair-0166",
+        "pair-0126",
+        "pair-0086",
+        "pair-0097",
+        "pair-0197",
+        "pair-0167",
+        "pair-0237",
+        "pair-0207",
+        "pair-0187",
+        "pair-0218",
+        "pair-0068",
+        "pair-0008",
+        "pair-0138",
+        "pair-0058",
+        "pair-0188",
+        "pair-0018",
+        "pair-0029",
+        "pair-0099",
+        "pair-0119",
+        "pair-0179",
+        "pair-0229",
+        "pair-0139"
+      ],
+      "pair_ids_sha256": "f085dea227337b5d353b6d12f63ed80baf4a2668e616f6f62f74e67cb7c6dcf9"
+    },
+    "test": {
+      "count": 64,
+      "pair_ids": [
+        "pair-0170",
+        "pair-0020",
+        "pair-0080",
+        "pair-0050",
+        "pair-0190",
+        "pair-0010",
+        "pair-0031",
+        "pair-0251",
+        "pair-0111",
+        "pair-0071",
+        "pair-0191",
+        "pair-0171",
+        "pair-0231",
+        "pair-0172",
+        "pair-0042",
+        "pair-0132",
+        "pair-0202",
+        "pair-0002",
+        "pair-0162",
+        "pair-0143",
+        "pair-0063",
+        "pair-0193",
+        "pair-0173",
+        "pair-0093",
+        "pair-0133",
+        "pair-0083",
+        "pair-0224",
+        "pair-0094",
+        "pair-0044",
+        "pair-0174",
+        "pair-0014",
+        "pair-0194",
+        "pair-0125",
+        "pair-0105",
+        "pair-0185",
+        "pair-0085",
+        "pair-0045",
+        "pair-0255",
+        "pair-0155",
+        "pair-0186",
+        "pair-0156",
+        "pair-0176",
+        "pair-0116",
+        "pair-0056",
+        "pair-0226",
+        "pair-0147",
+        "pair-0037",
+        "pair-0057",
+        "pair-0047",
+        "pair-0127",
+        "pair-0247",
+        "pair-0228",
+        "pair-0168",
+        "pair-0118",
+        "pair-0238",
+        "pair-0088",
+        "pair-0098",
+        "pair-0089",
+        "pair-0249",
+        "pair-0039",
+        "pair-0209",
+        "pair-0189",
+        "pair-0059",
+        "pair-0219"
+      ],
+      "pair_ids_sha256": "db9e0f33ceb596c4469bc023edf4a4fa1837322da3a15be4a0eebf225e7a561e"
+    }
+  }
+}
