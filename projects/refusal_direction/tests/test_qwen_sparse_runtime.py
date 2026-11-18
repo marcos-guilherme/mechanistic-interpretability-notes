@@ -109,11 +109,11 @@ def _freeze_fixture(
     return freeze_selection(rows)
 
 
-def _store(tmp_path: Path) -> SparseStageStore:
+def _store(tmp_path: Path, *, run_id: str = "run-1") -> SparseStageStore:
     return SparseStageStore(
         tmp_path / "results",
         config=_config(),
-        run_id="run-1",
+        run_id=run_id,
         implementation_commit="impl-1",
         corpus_sha256="c" * 64,
         pair_split_sha256="p" * 64,
@@ -121,9 +121,30 @@ def _store(tmp_path: Path) -> SparseStageStore:
     )
 
 
+def _valid_stage_result(stage: str) -> dict[str, object]:
+    if stage == "sae_quality":
+        return {
+            "status": "pass",
+            "explained_variance": 0.8,
+            "mean_cosine": 0.9,
+            "nonfinite_count": 0,
+            "mean_l0": 64.0,
+            "dead_feature_fraction": 0.2,
+            "norm_drift": 0.2,
+        }
+    if stage == "decompose":
+        return {
+            "status": "pass",
+            "cosine": 0.95,
+            "relative_l2": 0.35,
+            "norm": 1.0,
+        }
+    return {"status": "completed"}
+
+
 def _complete_through_select(store: SparseStageStore) -> None:
     for stage in SPARSE_STAGES[:6]:
-        store.write_stage(stage, {"status": "completed"})
+        store.write_stage(stage, _valid_stage_result(stage))
     store.write_stage("select", _freeze_fixture())
     assert store.selection_freeze_path.is_file()
 
@@ -363,6 +384,92 @@ def test_operational_result_and_precondition_errors_are_terminal_and_provenanced
     assert blocked.operational_error_path.is_file()
 
 
+def test_operational_error_blocks_same_run_resume(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = SparseRuntime(store).run_stage(
+        "prepare",
+        lambda **_kwargs: {
+            "status": "operational_error",
+            "error_code": "fixture",
+        },
+    )
+    called = False
+
+    def must_not_run(**_kwargs):
+        nonlocal called
+        called = True
+        return {"status": "completed"}
+
+    resumed = SparseRuntime(_store(tmp_path)).run_stage("prepare", must_not_run)
+    assert resumed == first
+    assert called is False
+
+    restarted = SparseRuntime(_store(tmp_path, run_id="run-2")).run_stage(
+        "prepare",
+        lambda **_kwargs: {"status": "completed"},
+    )
+    assert restarted["provenance"]["run_id"] == "run-2"
+
+
+def test_quality_and_decomposition_contracts_enforce_scientific_gates(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    for stage in SPARSE_STAGES[:3]:
+        store.write_stage(stage, {"status": "completed"})
+    with pytest.raises(ValueError, match="sae_quality schema"):
+        store.write_stage("sae_quality", {"status": "pass"})
+    with pytest.raises(ValueError, match="sae_quality_failed"):
+        store.write_stage(
+            "sae_quality",
+            {
+                "status": "pass",
+                "explained_variance": 0.79,
+                "mean_cosine": 0.95,
+                "nonfinite_count": 0,
+                "mean_l0": 64.0,
+                "dead_feature_fraction": 0.1,
+                "norm_drift": 0.1,
+            },
+        )
+
+    failed = _store(tmp_path / "decompose")
+    for stage in SPARSE_STAGES[:4]:
+        failed.write_stage(stage, _valid_stage_result(stage))
+    with pytest.raises(ValueError, match="direction_reconstruction_failed"):
+        failed.write_stage(
+            "decompose",
+            {
+                "status": "pass",
+                "cosine": 0.94,
+                "relative_l2": 0.2,
+                "norm": 1.0,
+            },
+        )
+
+
+def test_selection_recomputes_winner_from_decision_trace(tmp_path: Path) -> None:
+    freeze = _freeze_fixture()
+    freeze["selections"]["sparse_filtered"]["addition"] = dict(
+        next(
+            row
+            for row in freeze["decision_trace"]
+            if row["vector"] == "sparse_filtered"
+            and row["intervention"] == "addition"
+            and row["dose"] == 0.35
+            and row["cardinality"] == 8
+        )
+    )
+    freeze["selection_freeze_sha256"] = sparse_runtime.selection_freeze_digest(
+        freeze
+    )
+    store = _store(tmp_path)
+    for stage in SPARSE_STAGES[:6]:
+        store.write_stage(stage, _valid_stage_result(stage))
+    with pytest.raises(ValueError, match="recomputed selection"):
+        store.write_stage("select", freeze)
+
+
 def test_external_transfer_requires_frozen_bijection_and_full_coverage(
     tmp_path: Path,
 ) -> None:
@@ -381,7 +488,15 @@ def test_external_transfer_requires_frozen_bijection_and_full_coverage(
                         "dataset": dataset,
                         **item,
                         "condition": condition,
-                        "dose": sparse_runtime.condition_dose(condition, freeze),
+                        "dose": sparse_runtime.condition_dose(
+                            condition,
+                            freeze,
+                        ),
+                        "refused": int(item["example_id"].rsplit("-", 1)[1])
+                            % 2
+                            == 0,
+                        "kl_from_baseline": 0.1,
+                        "invalid_generation": False,
                     }
                 )
     receipt = {
@@ -389,8 +504,24 @@ def test_external_transfer_requires_frozen_bijection_and_full_coverage(
         "prepare_sha256": identity["prepare_sha256"],
         "selection_freeze_sha256": freeze["selection_freeze_sha256"],
         "observations": observations,
+        "metrics": {
+            dataset: {
+                condition: {
+                    "n": 32,
+                    "refusal_rate": 0.5,
+                    "mean_kl": 0.1,
+                    "invalid_generation_rate": 0.0,
+                }
+                for condition in sparse_runtime.EXTERNAL_CONDITIONS
+            }
+            for dataset in ("mitre", "mitre_frr")
+        },
     }
     sparse_runtime.validate_external_transfer_receipt(receipt, identity, freeze)
+    receipt["metrics"]["mitre"]["baseline"]["refusal_rate"] = 0.4
+    with pytest.raises(ValueError, match="metrics differ"):
+        sparse_runtime.validate_external_transfer_receipt(receipt, identity, freeze)
+    receipt["metrics"]["mitre"]["baseline"]["refusal_rate"] = 0.5
     receipt["observations"].pop()
     with pytest.raises(ValueError, match="external transfer coverage"):
         sparse_runtime.validate_external_transfer_receipt(receipt, identity, freeze)
@@ -425,6 +556,9 @@ def test_humaneval_stage_validates_frozen_ids_doses_limits_and_worker_outputs(
             {
                 **item,
                 "plus_pass": True,
+                "refused": False,
+                "kl_from_baseline": 0.0,
+                "invalid_generation": False,
             }
             for item in identity["items"]
         ]
@@ -447,12 +581,30 @@ def test_humaneval_stage_validates_frozen_ids_doses_limits_and_worker_outputs(
         "evalplus_revision": "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e",
         "job_manifest_sha256": jobs["job_manifest_sha256"],
         "worker_outputs": outputs,
+        "metrics": {
+            condition: {
+                "n": 32,
+                "pass_at_1": 1.0,
+                "refusal_rate": 0.0,
+                "mean_kl": 0.0,
+                "invalid_generation_rate": 0.0,
+            }
+            for condition in ("baseline", "dense", "filtered")
+        },
     }
     sparse_runtime.validate_code_preservation_receipt(
         receipt,
         identity=identity,
         freeze=freeze,
     )
+    receipt["metrics"]["filtered"]["pass_at_1"] = 0.5
+    with pytest.raises(ValueError, match="metrics differ"):
+        sparse_runtime.validate_code_preservation_receipt(
+            receipt,
+            identity=identity,
+            freeze=freeze,
+        )
+    receipt["metrics"]["filtered"]["pass_at_1"] = 1.0
     receipt["worker_outputs"]["filtered"].pop()
     with pytest.raises(ValueError, match="HumanEval\\+ coverage"):
         sparse_runtime.validate_code_preservation_receipt(
@@ -487,10 +639,18 @@ def test_scientific_halts_and_operational_errors_remain_distinct(
 ) -> None:
     store = _store(tmp_path)
     for stage in SPARSE_STAGES[:3]:
-        store.write_stage(stage, {"status": "completed"})
+        store.write_stage(stage, _valid_stage_result(stage))
     halted = SparseRuntime(store).run_stage(
         "sae_quality",
-        lambda **_kwargs: {"status": "sae_quality_failed"},
+        lambda **_kwargs: {
+            "status": "sae_quality_failed",
+            "explained_variance": 0.79,
+            "mean_cosine": 0.9,
+            "nonfinite_count": 0,
+            "mean_l0": 64.0,
+            "dead_feature_fraction": 0.2,
+            "norm_drift": 0.2,
+        },
     )
     assert halted["results"]["status"] == "sae_quality_failed"
     assert not store.stage_path("decompose").exists()
@@ -535,13 +695,47 @@ def test_external_and_code_evaluation_require_complete_blind_review(
         {
             "status": "inconclusive_review",
             "test_split_sha256": store.test_split_sha256,
+            "blind_review_sha256": "b" * 64,
         },
     )
     runtime = SparseRuntime(store)
     with pytest.raises(ValueError, match="complete blind review"):
         runtime.run_stage("external_transfer", lambda **_kwargs: {})
-    with pytest.raises(ValueError, match="complete blind review"):
-        runtime.run_stage("code_preservation", lambda **_kwargs: {})
+    terminal = runtime.run_stage("code_preservation", lambda **_kwargs: {})
+    assert terminal["status"] == "operational_error"
+    assert terminal["stage"] == "external_transfer"
+
+
+def test_review_merge_must_match_exported_blind_hash(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _complete_through_select(store)
+    store.write_stage(
+        "test",
+        {
+            "status": "completed",
+            "selection_freeze_sha256": store.selection_freeze_sha256(),
+            "test_split_sha256": store.test_split_sha256,
+            "observations": expected_test_matrix(_frozen_test_pairs()),
+        },
+    )
+    store.write_stage(
+        "review_export",
+        {
+            "status": "review_pending",
+            "review_count": 512,
+            "test_split_sha256": store.test_split_sha256,
+            "blind_review_sha256": "b" * 64,
+        },
+    )
+    with pytest.raises(ValueError, match="08_review_export"):
+        SparseRuntime(store).run_stage(
+            "review_merge",
+            lambda **_kwargs: {
+                "status": "inconclusive_review",
+                "test_split_sha256": store.test_split_sha256,
+                "blind_review_sha256": "c" * 64,
+            },
+        )
 
 
 def test_humaneval_plus_reuses_remote_limited_worker_for_frozen_conditions(

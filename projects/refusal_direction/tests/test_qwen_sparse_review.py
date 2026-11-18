@@ -205,6 +205,19 @@ def test_review_export_rejects_leaks_duplicates_and_wrong_coverage(
         )
 
 
+def test_review_export_recomputes_prompt_hash_from_text(tmp_path: Path) -> None:
+    paths = _response_files(tmp_path)
+    rows = _read_jsonl(paths[0])
+    rows[0]["prompt"] = "changed prompt with stale declared hash"
+    _write_jsonl(paths[0], rows)
+    with pytest.raises(ValueError, match="computed prompt hash"):
+        build_blind_review(
+            paths,
+            tmp_path / "bad-hash",
+            frozen_test_pairs=_frozen_test_pairs(),
+        )
+
+
 def test_review_merge_rejects_tampered_private_assignment_coverage(
     tmp_path: Path,
 ) -> None:

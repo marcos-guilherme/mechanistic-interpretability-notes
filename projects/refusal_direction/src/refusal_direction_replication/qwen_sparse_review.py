@@ -16,6 +16,8 @@ import random
 import tempfile
 from typing import Any
 
+from .data import prompt_content_hash
+
 
 PRIMARY_REVIEW_CONDITIONS = (
     "dense_addition",
@@ -202,6 +204,11 @@ def _validated_response_rows(
             raise ValueError("review coverage contains a non-primary condition")
         prompt = _required_text(row, "prompt", pair_id)
         prompt_sha256 = _required_text(row, "prompt_sha256", pair_id)
+        computed_prompt_sha256 = prompt_content_hash(prompt)
+        if computed_prompt_sha256 != prompt_sha256:
+            raise ValueError(
+                f"{pair_id}: computed prompt hash differs from declared hash"
+            )
         if prompt_sha256 != frozen_hashes.get((pair_id, side)):
             raise ValueError("review responses differ from frozen test split")
         generation = row.get("generation")

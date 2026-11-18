@@ -543,7 +543,7 @@ _STAGE_ALLOWED_FIELDS = {
         "dead_feature_fraction",
         "norm_drift",
     },
-    "decompose": {"status", "cosine", "relative_l2"},
+    "decompose": {"status", "cosine", "relative_l2", "norm"},
     "discover": {"status", "association_count", "association_sha256"},
     "select": {
         "schema_version",
@@ -585,6 +585,7 @@ _STAGE_ALLOWED_FIELDS = {
         "prepare_sha256",
         "selection_freeze_sha256",
         "observations",
+        "metrics",
     },
     "code_preservation": {
         "status",
@@ -599,6 +600,7 @@ _STAGE_ALLOWED_FIELDS = {
         "evalplus_revision",
         "job_manifest_sha256",
         "worker_outputs",
+        "metrics",
     },
     "finalize": {
         "status",
@@ -615,16 +617,13 @@ def _validate_vector_spec(
     *,
     dense: bool,
 ) -> None:
-    required = (
-        {"dose", "desired_effect", "vector_sha256", "vector_norm"}
-        if dense
-        else {"dose", "vector_sha256", "vector_norm"}
-    )
-    allowed = required | {
+    dense_fields = {"dose", "desired_effect", "vector_sha256", "vector_norm"}
+    trace_fields = {
         "vector",
         "intervention",
         "cardinality",
         "actual_cardinality",
+        "dose",
         "dense_desired_effect",
         "desired_effect",
         "within_dense_margin",
@@ -632,14 +631,63 @@ def _validate_vector_spec(
         "defensive_kl",
         "feature_indices",
         "coefficients",
+        "vector_sha256",
+        "vector_norm",
     }
-    if not required.issubset(spec) or set(spec) - allowed:
+    expected = dense_fields if dense else trace_fields
+    if set(spec) != expected:
         raise ValueError("selection vector spec schema changed")
     _require_sha256(spec["vector_sha256"], "selection vector SHA-256")
     if _finite_number(spec, "dose") < 0 or _finite_number(
         spec, "vector_norm"
     ) <= 0:
         raise ValueError("selection vector dose/norm is invalid")
+    if dense:
+        _finite_number(spec, "desired_effect")
+        return
+    if (
+        spec.get("vector") not in SELECTION_VECTORS
+        or spec.get("intervention") not in SELECTION_INTERVENTIONS
+        or not isinstance(spec.get("cardinality"), int)
+        or isinstance(spec.get("cardinality"), bool)
+        or not isinstance(spec.get("actual_cardinality"), int)
+        or isinstance(spec.get("actual_cardinality"), bool)
+        or not isinstance(spec.get("within_dense_margin"), bool)
+    ):
+        raise ValueError("selection trace identity or types changed")
+    indices = spec.get("feature_indices")
+    coefficients = spec.get("coefficients")
+    if (
+        not isinstance(indices, list)
+        or not isinstance(coefficients, list)
+        or not indices
+        or any(
+            isinstance(item, bool) or not isinstance(item, int)
+            for item in indices
+        )
+        or len(indices) != len(set(indices))
+        or len(coefficients) != len(indices)
+        or int(spec["actual_cardinality"]) != len(indices)
+    ):
+        raise ValueError("selection trace components changed")
+    for field in (
+        "dense_desired_effect",
+        "desired_effect",
+        "defensive_false_refusal",
+        "defensive_kl",
+    ):
+        _finite_number(spec, field)
+    for coefficient in coefficients:
+        if isinstance(coefficient, bool):
+            raise ValueError("selection coefficients must be finite numbers")
+        try:
+            numeric = float(coefficient)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "selection coefficients must be finite numbers"
+            ) from exc
+        if not math.isfinite(numeric):
+            raise ValueError("selection coefficients must be finite numbers")
 
 
 def _validate_selection_freeze(freeze: Mapping[str, Any]) -> None:
@@ -647,6 +695,8 @@ def _validate_selection_freeze(freeze: Mapping[str, Any]) -> None:
         raise ValueError("select schema is incomplete")
     if selection_freeze_digest(freeze) != freeze["selection_freeze_sha256"]:
         raise ValueError("selection_freeze_sha256 mismatch")
+    if freeze.get("schema_version") != 1 or freeze.get("status") != "selection_frozen":
+        raise ValueError("selection freeze status or version changed")
     if set(freeze["dense"]) != set(SELECTION_INTERVENTIONS):
         raise ValueError("dense freeze interventions changed")
     if tuple(freeze["cardinality_grid"]) != FROZEN_CARDINALITIES or tuple(
@@ -673,15 +723,133 @@ def _validate_selection_freeze(freeze: Mapping[str, Any]) -> None:
         raise ValueError("selection decision trace coverage changed")
     for row in freeze["decision_trace"]:
         _validate_vector_spec(row, dense=False)
-    trace_hashes = {
-        _sha256_value(row) for row in freeze["decision_trace"]
+    if freeze.get("decision_rule") != {
+        "margin": 0.05,
+        "order": [
+            "smallest_dose",
+            "lower_defensive_false_refusal",
+            "lower_defensive_kl",
+            "lower_cardinality",
+        ],
+    }:
+        raise ValueError("selection decision rule changed")
+    indexed: dict[tuple[str, str, int, float], Mapping[str, Any]] = {}
+    for row in freeze["decision_trace"]:
+        key = (
+            str(row.get("vector")),
+            str(row.get("intervention")),
+            int(row.get("cardinality", -1)),
+            _finite_number(row, "dose"),
+        )
+        if key in indexed:
+            raise ValueError("selection decision trace contains duplicates")
+        if key[0] not in SELECTION_VECTORS or key[1] not in SELECTION_INTERVENTIONS:
+            raise ValueError("selection decision trace identity changed")
+        if key[2] not in FROZEN_CARDINALITIES or key[3] not in FROZEN_DOSES:
+            raise ValueError("selection decision trace grid changed")
+        dense_effect = _finite_number(row, "dense_desired_effect")
+        if dense_effect != _finite_number(
+            freeze["dense"][key[1]], "desired_effect"
+        ):
+            raise ValueError("selection dense effect differs from freeze")
+        qualifies = _finite_number(row, "desired_effect") >= dense_effect - 0.05
+        if row.get("within_dense_margin") is not qualifies:
+            raise ValueError("selection qualifying decision changed")
+        indexed[key] = row
+    expected = {
+        (vector, intervention, cardinality, dose)
+        for vector in SELECTION_VECTORS
+        for intervention in SELECTION_INTERVENTIONS
+        for cardinality in FROZEN_CARDINALITIES
+        for dose in FROZEN_DOSES
     }
-    if any(
-        _sha256_value(spec) not in trace_hashes
-        for by_intervention in freeze["selections"].values()
-        for spec in by_intervention.values()
+    if set(indexed) != expected:
+        raise ValueError("selection decision trace coverage changed")
+    for vector in SELECTION_VECTORS:
+        for intervention in SELECTION_INTERVENTIONS:
+            eligible = [
+                row
+                for key, row in indexed.items()
+                if key[0] == vector
+                and key[1] == intervention
+                and bool(row["within_dense_margin"])
+            ]
+            if not eligible:
+                raise ValueError(
+                    f"no qualifying selection for {vector}/{intervention}"
+                )
+            recomputed = min(
+                eligible,
+                key=lambda row: (
+                    _finite_number(row, "dose"),
+                    _finite_number(row, "defensive_false_refusal"),
+                    _finite_number(row, "defensive_kl"),
+                    int(row["actual_cardinality"]),
+                ),
+            )
+            if freeze["selections"][vector][intervention] != recomputed:
+                raise ValueError(
+                    "frozen selection differs from recomputed selection"
+                )
+
+
+def _validate_sae_quality(results: Mapping[str, Any]) -> None:
+    if set(results) != _STAGE_ALLOWED_FIELDS["sae_quality"]:
+        raise ValueError("sae_quality schema is incomplete")
+    metrics = {
+        field: _finite_number(results, field)
+        for field in (
+            "explained_variance",
+            "mean_cosine",
+            "mean_l0",
+            "dead_feature_fraction",
+            "norm_drift",
+        )
+    }
+    nonfinite = results.get("nonfinite_count")
+    if (
+        isinstance(nonfinite, bool)
+        or not isinstance(nonfinite, int)
+        or nonfinite < 0
     ):
-        raise ValueError("frozen selection is absent from decision trace")
+        raise ValueError("sae_quality nonfinite_count must be a nonnegative integer")
+    if (
+        not 0.0 <= metrics["explained_variance"] <= 1.0
+        or not -1.0 <= metrics["mean_cosine"] <= 1.0
+        or metrics["mean_l0"] < 0
+        or not 0.0 <= metrics["dead_feature_fraction"] <= 1.0
+        or metrics["norm_drift"] < 0
+    ):
+        raise ValueError("sae_quality metrics are outside their valid domains")
+    passed = (
+        metrics["explained_variance"] >= 0.80
+        and metrics["mean_cosine"] >= 0.90
+        and nonfinite == 0
+        and metrics["mean_l0"] == 64.0
+        and metrics["dead_feature_fraction"] <= 0.20
+        and metrics["norm_drift"] <= 0.20
+    )
+    expected_status = "pass" if passed else "sae_quality_failed"
+    if results["status"] != expected_status:
+        raise ValueError(
+            f"sae_quality gates require status {expected_status}"
+        )
+
+
+def _validate_decomposition(results: Mapping[str, Any]) -> None:
+    if set(results) != _STAGE_ALLOWED_FIELDS["decompose"]:
+        raise ValueError("decompose schema is incomplete")
+    cosine = _finite_number(results, "cosine")
+    relative_l2 = _finite_number(results, "relative_l2")
+    norm = _finite_number(results, "norm")
+    if not -1.0 <= cosine <= 1.0 or relative_l2 < 0 or norm < 0:
+        raise ValueError("decomposition metrics are outside their valid domains")
+    passed = cosine >= 0.95 and relative_l2 <= 0.35 and norm > 0
+    expected_status = "pass" if passed else "direction_reconstruction_failed"
+    if results["status"] != expected_status:
+        raise ValueError(
+            f"decomposition gates require status {expected_status}"
+        )
 
 
 def _validate_stage_schema(stage: str, results: Mapping[str, Any]) -> None:
@@ -702,14 +870,25 @@ def _validate_stage_schema(stage: str, results: Mapping[str, Any]) -> None:
     }
     if stage in exact_stages and set(results) != allowed:
         raise ValueError(f"{stage} schema is incomplete")
-    if (
-        stage == "review_merge"
-        and results["status"] == "review_complete"
-        and set(results) != allowed
-    ):
-        raise ValueError("review_merge schema is incomplete")
+    if stage == "review_merge":
+        if results["status"] == "review_complete":
+            if set(results) != allowed:
+                raise ValueError("review_merge schema is incomplete")
+        elif results["status"] == "inconclusive_review":
+            if set(results) != {
+                "status",
+                "blind_review_sha256",
+                "test_split_sha256",
+            }:
+                raise ValueError("review_merge inconclusive schema is incomplete")
+        else:
+            raise ValueError("review merge status is invalid")
     if stage == "select":
         _validate_selection_freeze(results)
+    elif stage == "sae_quality":
+        _validate_sae_quality(results)
+    elif stage == "decompose":
+        _validate_decomposition(results)
 
 
 class SparseStageStore:
@@ -816,6 +995,14 @@ class SparseStageStore:
                 raise ValueError("selection_freeze_sha256 mismatch")
             if freeze != payload["results"]:
                 raise ValueError("selection_freeze.json differs from select stage")
+        if stage == "review_merge":
+            exported = self.load_stage("review_export")
+            if payload["results"].get("blind_review_sha256") != (
+                (exported or {}).get("results") or {}
+            ).get("blind_review_sha256"):
+                raise ValueError(
+                    "review merge differs from 08_review_export blind hash"
+                )
         provenance = payload.get("provenance")
         if not isinstance(provenance, dict) or set(provenance) != set(
             _PROVENANCE_FIELDS
@@ -902,6 +1089,46 @@ class SparseStageStore:
             self.operational_error_path.read_text(encoding="utf-8")
         )
 
+    def load_operational_error(self) -> dict[str, Any] | None:
+        if not self.operational_error_path.is_file():
+            return None
+        payload = json.loads(
+            self.operational_error_path.read_text(encoding="utf-8")
+        )
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version",
+            "status",
+            "operational_success",
+            "stage",
+            "exception_category",
+            "message_sha256",
+            "provenance",
+        }:
+            raise ValueError("operational error schema changed")
+        if (
+            payload["schema_version"] != 1
+            or payload["status"] != "operational_error"
+            or payload["operational_success"] is not False
+            or payload["stage"] not in SPARSE_STAGES
+            or not isinstance(payload["exception_category"], str)
+        ):
+            raise ValueError("operational error record is invalid")
+        _require_sha256(payload["message_sha256"], "operational error message hash")
+        provenance = payload.get("provenance")
+        if not isinstance(provenance, dict) or set(provenance) != set(
+            _PROVENANCE_FIELDS
+        ):
+            raise ValueError("operational error provenance schema changed")
+        if provenance.get("run_id") != self.run_id:
+            return None
+        expected = self._expected_provenance(
+            str(payload["stage"]),
+            self._prior_hash(str(payload["stage"])),
+        )
+        if provenance != expected:
+            raise ValueError("operational error provenance mismatch")
+        return payload
+
     def selection_freeze_sha256(self) -> str:
         select = self.load_stage("select")
         if select is None:
@@ -945,6 +1172,9 @@ class SparseRuntime:
         try:
             if stage not in SPARSE_STAGES:
                 raise ValueError(f"unknown sparse stage: {stage}")
+            terminal_error = self.store.load_operational_error()
+            if terminal_error is not None:
+                return terminal_error
             if stage in {
                 "test",
                 "review_export",
@@ -999,6 +1229,15 @@ class SparseRuntime:
                 "test_split_sha256"
             ) != self.store.test_split_sha256:
                 raise ValueError("review differs from frozen test split")
+            if stage == "review_merge":
+                exported = self.store.load_stage("review_export")
+                exported_hash = (exported or {}).get("results", {}).get(
+                    "blind_review_sha256"
+                )
+                if result.get("blind_review_sha256") != exported_hash:
+                    raise ValueError(
+                        "review merge differs from 08_review_export blind hash"
+                    )
             return self.store.write_stage(stage, result)
         except Exception as error:
             self.store.write_operational_error(stage=stage, error=error)
@@ -1095,6 +1334,43 @@ def condition_dose(condition: str, freeze: Mapping[str, Any]) -> float:
     return float(freeze["selections"][vector][intervention]["dose"])
 
 
+def _validate_compact_metrics(
+    metrics: Any,
+    *,
+    expected_keys: set[str],
+    count: int,
+    include_pass_at_1: bool,
+    context: str,
+) -> dict[str, float]:
+    fields = {
+        "n",
+        "refusal_rate",
+        "mean_kl",
+        "invalid_generation_rate",
+    }
+    if include_pass_at_1:
+        fields.add("pass_at_1")
+    if not isinstance(metrics, Mapping) or set(metrics) != fields:
+        raise ValueError(f"{context} metrics schema changed")
+    if (
+        isinstance(metrics["n"], bool)
+        or not isinstance(metrics["n"], int)
+        or metrics["n"] != count
+    ):
+        raise ValueError(f"{context} metrics count changed")
+    values = {
+        field: _finite_number(metrics, field)
+        for field in fields - {"n"}
+    }
+    for field in expected_keys:
+        if field == "mean_kl":
+            if values[field] < 0:
+                raise ValueError(f"{context} {field} must be nonnegative")
+        elif not 0.0 <= values[field] <= 1.0:
+            raise ValueError(f"{context} {field} must be in [0, 1]")
+    return values
+
+
 def validate_external_transfer_receipt(
     receipt: Mapping[str, Any],
     identity: Mapping[str, Any],
@@ -1102,6 +1378,8 @@ def validate_external_transfer_receipt(
 ) -> None:
     if set(receipt) != _STAGE_ALLOWED_FIELDS["external_transfer"]:
         raise ValueError("external transfer receipt schema changed")
+    if receipt.get("status") != "completed":
+        raise ValueError("external transfer status must be completed")
     if (
         receipt["prepare_sha256"] != identity["prepare_sha256"]
         or receipt["selection_freeze_sha256"]
@@ -1121,9 +1399,20 @@ def validate_external_transfer_receipt(
         for condition in EXTERNAL_CONDITIONS
     }
     observations = receipt.get("observations")
+    observation_fields = {
+        "dataset",
+        "example_id",
+        "content_sha256",
+        "condition",
+        "dose",
+        "refused",
+        "kl_from_baseline",
+        "invalid_generation",
+    }
     if not isinstance(observations, list) or any(
-        set(row)
-        != {"dataset", "example_id", "content_sha256", "condition", "dose"}
+        set(row) != observation_fields
+        or not isinstance(row["refused"], bool)
+        or not isinstance(row["invalid_generation"], bool)
         for row in observations
     ):
         raise ValueError("external transfer observation schema changed")
@@ -1139,6 +1428,64 @@ def validate_external_transfer_receipt(
     }
     if len(observations) != len(actual) or actual != expected:
         raise ValueError("external transfer coverage is incomplete or divergent")
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in observations:
+        kl = _finite_number(row, "kl_from_baseline")
+        if kl < 0:
+            raise ValueError("external transfer KL must be nonnegative")
+        grouped.setdefault(
+            (str(row["dataset"]), str(row["condition"])),
+            [],
+        ).append(row)
+    metrics = receipt.get("metrics")
+    if not isinstance(metrics, Mapping) or set(metrics) != set(
+        identity["datasets"]
+    ):
+        raise ValueError("external transfer metrics coverage changed")
+    for dataset, by_condition in metrics.items():
+        if not isinstance(by_condition, Mapping) or set(by_condition) != set(
+            EXTERNAL_CONDITIONS
+        ):
+            raise ValueError(
+                f"external transfer metrics coverage changed for {dataset}"
+            )
+        for condition, values in by_condition.items():
+            validated = _validate_compact_metrics(
+                values,
+                expected_keys={
+                    "refusal_rate",
+                    "mean_kl",
+                    "invalid_generation_rate",
+                },
+                count=32,
+                include_pass_at_1=False,
+                context=f"external transfer {dataset}/{condition}",
+            )
+            rows = grouped[(str(dataset), str(condition))]
+            computed = {
+                "refusal_rate": sum(row["refused"] for row in rows) / len(rows),
+                "mean_kl": sum(
+                    _finite_number(row, "kl_from_baseline") for row in rows
+                )
+                / len(rows),
+                "invalid_generation_rate": sum(
+                    row["invalid_generation"] for row in rows
+                )
+                / len(rows),
+            }
+            if any(
+                not math.isclose(
+                    validated[field],
+                    computed[field],
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+                for field in computed
+            ):
+                raise ValueError(
+                    "external transfer metrics differ from observations "
+                    f"for {dataset}/{condition}"
+                )
 
 
 def validate_code_preservation_receipt(
@@ -1149,6 +1496,8 @@ def validate_code_preservation_receipt(
 ) -> None:
     if set(receipt) != _STAGE_ALLOWED_FIELDS["code_preservation"]:
         raise ValueError("HumanEval+ receipt schema changed")
+    if receipt.get("status") != "completed":
+        raise ValueError("HumanEval+ status must be completed")
     if (
         receipt["prepare_sha256"] != identity["prepare_sha256"]
         or receipt["selection_freeze_sha256"]
@@ -1201,18 +1550,74 @@ def validate_code_preservation_receipt(
         CODE_PRESERVATION_CONDITIONS
     ):
         raise ValueError("HumanEval+ coverage is incomplete")
+    computed_metrics: dict[str, dict[str, float]] = {}
     for condition, rows in outputs.items():
         if not isinstance(rows, list) or any(
-            set(row) != {"example_id", "content_sha256", "plus_pass"}
+            set(row)
+            != {
+                "example_id",
+                "content_sha256",
+                "plus_pass",
+                "refused",
+                "kl_from_baseline",
+                "invalid_generation",
+            }
             or not isinstance(row["plus_pass"], bool)
+            or not isinstance(row["refused"], bool)
+            or not isinstance(row["invalid_generation"], bool)
             for row in rows
         ):
             raise ValueError("HumanEval+ worker output schema changed")
+        kl_values = [
+            _finite_number(row, "kl_from_baseline") for row in rows
+        ]
+        if any(value < 0 for value in kl_values):
+            raise ValueError("HumanEval+ KL must be nonnegative")
         actual = {
             (row["example_id"], row["content_sha256"]) for row in rows
         }
         if len(rows) != len(actual) or actual != expected_items:
             raise ValueError(f"HumanEval+ coverage differs for {condition}")
+        count = len(rows)
+        computed_metrics[condition] = {
+            "pass_at_1": sum(row["plus_pass"] for row in rows) / count,
+            "refusal_rate": sum(row["refused"] for row in rows) / count,
+            "mean_kl": sum(kl_values) / count,
+            "invalid_generation_rate": sum(
+                row["invalid_generation"] for row in rows
+            )
+            / count,
+        }
+    metrics = receipt.get("metrics")
+    if not isinstance(metrics, Mapping) or set(metrics) != set(
+        CODE_PRESERVATION_CONDITIONS
+    ):
+        raise ValueError("HumanEval+ metrics coverage changed")
+    for condition, values in metrics.items():
+        validated = _validate_compact_metrics(
+            values,
+            expected_keys={
+                "pass_at_1",
+                "refusal_rate",
+                "mean_kl",
+                "invalid_generation_rate",
+            },
+            count=32,
+            include_pass_at_1=True,
+            context=f"HumanEval+ {condition}",
+        )
+        if any(
+            not math.isclose(
+                validated[field],
+                computed_metrics[condition][field],
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            for field in computed_metrics[condition]
+        ):
+            raise ValueError(
+                f"HumanEval+ metrics differ from worker outputs for {condition}"
+            )
 
 
 def evaluate_blind_review(
@@ -1410,7 +1815,14 @@ def _default_stage_runner(
                 artifacts_dir / "review" / "responses_reviewed.jsonl",
             )
         except (FileNotFoundError, ValueError):
-            return {"status": "inconclusive_review", "review_count": 0}
+            exported = store.load_stage("review_export")
+            return {
+                "status": "inconclusive_review",
+                "test_split_sha256": store.test_split_sha256,
+                "blind_review_sha256": (exported or {})["results"][
+                    "blind_review_sha256"
+                ],
+            }
     if stage == "finalize":
         evaluation = evaluate_blind_review(
             artifacts_dir / "review" / "private_manifest.json",
