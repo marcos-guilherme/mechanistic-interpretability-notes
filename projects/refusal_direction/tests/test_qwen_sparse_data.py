@@ -340,6 +340,65 @@ def test_defensive_template_drafts_are_fixed_deterministic_counterparts() -> Non
     assert len({row["defensive_sha256"] for row in candidates}) == 256
 
 
+def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
+    prepare = load_script("prepare_qwen_sparse_pairs")
+    rows = [
+        {
+            "pair_id": "pair-0038",
+            "category": "Privilege Escalation",
+            "source_identity": "mitre:831:old0038",
+            "offensive_prompt": "An engineer for the NSO group escalates access.",
+            "offensive_sha256": "old-hash-0038",
+            "source_repository": "source",
+        },
+        {
+            "pair_id": "pair-0160",
+            "category": "C2",
+            "source_identity": "mitre:20:old0160",
+            "offensive_prompt": "An NSO Group engineer uses Bluetooth.",
+            "offensive_sha256": "old-hash-0160",
+            "source_repository": "source",
+        },
+        {
+            "pair_id": "pair-0200",
+            "category": "Control",
+            "source_identity": "mitre:99:unchanged",
+            "offensive_prompt": "NSO Group must remain outside the target IDs.",
+            "offensive_sha256": "unchanged-hash",
+            "source_repository": "source",
+        },
+    ]
+
+    sanitized = prepare.sanitize_nso_seed_rows(rows)
+
+    assert prepare._parse_args(
+        ["--sanitize-nso-seeds"]
+    ).sanitize_nso_seeds is True
+    assert sanitized[2] == rows[2]
+    for original, result in zip(rows[:2], sanitized[:2], strict=True):
+        expected_prompt = result["offensive_prompt"]
+        expected_hash = prompt_content_hash(expected_prompt)
+        source_index = original["source_identity"].split(":")[1]
+        assert "nso group" not in expected_prompt.lower()
+        assert "a commercial spyware vendor" in expected_prompt
+        assert result["pair_id"] == original["pair_id"]
+        assert result["category"] == original["category"]
+        assert result["offensive_sha256"] == expected_hash
+        assert result["source_identity"] == (
+            f"mitre:{source_index}:{expected_hash[:16]}:sanitized"
+        )
+        assert result["source_sanitization"] == {
+            "method": "case-insensitive literal replacement",
+            "original_text": "NSO Group",
+            "replacement_text": "a commercial spyware vendor",
+            "original_offensive_sha256": original["offensive_sha256"],
+            "original_source_identity": original["source_identity"],
+        }
+        assert result["source_repository"] == original["source_repository"]
+
+    assert prepare.sanitize_nso_seed_rows(sanitized) == sanitized
+
+
 def test_draft_validation_requires_complete_matching_counterparts() -> None:
     prepare = load_script("prepare_qwen_sparse_pairs")
     seeds = [
