@@ -34,7 +34,7 @@ REMOTE_CHECKPOINT_STAGING = Path("/content/sparse_refusal_checkpoint.pt")
 REMOTE_CHECKPOINT_MANIFEST = Path(
     "/content/sparse_refusal_checkpoint.pt.manifest.json"
 )
-REMOTE_TRAINING_STATUS = Path("/content/sparse_refusal_training_status.json")
+REMOTE_CHECKPOINT_STATUS = Path("/content/sparse_refusal_checkpoint_status.json")
 DIRECTION_RELATIVE = Path(
     "artifacts/qwen25_coder_7b/selected_direction.pt"
 )
@@ -45,11 +45,12 @@ REVIEWED_PAIRS_RELATIVE = (
     SPARSE_ARTIFACTS_RELATIVE / "pairs" / "reviewed.jsonl"
 )
 CHECKPOINT_RELATIVE = SPARSE_ARTIFACTS_RELATIVE / "sae_checkpoint.pt"
-TRAINING_STATUS_RELATIVE = SPARSE_ARTIFACTS_RELATIVE / "training_status.json"
+CHECKPOINT_STATUS_RELATIVE = SPARSE_ARTIFACTS_RELATIVE / "checkpoint_status.json"
 EXPECTED_DIRECTION_SHA256 = (
     "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086"
 )
 COPY_BUFFER_BYTES = 8 * 1024**2
+PINNED_UV_VERSION = "0.12.1"
 
 
 def sha256_file(path: Path) -> str:
@@ -228,7 +229,7 @@ def atomic_install_checkpoint_pair(
     project: Path,
 ) -> tuple[Path, Path]:
     checkpoint_destination = Path(project) / CHECKPOINT_RELATIVE
-    status_destination = Path(project) / TRAINING_STATUS_RELATIVE
+    status_destination = Path(project) / CHECKPOINT_STATUS_RELATIVE
     checkpoint_destination.parent.mkdir(parents=True, exist_ok=True)
     incoming_checkpoint: Path | None = None
     incoming_status: Path | None = None
@@ -289,7 +290,7 @@ def install_sparse_inputs(
     reviewed_pairs_sha256: str,
     checkpoint_staging: Path | None = None,
     checkpoint_manifest: Path | None = None,
-    training_status_staging: Path | None = None,
+    checkpoint_status_staging: Path | None = None,
     expected_direction_sha256: str = EXPECTED_DIRECTION_SHA256,
 ) -> dict[str, object]:
     """Install the frozen direction, reviewed pairs and optional resume pair."""
@@ -321,30 +322,57 @@ def install_sparse_inputs(
         for value in (
             checkpoint_staging,
             checkpoint_manifest,
-            training_status_staging,
+            checkpoint_status_staging,
         )
     ):
         if (
             checkpoint_staging is None
             or checkpoint_manifest is None
-            or training_status_staging is None
+            or checkpoint_status_staging is None
         ):
             raise ValueError(
-                "checkpoint, manifest and training status must travel together"
+                "checkpoint, manifest and checkpoint status must travel together"
             )
         status_payload = json.loads(
-            Path(training_status_staging).read_text(encoding="utf-8")
+            Path(checkpoint_status_staging).read_text(encoding="utf-8")
         )
         if not isinstance(status_payload, dict):
-            raise ValueError("training status must be a JSON object")
+            raise ValueError("checkpoint status must be a JSON object")
+        if set(status_payload) != {
+            "schema_version",
+            "identity",
+            "checkpoint_sha256",
+        }:
+            raise ValueError("checkpoint status schema is invalid")
+        if status_payload["schema_version"] != 1:
+            raise ValueError("checkpoint status version is unsupported")
+        identity = status_payload["identity"]
+        if not isinstance(identity, dict) or set(identity) != {
+            "run_id",
+            "implementation_commit",
+            "config_sha256",
+            "corpus_sha256",
+            "model_revision",
+        }:
+            raise ValueError("checkpoint status identity is incomplete")
         checkpoint = assemble_verified_chunks(
             Path(checkpoint_staging),
             Path(checkpoint_manifest),
         )
         checkpoint_hash = sha256_file(checkpoint)
+        if status_payload["checkpoint_sha256"] != checkpoint_hash:
+            raise ValueError("checkpoint status SHA-256 mismatch")
+        source = str(project / "src")
+        if source not in sys.path:
+            sys.path.insert(0, source)
+        from refusal_direction_replication.qwen_sparse_training import (
+            load_training_checkpoint,
+        )
+
+        load_training_checkpoint(checkpoint, identity)
         atomic_install_checkpoint_pair(
             checkpoint,
-            Path(training_status_staging),
+            Path(checkpoint_status_staging),
             project=project,
         )
     return {
@@ -378,14 +406,59 @@ def safe_extract_repository(
         handle.extractall(destination)
 
 
-def install_editable_project(project: Path = REMOTE_ROOT) -> None:
-    """Install exactly the archived project metadata in editable mode."""
+def install_locked_project(project: Path = REMOTE_ROOT) -> None:
+    """Install the archived project from its immutable dependency lock."""
 
     pyproject = Path(project) / "pyproject.toml"
+    lock = Path(project) / "uv.lock"
     if not pyproject.is_file():
         raise FileNotFoundError(f"project metadata missing: {pyproject}")
+    if not lock.is_file():
+        raise FileNotFoundError(f"dependency lock missing: {lock}")
+    version_command = [sys.executable, "-m", "uv", "--version"]
+    try:
+        version = subprocess.run(
+            version_command,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-deps",
+                f"uv=={PINNED_UV_VERSION}",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        version = subprocess.run(
+            version_command,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    if not str(version.stdout).startswith(f"uv {PINNED_UV_VERSION} "):
+        raise RuntimeError(
+            f"bootstrap requires uv {PINNED_UV_VERSION}"
+        )
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-e", str(project)],
+        [
+            sys.executable,
+            "-m",
+            "uv",
+            "sync",
+            "--frozen",
+            "--no-dev",
+            "--project",
+            str(project),
+        ],
         check=True,
         text=True,
         capture_output=True,
@@ -403,11 +476,11 @@ def _reviewed_pairs_hash(path: Path) -> str:
 
 def main() -> int:
     safe_extract_repository()
-    install_editable_project()
+    install_locked_project()
     checkpoint_present = (
         REMOTE_CHECKPOINT_MANIFEST.is_file()
         or REMOTE_CHECKPOINT_STAGING.is_file()
-        or REMOTE_TRAINING_STATUS.is_file()
+        or REMOTE_CHECKPOINT_STATUS.is_file()
     )
     summary = install_sparse_inputs(
         project=REMOTE_ROOT,
@@ -423,8 +496,8 @@ def main() -> int:
         checkpoint_manifest=(
             REMOTE_CHECKPOINT_MANIFEST if checkpoint_present else None
         ),
-        training_status_staging=(
-            REMOTE_TRAINING_STATUS if checkpoint_present else None
+        checkpoint_status_staging=(
+            REMOTE_CHECKPOINT_STATUS if checkpoint_present else None
         ),
     )
     print(json.dumps(summary, sort_keys=True))

@@ -99,12 +99,13 @@ REMOTE_SPARSE_REVIEWED_PAIRS_DIGEST = (
     "/content/sparse_refusal_reviewed_pairs.sha256.json"
 )
 REMOTE_SPARSE_CHECKPOINT_STAGING = "/content/sparse_refusal_checkpoint.pt"
-REMOTE_SPARSE_TRAINING_STATUS = "/content/sparse_refusal_training_status.json"
+REMOTE_SPARSE_CHECKPOINT_STATUS = "/content/sparse_refusal_checkpoint_status.json"
 REMOTE_SPARSE_COMMAND = "/content/qwen_sparse_refusal_command.json"
 REMOTE_SPARSE_CHECKPOINT_ARCHIVE = (
     "/content/qwen_sparse_refusal_checkpoint.tar.gz"
 )
 REMOTE_SPARSE_RESULTS_ARCHIVE = "/content/qwen_sparse_refusal_results.tar.gz"
+REMOTE_SPARSE_REVIEW_ARCHIVE = "/content/qwen_sparse_refusal_review.tar.gz"
 SPARSE_CHUNK_BYTES = LAB_LENS_CHUNK_BYTES
 SPARSE_FAILURE_MARKERS = (
     "Traceback",
@@ -561,6 +562,47 @@ def _require_regular_file(path: Path, label: str) -> Path:
     return path
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_sparse_checkpoint_pair(
+    checkpoint: Path,
+    status: Path,
+) -> dict[str, str]:
+    payload = json.loads(Path(status).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "identity",
+        "checkpoint_sha256",
+    }:
+        raise ValueError("sparse checkpoint status schema is invalid")
+    identity = payload["identity"]
+    required = {
+        "run_id",
+        "implementation_commit",
+        "config_sha256",
+        "corpus_sha256",
+        "model_revision",
+    }
+    if (
+        payload["schema_version"] != 1
+        or not isinstance(identity, dict)
+        or set(identity) != required
+    ):
+        raise ValueError("sparse checkpoint status identity is invalid")
+    normalized = {key: str(value) for key, value in identity.items()}
+    if any(not value for value in normalized.values()):
+        raise ValueError("sparse checkpoint status identity is empty")
+    if payload["checkpoint_sha256"] != _sha256_path(checkpoint):
+        raise ValueError("sparse checkpoint status SHA-256 mismatch")
+    return normalized
+
+
 def require_sparse_sources(
     project: Path,
 ) -> tuple[Path, Path, tuple[Path, Path] | None]:
@@ -588,21 +630,23 @@ def require_sparse_sources(
         / "qwen25_coder_sparse_refusal"
         / "sae_checkpoint.pt"
     )
-    status = checkpoint.with_name("training_status.json")
+    status = checkpoint.with_name("checkpoint_status.json")
     checkpoint_exists = checkpoint.exists() or checkpoint.is_symlink()
     status_exists = status.exists() or status.is_symlink()
     if checkpoint_exists != status_exists:
         raise ValueError(
-            "sparse checkpoint and training status must be present together"
+            "sparse checkpoint and checkpoint status must be present together"
         )
     resume = (
         (
             _require_regular_file(checkpoint, "sparse checkpoint"),
-            _require_regular_file(status, "sparse training status"),
+            _require_regular_file(status, "sparse checkpoint status"),
         )
         if checkpoint_exists
         else None
     )
+    if resume is not None:
+        _validate_sparse_checkpoint_pair(*resume)
     return direction, pairs, resume
 
 
@@ -666,7 +710,7 @@ def upload_sparse_sources(
             upload_command(
                 session,
                 status,
-                REMOTE_SPARSE_TRAINING_STATUS,
+                REMOTE_SPARSE_CHECKPOINT_STATUS,
             )
         )
 
@@ -678,6 +722,7 @@ def _write_sparse_remote_action(action: str, destination: Path) -> Path:
         "run",
         "pack-checkpoint",
         "pack-results",
+        "pack-review",
     }:
         raise ValueError(f"unknown sparse remote action: {action}")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -756,6 +801,12 @@ def _extract_sparse_archive(
         names = [member.name.replace("\\", "/") for member in members]
         if len(names) != len(set(names)):
             raise ValueError("sparse archive contains duplicate members")
+        checkpoint_suffixes = {
+            "artifacts/qwen25_coder_sparse_refusal/sae_checkpoint.pt",
+            "artifacts/qwen25_coder_sparse_refusal/checkpoint_status.json",
+        }
+        if checkpoint_suffixes.issubset(allowlist) and set(names) != checkpoint_suffixes:
+            raise ValueError("checkpoint/status pair must both be present")
         for member, name in zip(members, names, strict=True):
             if (
                 name not in allowlist
@@ -773,6 +824,11 @@ def _extract_sparse_archive(
                 destination = staging / Path(name).name
                 with destination.open("wb") as output:
                     shutil.copyfileobj(source, output)
+            if checkpoint_suffixes.issubset(allowlist):
+                _validate_sparse_checkpoint_pair(
+                    staging / "sae_checkpoint.pt",
+                    staging / "checkpoint_status.json",
+                )
             incoming: dict[Path, Path] = {}
             backups: dict[Path, Path] = {}
             try:
@@ -853,7 +909,7 @@ def fetch_sparse_checkpoint(
         allowlist=frozenset(
             {
                 f"{prefix}/sae_checkpoint.pt",
-                f"{prefix}/training_status.json",
+                f"{prefix}/checkpoint_status.json",
             }
         ),
         project=project,
@@ -905,6 +961,26 @@ def fetch_sparse_results(
     )
 
 
+def fetch_sparse_review(
+    session: str,
+    *,
+    project: Path = PROJECT,
+    timeout: int = 600,
+) -> tuple[Path, ...]:
+    relative = (
+        "artifacts/qwen25_coder_sparse_refusal/review/blind_review.jsonl"
+    )
+    return _fetch_sparse_archive(
+        session,
+        action="pack-review",
+        remote_archive=REMOTE_SPARSE_REVIEW_ARCHIVE,
+        local_name="qwen_sparse_refusal_review.tar.gz",
+        allowlist=frozenset({relative}),
+        project=project,
+        timeout=timeout,
+    )
+
+
 def _upload_sparse_review_labels(session: str, project: Path = PROJECT) -> None:
     labels = (
         project
@@ -942,7 +1018,7 @@ def _handle_sparse_failure(session: str) -> int:
         PROJECT
         / "artifacts"
         / "qwen25_coder_sparse_refusal"
-        / "training_status.json"
+        / "run_status.json"
     )
     if status.is_file():
         try:
@@ -1148,6 +1224,7 @@ def main() -> int:
             "sparse-run",
             "sparse-fetch-checkpoint",
             "sparse-fetch-results",
+            "sparse-fetch-review",
             "stop",
         ),
     )
@@ -1519,6 +1596,11 @@ def main() -> int:
         )
         if returncode != 0 or sparse_output_has_failure(output):
             return _handle_sparse_failure(session)
+        if (
+            args.action == "sparse-run"
+            and "stage=review_export status=review_pending" in output
+        ):
+            fetch_sparse_review(session, timeout=args.timeout)
     elif args.action == "sparse-fetch-checkpoint":
         if args.profile != SPARSE_REFUSAL:
             parser.error(
@@ -1533,6 +1615,13 @@ def main() -> int:
                 f"{SPARSE_REFUSAL}"
             )
         fetch_sparse_results(session, timeout=args.timeout)
+    elif args.action == "sparse-fetch-review":
+        if args.profile != SPARSE_REFUSAL:
+            parser.error(
+                "sparse-fetch-review is only available for --profile "
+                f"{SPARSE_REFUSAL}"
+            )
+        fetch_sparse_review(session, timeout=args.timeout)
     elif args.action == "lab":
         if args.profile != "qwen25-coder-lab":
             parser.error("lab is only available for --profile qwen25-coder-lab")
@@ -1601,6 +1690,21 @@ def main() -> int:
                         "WARNING: final v2 checkpoint backup failed "
                         f"({type(exc).__name__}: {exc}); the previous local "
                         "bundle was kept. Stopping the session anyway.",
+                        file=sys.stderr,
+                    )
+            elif args.profile == SPARSE_REFUSAL:
+                try:
+                    fetch_sparse_checkpoint(
+                        session,
+                        project=PROJECT,
+                        timeout=STOP_BACKUP_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:  # noqa: BLE001 - stop must still run
+                    backup_failed = True
+                    print(
+                        "WARNING: final sparse checkpoint fetch failed "
+                        f"({type(exc).__name__}); the previous local pair was "
+                        "kept. Stopping the session anyway.",
                         file=sys.stderr,
                     )
         finally:

@@ -10,7 +10,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Protocol
 
 
 REMOTE_ROOT = Path("/content/refusal_direction")
@@ -19,12 +19,16 @@ REMOTE_CHECKPOINT_ARCHIVE = Path(
     "/content/qwen_sparse_refusal_checkpoint.tar.gz"
 )
 REMOTE_RESULTS_ARCHIVE = Path("/content/qwen_sparse_refusal_results.tar.gz")
+REMOTE_REVIEW_ARCHIVE = Path("/content/qwen_sparse_refusal_review.tar.gz")
 SPARSE_PROFILE = "qwen25_coder_sparse_refusal.json"
 SPARSE_RESULTS_DIR = "results/qwen25_coder_sparse_refusal"
 SPARSE_ARTIFACTS_DIR = "artifacts/qwen25_coder_sparse_refusal"
 SPARSE_CHECKPOINT_ALLOWLIST = (
     f"{SPARSE_ARTIFACTS_DIR}/sae_checkpoint.pt",
-    f"{SPARSE_ARTIFACTS_DIR}/training_status.json",
+    f"{SPARSE_ARTIFACTS_DIR}/checkpoint_status.json",
+)
+SPARSE_REVIEW_ALLOWLIST = (
+    f"{SPARSE_ARTIFACTS_DIR}/review/blind_review.jsonl",
 )
 SPARSE_RESULTS_ALLOWLIST = (
     *(f"{SPARSE_RESULTS_DIR}/{index:02d}_{stage}.json" for index, stage in enumerate(
@@ -49,8 +53,158 @@ SPARSE_RESULTS_ALLOWLIST = (
     f"{SPARSE_RESULTS_DIR}/execution_manifest.json",
 )
 REMOTE_ACTIONS = frozenset(
-    {"clean-staging", "pilot", "run", "pack-checkpoint", "pack-results"}
+    {
+        "clean-staging",
+        "pilot",
+        "run",
+        "pack-checkpoint",
+        "pack-results",
+        "pack-review",
+    }
 )
+
+
+class SparseStageExecutor(Protocol):
+    """Heavy A100 operations used by the contract-enforcing stage runner."""
+
+    def prepare_environment(self, root: Path) -> Mapping[str, str]:
+        """Create the private corpus and return its immutable identity."""
+
+    def run_stage(
+        self,
+        stage: str,
+        *,
+        root: Path,
+        artifacts_dir: Path,
+        store: Any,
+        resume_from: Path | None,
+    ) -> Mapping[str, Any]:
+        """Execute one heavy stage and return its compact receipt."""
+
+
+class SparseRemoteStageRunner:
+    """Join heavy operations to Task 4 validation without receipt fixtures."""
+
+    def __init__(
+        self,
+        root: Path,
+        executor: SparseStageExecutor,
+        *,
+        resume_from: Path | None = None,
+    ) -> None:
+        self.root = Path(root)
+        self.artifacts_dir = (
+            self.root / "artifacts" / "qwen25_coder_sparse_refusal"
+        )
+        self.executor = executor
+        self.resume_from = Path(resume_from) if resume_from else None
+
+    def __call__(self, *, stage: str, store: Any) -> Mapping[str, Any]:
+        if stage in {"review_export", "review_merge", "finalize"}:
+            from refusal_direction_replication.qwen_sparse_runtime import (
+                _default_stage_runner,
+            )
+
+            return _default_stage_runner(
+                stage=stage,
+                artifacts_dir=self.artifacts_dir,
+                root=self.root,
+                store=store,
+            )
+        return self.executor.run_stage(
+            stage,
+            root=self.root,
+            artifacts_dir=self.artifacts_dir,
+            store=store,
+            resume_from=self.resume_from if stage == "sae_fit" else None,
+        )
+
+
+def build_remote_stage_runner(
+    root: Path,
+    executor: SparseStageExecutor,
+    *,
+    resume_from: Path | None = None,
+) -> SparseRemoteStageRunner:
+    return SparseRemoteStageRunner(
+        root,
+        executor,
+        resume_from=resume_from,
+    )
+
+
+def create_production_executor(root: Path) -> SparseStageExecutor:
+    source = str(Path(root) / "src")
+    if source not in sys.path:
+        sys.path.insert(0, source)
+    from refusal_direction_replication.qwen_sparse_remote import (
+        ProductionSparseStageExecutor,
+    )
+
+    return ProductionSparseStageExecutor(Path(root))
+
+
+def activate_locked_environment(root: Path = REMOTE_ROOT) -> Path:
+    """Expose only the environment created by the frozen project sync."""
+
+    root = Path(root)
+    if os.name == "nt":
+        site_packages = root / ".venv" / "Lib" / "site-packages"
+    else:
+        site_packages = (
+            root
+            / ".venv"
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
+    if not site_packages.is_dir():
+        raise FileNotFoundError(
+            f"frozen project environment missing: {site_packages}"
+        )
+    location = str(site_packages)
+    if location in sys.path:
+        sys.path.remove(location)
+    sys.path.insert(0, location)
+    return site_packages
+
+
+def _checkpoint_identity(
+    root: Path,
+) -> tuple[dict[str, str] | None, Path | None]:
+    artifacts = Path(root) / SPARSE_ARTIFACTS_DIR
+    checkpoint = artifacts / "sae_checkpoint.pt"
+    status = artifacts / "checkpoint_status.json"
+    present = (checkpoint.is_file(), status.is_file())
+    if present == (False, False):
+        return None, None
+    if present != (True, True):
+        raise ValueError("checkpoint/status pair must both be present")
+    payload = json.loads(status.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "identity",
+        "checkpoint_sha256",
+    }:
+        raise ValueError("checkpoint status schema is invalid")
+    if payload["schema_version"] != 1:
+        raise ValueError("checkpoint status version is unsupported")
+    identity = payload["identity"]
+    required = {
+        "run_id",
+        "implementation_commit",
+        "config_sha256",
+        "corpus_sha256",
+        "model_revision",
+    }
+    if not isinstance(identity, dict) or set(identity) != required:
+        raise ValueError("checkpoint status identity is incomplete")
+    if payload["checkpoint_sha256"] != _sha256_file(checkpoint):
+        raise ValueError("checkpoint status SHA-256 mismatch")
+    normalized = {key: str(value) for key, value in identity.items()}
+    if any(not value for value in normalized.values()):
+        raise ValueError("checkpoint status identity contains an empty value")
+    return normalized, checkpoint
 
 
 def _archive_command(
@@ -79,6 +233,13 @@ def sparse_results_archive_command() -> str:
     return _archive_command(
         REMOTE_RESULTS_ARCHIVE,
         SPARSE_RESULTS_ALLOWLIST,
+    )
+
+
+def sparse_review_archive_command() -> str:
+    return _archive_command(
+        REMOTE_REVIEW_ARCHIVE,
+        SPARSE_REVIEW_ALLOWLIST,
     )
 
 
@@ -125,6 +286,15 @@ def pack_checkpoint_archive(
     root: Path = REMOTE_ROOT,
     archive: Path = REMOTE_CHECKPOINT_ARCHIVE,
 ) -> Path:
+    present = tuple(
+        _safe_allowlisted_path(root, relative).is_file()
+        for relative in SPARSE_CHECKPOINT_ALLOWLIST
+    )
+    if present != (True, True):
+        raise ValueError("checkpoint/status pair must both be present")
+    identity, checkpoint = _checkpoint_identity(Path(root))
+    if identity is None or checkpoint is None:
+        raise ValueError("checkpoint/status pair must both be present")
     return _pack_allowlisted(
         root,
         archive,
@@ -143,6 +313,13 @@ def pack_results_archive(
     )
 
 
+def pack_review_archive(
+    root: Path = REMOTE_ROOT,
+    archive: Path = REMOTE_REVIEW_ARCHIVE,
+) -> Path:
+    return _pack_allowlisted(root, archive, SPARSE_REVIEW_ALLOWLIST)
+
+
 def clean_sparse_staging(content_root: Path = Path("/content")) -> None:
     exact_names = {
         "sparse_refusal_direction.pt",
@@ -153,7 +330,7 @@ def clean_sparse_staging(content_root: Path = Path("/content")) -> None:
         "sparse_refusal_checkpoint.pt",
         "sparse_refusal_checkpoint.pt.manifest.json",
         "sparse_refusal_checkpoint.pt.assembling",
-        "sparse_refusal_training_status.json",
+        "sparse_refusal_checkpoint_status.json",
     }
     prefixes = (
         "sparse_refusal_direction.pt.part",
@@ -171,6 +348,7 @@ def run_sparse_action(
     *,
     root: Path = REMOTE_ROOT,
     run_function: Callable[..., dict[str, Any]] | None = None,
+    executor: SparseStageExecutor | None = None,
 ) -> dict[str, Any]:
     if action not in {"pilot", "run"}:
         raise ValueError(f"unsupported sparse stage action: {action}")
@@ -183,14 +361,40 @@ def run_sparse_action(
         )
 
         run_function = run_qwen_sparse_refusal
+    if executor is None:
+        executor = create_production_executor(Path(root))
+    prepared = dict(executor.prepare_environment(Path(root)))
+    identity, resume_from = _checkpoint_identity(Path(root))
+    if identity is not None:
+        for field in (
+            "run_id",
+            "implementation_commit",
+            "config_sha256",
+            "model_revision",
+            "corpus_sha256",
+        ):
+            if prepared.get(field) != identity[field]:
+                raise ValueError(
+                    f"restored checkpoint identity mismatch for {field}"
+                )
+    resolved = identity or prepared
+    stage_runner = build_remote_stage_runner(
+        Path(root),
+        executor,
+        resume_from=resume_from,
+    )
     return run_function(
         Path(root),
         SPARSE_PROFILE,
+        run_id=resolved.get("run_id"),
+        implementation_commit=resolved.get("implementation_commit"),
+        corpus_sha256=resolved.get("corpus_sha256"),
+        stage_runner=stage_runner,
         stop_after="hardware_pilot" if action == "pilot" else None,
     )
 
 
-def write_training_status(
+def write_run_status(
     payload: dict[str, Any],
     *,
     root: Path = REMOTE_ROOT,
@@ -217,11 +421,11 @@ def write_training_status(
     destination = (
         Path(root)
         / SPARSE_ARTIFACTS_DIR
-        / "training_status.json"
+        / "run_status.json"
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".training_status.",
+        prefix=".run_status.",
         suffix=".tmp",
         dir=destination.parent,
     )
@@ -253,7 +457,7 @@ def preserve_last_completed_status(root: Path = REMOTE_ROOT) -> Path | None:
         if isinstance(payload, dict):
             latest = payload
     return (
-        write_training_status(latest, root=root)
+        write_run_status(latest, root=root)
         if latest is not None
         else None
     )
@@ -338,6 +542,11 @@ def remote_main() -> int:
         path = pack_results_archive()
         print(f"results_archive={path}")
         return 0
+    if action == "pack-review":
+        path = pack_review_archive()
+        print(f"review_archive={path}")
+        return 0
+    activate_locked_environment()
     try:
         payload = run_sparse_action(action)
     except BaseException:
@@ -347,7 +556,7 @@ def remote_main() -> int:
         except FileNotFoundError:
             pass
         raise
-    write_training_status(payload)
+    write_run_status(payload)
     write_execution_manifest()
     experiment = str(payload.get("experiment", "unknown"))
     results = payload.get("results")
