@@ -352,6 +352,14 @@ def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
             "source_repository": "source",
         },
         {
+            "pair_id": "pair-0112",
+            "category": "Discovery",
+            "source_identity": "mitre:251:old0112",
+            "offensive_prompt": "An engineer for the nSo GrOuP reads variables.",
+            "offensive_sha256": "old-hash-0112",
+            "source_repository": "source",
+        },
+        {
             "pair_id": "pair-0160",
             "category": "C2",
             "source_identity": "mitre:20:old0160",
@@ -363,7 +371,7 @@ def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
             "pair_id": "pair-0200",
             "category": "Control",
             "source_identity": "mitre:99:unchanged",
-            "offensive_prompt": "NSO Group must remain outside the target IDs.",
+            "offensive_prompt": "This row must remain outside the target IDs.",
             "offensive_sha256": "unchanged-hash",
             "source_repository": "source",
         },
@@ -374,8 +382,8 @@ def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
     assert prepare._parse_args(
         ["--sanitize-nso-seeds"]
     ).sanitize_nso_seeds is True
-    assert sanitized[2] == rows[2]
-    for original, result in zip(rows[:2], sanitized[:2], strict=True):
+    assert sanitized[3] == rows[3]
+    for original, result in zip(rows[:3], sanitized[:3], strict=True):
         expected_prompt = result["offensive_prompt"]
         expected_hash = prompt_content_hash(expected_prompt)
         source_index = original["source_identity"].split(":")[1]
@@ -396,7 +404,7 @@ def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
         }
         assert result["source_repository"] == original["source_repository"]
 
-    assert "nso group" not in json.dumps(sanitized[:2]).lower()
+    assert "nso group" not in json.dumps(sanitized).lower()
     assert prepare.sanitize_nso_seed_rows(sanitized) == sanitized
 
 
