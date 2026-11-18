@@ -1,4 +1,4 @@
-"""Human review interface for sparse-refusal counterfactual pairs."""
+"""Review interfaces for sparse-refusal counterfactual pairs."""
 
 from __future__ import annotations
 
@@ -28,6 +28,9 @@ from refusal_direction_replication.qwen_sparse_data import (  # noqa: E402
 
 REVIEW_COMMANDS = frozenset({"a", "r", "e", "b", "q"})
 EXPECTED_PAIR_COUNT = 256
+AI_REVIEW_SHARDS = tuple(
+    f"ai_review_{index:02d}.jsonl" for index in range(4)
+)
 
 
 def _required_text(
@@ -195,9 +198,107 @@ def freeze_approved_reviews(
             "reviewed_at": source["reviewed_at"],
             "original_hashes": dict(source["original_hashes"]),
             "edited_hashes": dict(source["edited_hashes"]),
+            **{
+                field: source[field]
+                for field in (
+                    "review_method",
+                    "reviewer_model",
+                    "ai_review_notes",
+                )
+                if field in source
+            },
         }
         for record, source in zip(reviewed, approved, strict=True)
     ]
+
+
+def freeze_ai_assisted_reviews(pair_dir: Path) -> bool:
+    """Record AI-assisted decisions and freeze only unanimous approvals."""
+    candidates = _read_jsonl(pair_dir / "candidates.jsonl")
+    if len(candidates) != EXPECTED_PAIR_COUNT:
+        raise ValueError(
+            f"expected {EXPECTED_PAIR_COUNT} candidates, got {len(candidates)}"
+        )
+    candidate_ids = [
+        _required_text(candidate, "pair_id", "<candidate>")
+        for candidate in candidates
+    ]
+    if len(set(candidate_ids)) != EXPECTED_PAIR_COUNT:
+        raise ValueError("candidate coverage requires exactly 256 unique IDs")
+
+    ai_rows: list[dict[str, Any]] = []
+    for shard_name in AI_REVIEW_SHARDS:
+        shard_path = pair_dir / shard_name
+        if not shard_path.exists():
+            raise ValueError(f"missing AI review shard: {shard_name}")
+        ai_rows.extend(_read_jsonl(shard_path))
+
+    if len(ai_rows) != EXPECTED_PAIR_COUNT:
+        raise ValueError(
+            "AI review coverage requires exactly 256 records, "
+            f"got {len(ai_rows)}"
+        )
+    ai_ids = [
+        _required_text(row, "pair_id", "<AI review>") for row in ai_rows
+    ]
+    if len(set(ai_ids)) != EXPECTED_PAIR_COUNT:
+        raise ValueError("AI review coverage requires exactly 256 unique IDs")
+    candidate_id_set = set(candidate_ids)
+    ai_id_set = set(ai_ids)
+    if ai_id_set != candidate_id_set:
+        missing = sorted(candidate_id_set - ai_id_set)
+        unknown = sorted(ai_id_set - candidate_id_set)
+        raise ValueError(
+            "AI review coverage must exactly match candidates; "
+            f"missing={missing}, unknown={unknown}"
+        )
+
+    ai_by_id: dict[str, Mapping[str, Any]] = {}
+    for row, pair_id in zip(ai_rows, ai_ids, strict=True):
+        if row.get("review_method") != "ai_assisted":
+            raise ValueError(
+                f"{pair_id}: review_method must be ai_assisted"
+            )
+        _required_text(row, "reviewer_model", pair_id)
+        decision = _required_text(row, "ai_decision", pair_id)
+        if decision not in {"approved", "rejected"}:
+            raise ValueError(
+                f"{pair_id}: ai_decision must be approved or rejected"
+            )
+        _required_text(row, "ai_review_notes", pair_id)
+        ai_by_id[pair_id] = row
+
+    review_records = []
+    rejected_ids = []
+    for candidate, pair_id in zip(candidates, candidate_ids, strict=True):
+        ai_row = ai_by_id[pair_id]
+        decision = str(ai_row["ai_decision"])
+        record = build_review_record(candidate, decision=decision)
+        record.update(
+            {
+                "review_method": "ai_assisted",
+                "reviewer_model": str(ai_row["reviewer_model"]),
+                "ai_decision": decision,
+                "ai_review_notes": str(ai_row["ai_review_notes"]),
+            }
+        )
+        review_records.append(record)
+        if decision == "rejected":
+            rejected_ids.append(pair_id)
+
+    _write_jsonl(pair_dir / "reviews.jsonl", review_records)
+    reviewed_path = pair_dir / "reviewed.jsonl"
+    if rejected_ids:
+        reviewed_path.unlink(missing_ok=True)
+        print("Not frozen: rejected AI-assisted decisions:")
+        for pair_id in rejected_ids:
+            print(pair_id)
+        return False
+
+    frozen = freeze_approved_reviews(review_records)
+    _write_jsonl(reviewed_path, frozen)
+    print(f"Frozen {len(frozen)} AI-assisted approved pair identities.")
+    return True
 
 
 def _display_candidate(
@@ -312,6 +413,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Human review for sparse-refusal pairs."
     )
     parser.add_argument("--root", type=Path, default=_PROJECT)
+    parser.add_argument(
+        "--freeze-ai-assisted",
+        action="store_true",
+        help=(
+            "freeze complete AI-assisted shard decisions as exploratory "
+            "provenance; this is not human review"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -323,7 +432,10 @@ def main(argv: list[str] | None = None) -> int:
         / "qwen25_coder_sparse_refusal"
         / "pairs"
     )
-    review_candidates(pair_dir)
+    if args.freeze_ai_assisted:
+        freeze_ai_assisted_reviews(pair_dir)
+    else:
+        review_candidates(pair_dir)
     return 0
 
 

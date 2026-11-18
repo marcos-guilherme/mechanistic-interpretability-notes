@@ -2,6 +2,7 @@ from collections import Counter
 from dataclasses import replace
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 from typing import Any
 
@@ -452,3 +453,136 @@ def test_review_freeze_keeps_approved_text_under_artifacts() -> None:
     assert frozen[0]["approved"] is True
     with pytest.raises(ValueError, match="expected exactly 256 approved"):
         review.freeze_approved_reviews(saved[:-1])
+
+
+def _ai_review_candidates() -> list[dict[str, str]]:
+    candidates = []
+    for index in range(256):
+        offensive = f"Offensive action {index}."
+        defensive = f"Detect and mitigate action {index}."
+        candidates.append(
+            {
+                "pair_id": f"pair-{index:04d}",
+                "category": f"category-{index % 8}",
+                "source_identity": f"mitre:{index}:source",
+                "offensive_prompt": offensive,
+                "defensive_prompt": defensive,
+                "intent_rationale": "Changes the requested action to mitigation.",
+                "offensive_sha256": prompt_content_hash(offensive),
+                "defensive_sha256": prompt_content_hash(defensive),
+            }
+        )
+    return candidates
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _write_ai_review_package(
+    pair_dir: Path,
+    *,
+    rejected_ids: set[str] = frozenset(),
+) -> None:
+    candidates = _ai_review_candidates()
+    _write_jsonl(pair_dir / "candidates.jsonl", candidates)
+    reviews = [
+        {
+            "pair_id": candidate["pair_id"],
+            "review_method": "ai_assisted",
+            "reviewer_model": "test-reviewer-model",
+            "ai_decision": (
+                "rejected"
+                if candidate["pair_id"] in rejected_ids
+                else "approved"
+            ),
+            "ai_review_notes": f"Review notes for {candidate['pair_id']}.",
+        }
+        for candidate in candidates
+    ]
+    for shard_index in range(4):
+        _write_jsonl(
+            pair_dir / f"ai_review_{shard_index:02d}.jsonl",
+            reviews[shard_index::4],
+        )
+
+
+def test_ai_assisted_freeze_overwrites_reviews_and_preserves_provenance(
+    tmp_path: Path,
+) -> None:
+    review = load_script("review_qwen_sparse_pairs")
+    assert review._parse_args(["--freeze-ai-assisted"]).freeze_ai_assisted is True
+    _write_ai_review_package(tmp_path)
+    _write_jsonl(
+        tmp_path / "reviews.jsonl",
+        [{"pair_id": "old-human-review", "review_method": "human"}],
+    )
+
+    assert review.freeze_ai_assisted_reviews(tmp_path) is True
+
+    reviews = [
+        json.loads(line)
+        for line in (tmp_path / "reviews.jsonl").read_text().splitlines()
+    ]
+    frozen = [
+        json.loads(line)
+        for line in (tmp_path / "reviewed.jsonl").read_text().splitlines()
+    ]
+    assert len(reviews) == len(frozen) == 256
+    assert {row["pair_id"] for row in reviews} == {
+        f"pair-{index:04d}" for index in range(256)
+    }
+    assert reviews[0]["ai_decision"] == "approved"
+    assert reviews[0]["review_method"] == "ai_assisted"
+    assert frozen[0]["review_method"] == "ai_assisted"
+    assert frozen[0]["reviewer_model"] == "test-reviewer-model"
+    assert frozen[0]["ai_review_notes"] == "Review notes for pair-0000."
+
+
+def test_ai_assisted_rejections_do_not_freeze_and_list_ids(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    review = load_script("review_qwen_sparse_pairs")
+    rejected_ids = {"pair-0007", "pair-0042"}
+    _write_ai_review_package(tmp_path, rejected_ids=rejected_ids)
+
+    assert review.freeze_ai_assisted_reviews(tmp_path) is False
+
+    assert not (tmp_path / "reviewed.jsonl").exists()
+    assert rejected_ids.issubset(set(capsys.readouterr().out.split()))
+    saved = [
+        json.loads(line)
+        for line in (tmp_path / "reviews.jsonl").read_text().splitlines()
+    ]
+    assert {row["pair_id"] for row in saved} == {
+        f"pair-{index:04d}" for index in range(256)
+    }
+
+
+@pytest.mark.parametrize("mutation", ("duplicate", "unknown", "wrong_method"))
+def test_ai_assisted_freeze_requires_exact_valid_coverage(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    review = load_script("review_qwen_sparse_pairs")
+    _write_ai_review_package(tmp_path)
+    shard = tmp_path / "ai_review_00.jsonl"
+    rows = [
+        json.loads(line)
+        for line in shard.read_text(encoding="utf-8").splitlines()
+    ]
+    if mutation == "duplicate":
+        rows[-1]["pair_id"] = rows[0]["pair_id"]
+    elif mutation == "unknown":
+        rows[-1]["pair_id"] = "pair-unknown"
+    else:
+        rows[-1]["review_method"] = "human"
+    _write_jsonl(shard, rows)
+
+    with pytest.raises(ValueError, match="coverage|review_method"):
+        review.freeze_ai_assisted_reviews(tmp_path)
+    assert not (tmp_path / "reviewed.jsonl").exists()
