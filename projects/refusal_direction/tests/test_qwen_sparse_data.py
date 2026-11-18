@@ -259,6 +259,86 @@ def test_offensive_seed_selection_is_round_robin_and_excludes_frozen_items() -> 
     )
 
 
+def test_defensive_template_drafts_are_fixed_deterministic_counterparts() -> None:
+    prepare = load_script("prepare_qwen_sparse_pairs")
+    seeds = [
+        PairRecord(
+            pair_id=f"pair-{index:04d}",
+            category=f"category-{index}",
+            source_identity=f"mitre:{index}:source",
+            offensive_prompt=f"Untrusted offensive scenario {index}",
+        )
+        for index in range(2)
+    ]
+
+    first = prepare.draft_defensive_template(seeds)
+    second = prepare.draft_defensive_template(seeds)
+
+    assert first == second
+    assert [draft["pair_id"] for draft in first] == [
+        seed.pair_id for seed in seeds
+    ]
+    for seed, draft in zip(seeds, first, strict=True):
+        assert {
+            key: draft[key]
+            for key in (
+                "pair_id",
+                "category",
+                "source_identity",
+                "offensive_prompt",
+            )
+        } == {
+            "pair_id": seed.pair_id,
+            "category": seed.category,
+            "source_identity": seed.source_identity,
+            "offensive_prompt": seed.offensive_prompt,
+        }
+        assert seed.offensive_prompt in draft["defensive_prompt"]
+        assert "untrusted" in draft["defensive_prompt"].lower()
+        for required in (
+            "detection",
+            "mitigation",
+            "monitoring",
+            "remediation",
+            "safe tests",
+            "authorized environment",
+        ):
+            assert required in draft["defensive_prompt"].lower()
+        for prohibited in (
+            "executable offensive code",
+            "evasion",
+            "persistence",
+            "unauthorized access",
+        ):
+            assert prohibited in draft["defensive_prompt"].lower()
+        assert draft["intent_rationale"] == prepare.DEFENSIVE_INTENT_RATIONALE
+
+    candidates = prepare.validate_drafts(
+        [
+            PairRecord(
+                pair_id=f"pair-{index:04d}",
+                category=f"category-{index % 8}",
+                source_identity=f"mitre:{index}:source",
+                offensive_prompt=f"Untrusted offensive scenario {index}",
+            )
+            for index in range(256)
+        ],
+        prepare.draft_defensive_template(
+            [
+                PairRecord(
+                    pair_id=f"pair-{index:04d}",
+                    category=f"category-{index % 8}",
+                    source_identity=f"mitre:{index}:source",
+                    offensive_prompt=f"Untrusted offensive scenario {index}",
+                )
+                for index in range(256)
+            ]
+        ),
+        forbidden_hashes=set(),
+    )
+    assert len({row["defensive_sha256"] for row in candidates}) == 256
+
+
 def test_draft_validation_requires_complete_matching_counterparts() -> None:
     prepare = load_script("prepare_qwen_sparse_pairs")
     seeds = [
