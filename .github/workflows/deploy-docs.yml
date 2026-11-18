@@ -142,7 +142,9 @@ jobs:
 
       - name: Generate final build for public URL
         working-directory: website
-        run: npm run build
+        run: |
+          rm -rf build .docusaurus
+          npm run build
 
       - name: Audit final public build
         working-directory: website
