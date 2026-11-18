@@ -51,8 +51,27 @@ NSO_SANITIZED_PAIR_IDS = frozenset(
 )
 NSO_SOURCE_TEXT = "NSO Group"
 NSO_REPLACEMENT_TEXT = "a commercial spyware vendor"
-NSO_SOURCE_PATTERN = re.compile(re.escape(NSO_SOURCE_TEXT), re.IGNORECASE)
+NSO_SOURCE_PATTERN = re.compile(
+    r"\b(?:the\s+)?" + re.escape(NSO_SOURCE_TEXT) + r"\b",
+    re.IGNORECASE,
+)
+NSO_ARTICLE_GLITCH_PATTERN = re.compile(
+    r"\bthe\s+" + re.escape(NSO_REPLACEMENT_TEXT) + r"\b",
+    re.IGNORECASE,
+)
 NSO_SANITIZATION_METHOD = "case-insensitive literal replacement"
+
+
+def _apply_nso_replacement(prompt: str) -> tuple[str, int]:
+    collapsed, glitch_count = NSO_ARTICLE_GLITCH_PATTERN.subn(
+        NSO_REPLACEMENT_TEXT,
+        prompt,
+    )
+    replaced, nso_count = NSO_SOURCE_PATTERN.subn(
+        NSO_REPLACEMENT_TEXT,
+        collapsed,
+    )
+    return replaced, glitch_count + nso_count
 
 
 def _walk_named_lists(value: Any) -> Iterable[tuple[str, list[Any]]]:
@@ -219,19 +238,19 @@ def sanitize_nso_seed_rows(
         found_ids.add(pair_id)
 
         prompt = _require_draft_text(row, "offensive_prompt", pair_id)
-        current_hash = prompt_content_hash(prompt)
         identity = _require_draft_text(row, "source_identity", pair_id)
         identity_parts = identity.split(":")
         existing_metadata = row.get("source_sanitization")
+        sanitized_prompt, replacements = _apply_nso_replacement(prompt)
+        sanitized_hash = prompt_content_hash(sanitized_prompt)
         if existing_metadata is not None:
             if (
                 not isinstance(existing_metadata, Mapping)
-                or NSO_SOURCE_PATTERN.search(prompt)
-                or NSO_REPLACEMENT_TEXT not in prompt
-                or row.get("offensive_sha256") != current_hash
+                or NSO_SOURCE_PATTERN.search(sanitized_prompt)
+                or NSO_REPLACEMENT_TEXT not in sanitized_prompt
+                or NSO_ARTICLE_GLITCH_PATTERN.search(sanitized_prompt)
                 or len(identity_parts) != 4
                 or identity_parts[0] != "mitre"
-                or identity_parts[2] != current_hash[:16]
                 or identity_parts[3] != "sanitized"
             ):
                 raise ValueError(f"{pair_id}: invalid existing sanitization")
@@ -245,22 +264,27 @@ def sanitize_nso_seed_rows(
                 "original_source_identity",
                 pair_id,
             )
-            row["source_sanitization"] = _nso_sanitization_metadata(
-                original_hash,
-                original_identity,
+            row.update(
+                {
+                    "source_identity": (
+                        f"mitre:{identity_parts[1]}:"
+                        f"{sanitized_hash[:16]}:sanitized"
+                    ),
+                    "offensive_prompt": sanitized_prompt,
+                    "offensive_sha256": sanitized_hash,
+                    "source_sanitization": _nso_sanitization_metadata(
+                        original_hash,
+                        original_identity,
+                    ),
+                }
             )
             sanitized_rows.append(row)
             continue
 
-        sanitized_prompt, replacements = NSO_SOURCE_PATTERN.subn(
-            NSO_REPLACEMENT_TEXT,
-            prompt,
-        )
         if replacements == 0:
             raise ValueError(f"{pair_id}: NSO Group reference not found")
         if len(identity_parts) != 3 or identity_parts[0] != "mitre":
             raise ValueError(f"{pair_id}: unsupported source identity")
-        sanitized_hash = prompt_content_hash(sanitized_prompt)
         row.update(
             {
                 "source_identity": (

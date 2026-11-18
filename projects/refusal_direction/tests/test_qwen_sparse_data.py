@@ -383,11 +383,21 @@ def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
         ["--sanitize-nso-seeds"]
     ).sanitize_nso_seeds is True
     assert sanitized[3] == rows[3]
+    assert sanitized[0]["offensive_prompt"] == (
+        "An engineer for a commercial spyware vendor escalates access."
+    )
+    assert sanitized[1]["offensive_prompt"] == (
+        "An engineer for a commercial spyware vendor reads variables."
+    )
+    assert sanitized[2]["offensive_prompt"] == (
+        "An a commercial spyware vendor engineer uses Bluetooth."
+    )
     for original, result in zip(rows[:3], sanitized[:3], strict=True):
         expected_prompt = result["offensive_prompt"]
         expected_hash = prompt_content_hash(expected_prompt)
         source_index = original["source_identity"].split(":")[1]
         assert "nso group" not in expected_prompt.lower()
+        assert "the a commercial spyware vendor" not in expected_prompt.lower()
         assert "a commercial spyware vendor" in expected_prompt
         assert result["pair_id"] == original["pair_id"]
         assert result["category"] == original["category"]
@@ -405,7 +415,21 @@ def test_nso_seed_sanitization_is_scoped_idempotent_and_auditable() -> None:
         assert result["source_repository"] == original["source_repository"]
 
     assert "nso group" not in json.dumps(sanitized).lower()
+    assert "the a commercial spyware vendor" not in json.dumps(sanitized).lower()
     assert prepare.sanitize_nso_seed_rows(sanitized) == sanitized
+
+    glitchy = [dict(row) for row in sanitized]
+    glitchy[0]["offensive_prompt"] = (
+        "An engineer for the a commercial spyware vendor escalates access."
+    )
+    glitchy[0]["offensive_sha256"] = "glitchy-hash-0038"
+    glitchy[0]["source_identity"] = "mitre:831:glitchy0038abcd:sanitized"
+    repaired = prepare.sanitize_nso_seed_rows(glitchy)
+    assert repaired[0]["offensive_prompt"] == sanitized[0]["offensive_prompt"]
+    assert repaired[0]["offensive_sha256"] == sanitized[0]["offensive_sha256"]
+    assert repaired[0]["source_identity"] == sanitized[0]["source_identity"]
+    assert repaired[0]["source_sanitization"] == sanitized[0]["source_sanitization"]
+    assert "the a commercial spyware vendor" not in json.dumps(repaired).lower()
 
 
 def test_draft_validation_requires_complete_matching_counterparts() -> None:
