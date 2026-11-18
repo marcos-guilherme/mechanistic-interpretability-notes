@@ -82,6 +82,32 @@ test('usa axe compatível com Node 20 e cobre WCAG 2.2', async () => {
   assert.match(e2e, /wcag22aa/);
 });
 
+test('usa título completo, marca curta na navbar e rodapé MIT', async () => {
+  const config = await readFile('docusaurus.config.ts', 'utf8');
+  const readme = await readFile('../README.md', 'utf8');
+  const manifest = JSON.parse(await readFile('content-manifest.json', 'utf8'));
+  const sobre = manifest.public_pages.find((page) => page.id === 'inicio');
+
+  assert.match(
+    config,
+    /title: 'Interpretabilidade Aplicada ao Alinhamento de LLMs'/,
+  );
+  assert.match(config, /navbar:\s*\{[\s\S]*?title: 'Interpretabilidade'/);
+  assert.doesNotMatch(
+    config,
+    /navbar:\s*\{[\s\S]*?title: 'Interpretabilidade Aplicada/,
+  );
+  assert.match(config, /copyright: 'Licença MIT\.'/);
+  assert.match(
+    readme,
+    /^# Interpretabilidade Aplicada ao Alinhamento de LLMs$/m,
+  );
+  assert.equal(
+    sobre?.title,
+    'Interpretabilidade Aplicada ao Alinhamento de LLMs',
+  );
+});
+
 test('não duplica entradas no .gitignore do portal', async () => {
   const entries = (await readFile('.gitignore', 'utf8'))
     .split(/\r?\n/)

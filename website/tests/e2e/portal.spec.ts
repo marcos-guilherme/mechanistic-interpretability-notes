@@ -7,7 +7,7 @@ const projectPath = (route: string) =>
 
 const routes = [
   ['/', /^Interpretabilidade Aplicada ao Alinhamento de LLMs$/],
-  ['/sobre-o-projeto', /Replicações de interpretabilidade mecanística/i],
+  ['/sobre-o-projeto', /^Interpretabilidade Aplicada ao Alinhamento de LLMs$/],
   ['/replicacoes', /^Replicações$/i],
   ['/metodologia', /Metodologia comum de replicação/i],
   [
@@ -122,9 +122,15 @@ test('navegação funciona no desktop e no menu móvel', async ({page}, testInfo
   await expect(
     page.getByRole('heading', {
       level: 1,
-      name: /Replicações de interpretabilidade mecanística/i,
+      name: /^Interpretabilidade Aplicada ao Alinhamento de LLMs$/,
     }),
   ).toBeVisible();
+});
+
+test('exibe marca curta na navbar e licença MIT no rodapé', async ({page}) => {
+  await page.goto(projectPath('/'), {waitUntil: 'networkidle'});
+  await expect(page.locator('.navbar__title')).toHaveText('Interpretabilidade');
+  await expect(page.locator('footer')).toContainText('Licença MIT.');
 });
 
 test.describe('acessibilidade representativa', () => {

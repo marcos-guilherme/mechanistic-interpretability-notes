@@ -137,7 +137,7 @@ const config: Config = {
       },
     ],
     navbar: {
-      title: 'Interpretabilidade Aplicada ao Alinhamento de LLMs',
+      title: 'Interpretabilidade',
       hideOnScroll: false,
       items: [
         {to: '/sobre-o-projeto', label: 'Sobre', position: 'left'},

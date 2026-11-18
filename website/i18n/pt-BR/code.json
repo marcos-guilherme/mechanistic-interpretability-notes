@@ -36,7 +36,7 @@
     "description": "Mensagem da página de busca sem resultados"
   },
   "theme.SearchPage.searchContext.everywhere": {
-    "message": "Em todo o portal",
+    "message": "Em toda a documentação",
     "description": "Opção para buscar em todos os contextos"
   }
 }

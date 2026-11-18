@@ -1,4 +1,4 @@
-# Replicações de interpretabilidade mecanística
+# Interpretabilidade Aplicada ao Alinhamento de LLMs
 
 Criei este repositório para armazenar e documentar meu processo prático de
 entrada na área de interpretabilidade mecanística. Mais do que reunir código,

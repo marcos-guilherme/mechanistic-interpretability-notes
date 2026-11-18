@@ -135,7 +135,7 @@ export default function Home(): React.JSX.Element {
               <StudyCard
                 title="J-space"
                 model="Llama 3.1 8B Instruct"
-                evidence="Causal inconclusivo · avaliação da J-lens em 93 prompts"
+                evidence="Causal inconclusivo · J-lens, 93 prompts"
                 evidenceKind="inconclusive"
                 href="/estudos/jspace-llama">
                 A tentativa causal no Llama ficou inconclusiva. Depois avaliei

@@ -1,8 +1,8 @@
 {
-  "name": "ioi-replication-portal",
+  "name": "ioi-replication-site",
   "version": "0.1.0",
   "private": true,
-  "description": "Registro público documental do processo de experimentação em interpretabilidade mecanística.",
+  "description": "Documentação das reproduções de interpretabilidade mecanística: IOI, direção de recusa e J-space.",
   "engines": {
     "node": ">=20 <21",
     "npm": ">=10"

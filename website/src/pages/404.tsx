@@ -13,7 +13,7 @@ export default function NotFound(): React.JSX.Element {
           <Heading as="h1">Página não encontrada</Heading>
           <p>
             O endereço pode ter mudado ou ainda não fazer parte do recorte
-            público do portal.
+            público do site.
           </p>
           <div className={styles.actions}>
             <Link className={styles.primaryAction} to="/">
