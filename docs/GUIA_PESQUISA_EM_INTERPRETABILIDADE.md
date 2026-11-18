@@ -319,12 +319,12 @@ permaneceu inconclusiva (`primary_gates_failed`): as precondições primárias n
 foram satisfeitas, portanto a execução completa não demonstra nem refuta o
 mecanismo.
 
-Em seguida, separei a pergunta de leitura da pergunta causal e executei um
-atlas observacional validado sobre o conjunto de avaliação
-`lens-eval-multihop`, com 93 prompts. Ele descreve o que a J-lens e a logit
-lens recuperam, sem gerar texto ou intervir nas ativações. Essa sequência
-aplica um princípio geral deste guia: sucesso operacional, observação e
-evidência causal precisam permanecer distintos antes da interpretação.
+Em seguida, separei a pergunta de leitura da pergunta causal e avaliei a
+J-lens em 93 prompts do conjunto `lens-eval-multihop`. Essa análise descreve o
+que a J-lens e a logit lens recuperam, sem gerar texto ou intervir nas
+ativações. Essa sequência aplica um princípio geral deste guia: sucesso
+operacional, observação e evidência causal precisam permanecer distintos
+antes da interpretação.
 
 Os três estudos também ilustram a passagem de prática guiada para perguntas
 mais abertas. Essa passagem não elimina a necessidade de retornar aos

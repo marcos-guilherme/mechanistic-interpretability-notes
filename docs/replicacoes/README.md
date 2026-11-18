@@ -46,13 +46,14 @@ gerações.
 - [Manifesto da execução (Gemma)](../../projects/refusal_direction/results/execution_manifest.json)
 - Piloto causal **congelado** em `Qwen/Qwen2.5-Coder-7B-Instruct`
   (`causal_gate_failed`; operação concluída, gate de selectividade falhou):
-  [pilot_evaluation.json](../../projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json)
-  · [final_evaluation.json](../../projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json)
-- Follow-up exploratório no Qwen, sem reclassificar o piloto: [dose](../../projects/refusal_direction/results/qwen25_coder_7b_dose/dose_followup_evaluation.json)
+  [piloto](../../projects/refusal_direction/results/qwen25_coder_7b/pilot_evaluation.json)
+  · [avaliação](../../projects/refusal_direction/results/qwen25_coder_7b/final_evaluation.json)
+- Follow-up exploratório no Qwen, sem reclassificar o piloto:
+  [dose](../../projects/refusal_direction/results/qwen25_coder_7b_dose/dose_followup_evaluation.json)
   · [J-lens](../../projects/refusal_direction/results/qwen25_coder_7b_jlens/jlens_evaluation.json)
   · [avaliação de código](../../projects/refusal_direction/results/qwen25_coder_7b_code_eval/04_finalize.json)
 
-### J-space Llama: tentativa causal e atlas observacional
+### J-space Llama: tentativa causal e avaliação da J-lens em 93 prompts
 
 Organizei este estudo em três etapas distintas. A primeira é a tentativa causal
 já executada: depois que o acesso ao modelo foi aprovado, uma execução em
@@ -63,18 +64,13 @@ vazou `ant` e se degradou por repetição. O resultado permanece inconclusivo,
 foi preservado sem alteração e não constitui evidência contra o mecanismo mais
 amplo de J-space.
 
-A segunda etapa é um atlas estritamente observacional, agora executado e
-validado. Ele lê os 93 prompts multihop da Anthropic, em uma revisão fixada e
-sob licença Apache 2.0, compara J-lens direta e logit lens e mantém um painel
-qualitativo fixo de 12 prompts com `gradient_pursuit`. O protocolo usa prompt
-bruto, não fornece `target` ao modelo, não gera texto e não edita ativações.
-O `success` obtido significa que artefatos, hashes, schemas e métricas foram
-validados, não que uma relação causal tenha sido demonstrada.
-
-Na versão canônica do schema, a auditoria cobre também os IDs e hashes dos
-tokens dos 93 prompts; o painel reutiliza esses IDs. A proveniência do código é
-recomputada a partir do commit histórico registrado, e as seis figuras fazem
-parte da validação independente do resultado.
+A segunda etapa é uma análise sem intervenção, agora executada e validada. Ela
+lê os 93 prompts multihop da Anthropic, em uma revisão fixada e sob licença
+Apache 2.0, compara J-lens direta e logit lens e mantém um painel qualitativo
+fixo de 12 prompts com `gradient_pursuit`. O protocolo usa prompt bruto, não
+fornece `target` ao modelo, não gera texto e não edita ativações. O `success`
+obtido significa que a execução e as métricas foram validadas, não que uma
+relação causal tenha sido demonstrada.
 
 Na *band* 12–28, os `pass@1/5/10` foram `0,344086 / 0,548387 / 0,596774` para
 a J-lens e `0,284946 / 0,392473 / 0,435484` para a logit lens. Nas camadas
@@ -88,32 +84,23 @@ chegou ao rank 2 da J-lens na camada 19. O `gradient_pursuit` é mantido
 separado do ranking direto porque decompõe ativações por coeficientes, em vez de
 medir o mesmo rank.
 
-Para permitir a validação independente, o perfil observacional transportou
-nove membros: dois JSONs compactos, seis figuras canônicas e
-`artifacts/jspace_observation_raw.json`. Esse sidecar contém registros
-observacionais no nível dos prompts, não gerações ou continuações, e é
-validado e publicado localmente na mesma transação dos arquivos canônicos. O
-sidecar serve apenas para reconciliar hashes e conteúdo, continua ignorado pelo Git e
-não faz parte do commit de evidência canônica.
-
 Uma terceira etapa, se for realizada, será uma nova confirmação causal. Ela
-precisará de hipótese, prompts ainda não usados no atlas e controles
+precisará de hipótese, prompts ainda não usados nesta avaliação e controles
 pré-declarados próprios, sem selecionar retrospectivamente conceito, direção,
 camada, `alpha` ou itens *held-out* a partir destes resultados.
 
 - [Visão geral e fluxo implementado](../../projects/jspace_llama/README.md)
 - [Processo de estudo e reprodução](../../projects/jspace_llama/PROCESSO.md)
-- [Avaliação causal final canônica](../../projects/jspace_llama/results/final_evaluation.json)
+- [Avaliação causal final](../../projects/jspace_llama/results/final_evaluation.json)
 - [Manifesto da execução causal](../../projects/jspace_llama/results/execution_manifest.json)
-- [Resultado canônico do atlas](../../projects/jspace_llama/results/jspace_observation.json)
+- [Resultado da avaliação da J-lens](../../projects/jspace_llama/results/jspace_observation.json)
 - [Manifesto da execução observacional](../../projects/jspace_llama/results/jspace_observation_manifest.json)
-- [Notebook do atlas](../../projects/jspace_llama/notebooks/02_observe_multihop_jspace.ipynb)
 
 ## Como ler este repositório
 
-Nos READMEs e notebooks, apresento a pergunta, o raciocínio e as limitações de
-cada estudo. Os artefatos canônicos versionados continuam sendo a fonte dos
-valores observados. Se a narrativa divergir deles, trato isso como um problema
-a investigar e corrigir, não como uma oportunidade de escolher o número mais
+Nos textos e notebooks, apresento a pergunta, o raciocínio e as limitações de
+cada estudo. Os artefatos versionados continuam sendo a fonte dos valores
+observados. Se a narrativa divergir deles, trato isso como um problema a
+investigar e corrigir, não como uma oportunidade de escolher o número mais
 conveniente. Também mantenho as afirmações dos artigos identificadas como
 referências externas, separadas do que medi neste repositório.

@@ -3,37 +3,33 @@
 O J-space foi o passo seguinte da minha exploração: em vez de analisar um
 circuito ou uma direção comportamental, quis entender se seria possível ler e,
 em uma etapa separada, alterar um conceito intermediário usado pelo modelo.
-Este projeto agora reúne duas investigações que não devem ser confundidas: uma
-tentativa causal mínima, já executada e inconclusiva, e um atlas observacional
-executado e validado sobre 93 prompts. O primeiro resultado continua sendo
+Este projeto reúne duas investigações que não devem ser confundidas: uma
+tentativa causal mínima, já executada e inconclusiva, e uma avaliação da
+J-lens em 93 prompts, sem intervenção. O primeiro resultado continua
 causalmente inconclusivo; o segundo descreve o que as lentes recuperam, sem
 transformar essa leitura em evidência de mecanismo.
 
 Na etapa causal, usei uma J-lens já ajustada no
 `meta-llama/Llama-3.1-8B-Instruct` e planejei a troca `spider → ant`. Essa
-execução e seus dois artefatos canônicos foram preservados sem alteração. O
-atlas novo não repete a troca: ele amplia primeiro a observação do que a lente
+execução e seus resultados foram preservados sem alteração. A avaliação
+seguinte não repete a troca: ela amplia primeiro a observação do que a lente
 expõe em um conjunto fixo de prompts, sem gerar texto e sem editar ativações.
 
 Planejei a execução para uma NVIDIA L4 no Colab, com acesso autenticado ao
 modelo *gated* do Hugging Face. Pesos e lente são baixados apenas para caches
-ignorados. Na etapa observacional, o perfil de transporte traz os JSONs
-compactos e as figuras canônicas, além de um sidecar bruto usado só na
-validação local; esse sidecar continua ignorado pelo Git. A lente pré-ajustada
-usada pelo projeto é
+ignorados. A lente pré-ajustada usada pelo projeto é
 `llama3.1-8b-it/jlens/Salesforce-wikitext/Llama-3.1-8B-Instruct_jacobian_lens.pt`.
 
 Implementei configuração fixada, validação de CUDA e runtime, readout e
 intervenções com uso limitado de memória, controles, captura de proveniência e
-um pipeline de artefatos chamável pelo notebook.
-`notebooks/01_readout_and_causal_swap.ipynb` é a entrada fina para a execução
-causal. A suíte do repositório testa o software sem carregar o modelo de 8B.
+um pipeline de artefatos chamável pelo notebook. A suíte do repositório testa
+o software sem carregar o modelo de 8B.
 
 Em [`PROCESSO.md`](PROCESSO.md), explico o contexto científico, os métodos, o
-resultado causal inconclusivo, o desenho do atlas e as limitações em formato
-voltado ao TCC.
+resultado causal inconclusivo, o desenho da avaliação sem intervenção e as
+limitações.
 
-## O que o atlas observa
+## O que a J-lens recupera sem intervenção
 
 O conjunto de avaliação veio do repositório da Anthropic
 [`anthropics/jacobian-lens`](https://github.com/anthropics/jacobian-lens), na
@@ -50,7 +46,7 @@ imediatamente anterior a `target`. O campo `target` serve para descrever e
 auditar essa avaliação, mas não é concatenado ao prompt nem fornecido ao
 modelo.
 
-O atlas mantém três leituras separadas:
+A avaliação mantém três leituras separadas:
 
 - a **J-lens direta** usa a projeção ajustada pelo Jacobiano para ranquear os
   tokens intermediários em cada camada ajustada;
@@ -75,7 +71,7 @@ recuperação baixa. A execução canônica
 `2fcb8a49-136f-4868-91cc-f98f9dc2e57d` terminou com esse `success` operacional
 em uma NVIDIA L4; não houve geração de texto nem intervenção.
 
-No conjunto completo, as métricas extraídas do JSON validado foram:
+No conjunto completo, as métricas foram:
 
 - J-lens na *band* 12–28: `pass@1=0,344086`,
   `pass@5=0,548387` e `pass@10=0,596774`;
@@ -90,9 +86,7 @@ itens e teve recuperação maior: na *band*, J-lens `0,395062 / 0,641975 /
 0,691358` e logit lens `0,333333 / 0,456790 / 0,506173`; em todas as camadas,
 J-lens `0,395062 / 0,654321 / 0,716049` e logit lens `0,333333 / 0,456790 /
 0,518519`, sempre na ordem `pass@1/5/10`. Isso descreve este conjunto e esta
-tokenização; não demonstra superioridade causal da J-lens. Na versão canônica
-do schema, a auditoria também registra os IDs e hashes dos tokens dos 93
-prompts, e o painel reutiliza esses IDs em vez de tokenizar o texto novamente.
+tokenização; não demonstra superioridade causal da J-lens.
 
 O painel ajuda a tornar a escala dos ranks concreta. `Brazil` em
 `amazon-language`, `Mars` em `mars-color`, `gold` em `atomic-79-symbol`,
@@ -114,13 +108,14 @@ mesmo texto (`spider`, por exemplo, aparece entre seus componentes em várias
 camadas), mas decompõe a ativação por coeficientes; não é outro cálculo do
 rank direto e não foi fundido com `pass@k`.
 
-As figuras reproduzem as métricas e a estrutura do JSON. O gráfico de barras e
-o heatmap são legíveis; já o painel preserva tokens brutos, inclusive quebras
-de linha, scripts variados e símbolos de controle, o que torna algumas células
-visualmente ruidosas. Por isso, o painel serve como visão qualitativa, enquanto o
-JSON validado permanece a fonte para valores exatos. A interpretação ainda é
-limitada pelo tokenizer, pela lente treinada no corpus Salesforce-Wikitext,
-pelo recorte de camadas e pelo painel exploratório de 12 itens.
+As figuras reproduzem as métricas agregadas. O gráfico de barras e o heatmap
+são legíveis; já o painel preserva tokens brutos, inclusive quebras de linha,
+scripts variados e símbolos de controle, o que torna algumas células
+visualmente ruidosas. Por isso, o painel serve como visão qualitativa, enquanto
+as métricas versionadas permanecem a fonte para valores exatos. A
+interpretação ainda é limitada pelo tokenizer, pela lente treinada no corpus
+Salesforce-Wikitext, pelo recorte de camadas e pelo painel exploratório de 12
+itens.
 
 ## Fluxo causal no Colab L4
 
@@ -158,18 +153,18 @@ atomicamente `/content/jspace_llama_project`; esse nome, que não é o nome do
 pacote, impede que o checkout em `/content` sombreie a instalação editável de
 `jspace_llama` como *namespace package*.
 
-O comando `fetch` aceita apenas `results/execution_manifest.json` e
-`results/final_evaluation.json`, e exige que ambos existam. A execução valida o
-`_output.ipynb` novo e ignorado que a colab-cli produz e o preserva para
-diagnóstico. Uma falha deixa a sessão disponível para investigação, por isso é
-necessário encerrá-la explicitamente. Se não houver L4, encerre a sessão
-parcial antes de tentar `--gpu T4` ou `--gpu A100`.
+O comando `fetch` baixa somente o manifesto e a avaliação causal finais, e
+exige que ambos existam. A execução valida o notebook de saída ignorado que a
+colab-cli produz e o preserva para diagnóstico. Uma falha deixa a sessão
+disponível para investigação, por isso é necessário encerrá-la
+explicitamente. Se não houver L4, encerre a sessão parcial antes de tentar
+`--gpu T4` ou `--gpu A100`.
 
-## Fluxo observacional no Colab L4
+## Fluxo da análise sem intervenção no Colab L4
 
 Com a mesma instalação, autorização do modelo e autenticação descritas acima,
-o atlas usa um notebook e um perfil de resultados próprios. Na raiz do
-repositório:
+a avaliação da J-lens usa outro notebook e outro perfil de resultados. Na raiz
+do repositório:
 
 ```powershell
 python tools/colab/run_jspace.py probe
@@ -182,16 +177,10 @@ python tools/colab/run_jspace.py fetch --result-set observation
 python tools/colab/run_jspace.py stop
 ```
 
-O perfil `observation` é separado do perfil causal padrão e tem exatamente
-nove membros: dois JSONs compactos, seis figuras canônicas PNG/SVG e
-`artifacts/jspace_observation_raw.json`. Esse sidecar bruto contém os registros
-observacionais no nível dos prompts (não saídas geradas nem continuações) e
-serve somente para o validador local recalcular hashes e reconciliar o conteúdo
-compacto. O empacotamento e o download validam o JSON, o caminho e o limite de
-tamanho; a publicação local dos nove membros é transacional. O sidecar
-permanece ignorado pelo Git e não integra o commit de evidência canônica. O
-perfil também não substitui `execution_manifest.json` nem
-`final_evaluation.json`.
+O perfil `observation` é separado do perfil causal padrão. Ele baixa as
+métricas compactas e as figuras, além de um arquivo bruto usado só na
+validação local e ignorado pelo Git. Esse perfil não substitui os resultados
+causais.
 
 ## A execução que consegui realizar
 
@@ -230,12 +219,9 @@ negativa mais ampla.
 
 ## Artefatos e validação
 
-Na execução causal, o pipeline grava continuações brutas, prompts renderizados,
-slots do workspace e outros diagnósticos apenas em
-`artifacts/readout_and_causal_swap.json`, que é ignorado pelo Git. Os arquivos
-baixados `results/execution_manifest.json` e
-`results/final_evaluation.json` contêm somente evidência agregada compacta e
-metadados de reprodutibilidade.
+Na execução causal, continuações brutas, prompts renderizados e diagnósticos
+detalhados permanecem fora do Git. Os arquivos baixados concentram evidência
+agregada e metadados de reprodutibilidade.
 
 É possível validar localmente os artefatos causais ou as fixtures sem carregar
 o modelo de 8B:
@@ -246,21 +232,18 @@ uv run python scripts/validate_results.py
 uv run pytest -q
 ```
 
-O atlas tem um validador independente, que confere schemas, hashes, contagens,
-métricas recalculadas e coerência entre o artefato bruto ignorado e os JSONs
-compactos:
+A avaliação da J-lens tem um validador independente, que confere hashes,
+contagens e métricas recalculadas:
 
 ```powershell
 cd projects/jspace_llama
 uv run python scripts/validate_observation.py
 ```
 
-Depois de `fetch --result-set observation`, os nove membros chegaram juntos,
-inclusive o sidecar necessário para a validação independente. O comando agora
-termina com `PASS`: reconcilia o sidecar com os dois JSONs compactos, seus
-schemas, hashes, contagens e métricas, e valida as seis figuras. Somente os
-dois JSONs compactos e as seis figuras formam a evidência canônica versionada;
-o sidecar bruto e o notebook de saída continuam ignorados.
+Depois de `fetch --result-set observation`, essa validação terminou com
+`PASS`. Somente as métricas compactas e as seis figuras formam a evidência
+versionada; o arquivo bruto de validação e o notebook de saída continuam
+ignorados.
 
 No protocolo causal, o estado `success` exige proveniência limpa e verificada
 por digest, integridade da lente e readout explicitamente avaliados e pelo
@@ -278,7 +261,8 @@ contagens das paráfrases são dados secundários de transparência, não uma
 afirmação geral. Erros inesperados de programação são registrados da melhor
 forma possível no manifesto e depois relançados.
 
-O atlas não muda essa conclusão causal. Uma confirmação causal futura exigirá
-uma hipótese nova, prompts pré-declarados que estabeleçam as precondições
-comportamentais e uma nova execução registrada; não deve ser construída
-escolhendo retrospectivamente conceito, direção ou `alpha` a partir do painel.
+A avaliação da J-lens não muda essa conclusão causal. Uma confirmação causal
+futura exigirá uma hipótese nova, prompts pré-declarados que estabeleçam as
+precondições comportamentais e uma nova execução registrada; não deve ser
+construída escolhendo retrospectivamente conceito, direção ou `alpha` a partir
+do painel.

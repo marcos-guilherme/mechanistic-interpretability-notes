@@ -47,12 +47,12 @@ selecionar a direção e avaliar o efeito final.
 
 ## Escopo e desvios
 
-Esta não é uma reprodução integral do artigo. Usamos um único modelo, 128
-exemplos de treino por classe e amostramos 32 exemplos de validação por classe.
+Esta não é uma reprodução integral do artigo. Usei um único modelo, 128
+exemplos de treino por classe e amostrei 32 exemplos de validação por classe.
 Após o filtro comportamental, o treino efetivo ficou com 121 pedidos nocivos e
 127 inofensivos; na validação, foram efetivamente avaliados 28 pedidos nocivos
 e 32 inofensivos. A preservação foi medida nos pedidos inofensivos dessa
-validação. Não executamos todos os modelos, benchmarks de jailbreak ou
+validação. Não executei todos os modelos, benchmarks de jailbreak ou
 conjuntos externos de perda do trabalho original.
 
 O Colab atual usa Python 3.13; por isso a execução remota usa Transformers 4.48.3. Em Python anterior a 3.13, o ambiente mantém Transformers 4.44.2. A lógica de extração, ablação, adição e seleção segue o commit upstream registrado nos artefatos.

@@ -12,9 +12,8 @@ Gemma 2B IT e, por fim, preparei uma intervenção conceitual em J-space no
 Llama 3.1 8B Instruct. Nem todas as etapas terminaram da mesma forma. No
 J-space, a tentativa causal foi concluída operacionalmente, mas permaneceu
 inconclusiva porque os critérios primários falharam (`primary_gates_failed`).
-Depois, executei e validei um atlas observacional sobre o que a lente consegue
-expor; esse atlas não contém intervenção e, portanto, não deve ser confundido
-com evidência causal.
+Depois, avaliei a J-lens em 93 prompts, sem intervenção. Essa análise descreve
+o que a lente recupera; não deve ser confundida com evidência causal.
 
 ## Como este repositório está organizado
 
@@ -64,10 +63,10 @@ gerou repetição, sem produzir seis de forma válida.
 
 ## Como ler os resultados
 
-Os READMEs e arquivos `PROCESSO.md` contam o raciocínio, as escolhas e os
-limites de cada estudo. Os JSONs em `results/` são as fontes canônicas dos
-números e da proveniência. Procurei manter essas duas camadas separadas para
-que uma narrativa mais acessível não substitua a evidência que a sustenta.
+Os textos de cada estudo contam o raciocínio, as escolhas e os limites. Os
+resultados versionados em cada projeto são a fonte dos números e da
+proveniência. Procurei manter essas duas camadas separadas para que a
+narrativa não substitua a evidência que a sustenta.
 
 Os comandos devem ser executados a partir do diretório de cada projeto, exceto
 quando apontarem explicitamente para `tools/`. Pesos, caches, credenciais,

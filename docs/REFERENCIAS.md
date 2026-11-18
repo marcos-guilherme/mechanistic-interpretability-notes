@@ -193,5 +193,6 @@ não substitui a aprovação da licença. Uma primeira tentativa parou nesse
 limite, antes da inferência. Depois que o acesso foi aprovado, a execução
 causal canônica completou o protocolo, mas permaneceu cientificamente
 inconclusiva (`primary_gates_failed`) porque os critérios primários falharam.
-O atlas executado em seguida foi validado como resultado observacional; ele
-não contém intervenção e não reclassifica a tentativa causal.
+A avaliação da J-lens em 93 prompts, executada em seguida, foi validada como
+resultado observacional; ela não contém intervenção e não reclassifica a
+tentativa causal.
