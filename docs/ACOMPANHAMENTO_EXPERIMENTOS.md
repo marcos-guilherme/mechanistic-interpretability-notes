@@ -29,6 +29,11 @@ executáveis.
 **Follow-up Qwen.** A varredura exploratória escolheu ablação 20% e adição 50%; seu status foi `pass`, sem reclassificar o piloto original. A J-lens específica ficou com status `pass` após 100 itens de ajuste e 20 de holdout. Na avaliação de código, a ablação mudou a recusa MITRE de 78,12% para 0% e conservou o pass@1 HumanEval+ em 40,62%; a adição reduziu esse pass@1 para 21,88%. Há KL alta na ablação para MITRE (`4,39113`) e no MITRE-FRR (`1,14368`). O corpus da lente não foi deduplicado contra os benchmarks; o resultado automático tem revisão humana pendente. O EvalPlus não é uma sandbox completa. [dose](../projects/refusal_direction/results/qwen25_coder_7b_dose/dose_followup_evaluation.json) · [J-lens](../projects/refusal_direction/results/qwen25_coder_7b_jlens/jlens_evaluation.json) · [avaliação de código](../projects/refusal_direction/results/qwen25_coder_7b_code_eval/04_finalize.json).
 
 **J-lens sob intervenção no Qwen.** A execução `df86a101-9f5a-4363-8918-5f4c183ee25d` produziu 256 respostas e 16.384 observações. Na camada 25, sete de oito comparações principais ficaram dentro da margem de equivalência de cinco pontos. A exceção foi a ablação no MITRE, com `pass@5` de 98,047% para 93,359% e intervalo de diferença entre -8,203 e -1,563 pontos. A camada 26 ficou entre 99,609% e 100%; as camadas 19 e 22 foram menos fiéis. V1 e v2 tiveram os mesmos endpoints principais. [relato](../projects/refusal_direction/CAUSAL_JLENS.md) · [avaliação](../projects/refusal_direction/results/qwen25_coder_7b_causal_jlens/causal_jlens_evaluation.json) · [manifesto](../projects/refusal_direction/results/qwen25_coder_7b_causal_jlens/execution_manifest.json).
+
+**Steering esparso no Qwen.** Estado: aguardando execução. O protocolo e os
+critérios pré-registrados estão no
+[`SPARSE_STEERING.md`](../projects/refusal_direction/SPARSE_STEERING.md);
+nenhum resultado científico foi registrado.
 <!-- END GENERATED STATUS -->
 
 ## Duas noções de sucesso

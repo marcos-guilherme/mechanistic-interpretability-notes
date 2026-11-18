@@ -17,6 +17,9 @@ configurações e proveniência, sem os textos dos prompts ou das gerações.
 Em [`PROCESSO.md`](PROCESSO.md), conto como organizei o estudo, quais decisões
 tomei e quais limitações impedem uma conclusão mais ampla.
 
+O protocolo de steering esparso, ainda aguardando execução, está em
+[`SPARSE_STEERING.md`](SPARSE_STEERING.md).
+
 ## O que observei
 
 Execução de 10 de novembro de 2026 em uma NVIDIA L4:

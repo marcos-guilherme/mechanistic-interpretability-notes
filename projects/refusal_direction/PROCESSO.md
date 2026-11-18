@@ -3,6 +3,9 @@
 [← Voltar à metodologia comum](../../docs/replicacoes/METODOLOGIA.md)
 [← Voltar ao diário central dos experimentos](../../docs/ACOMPANHAMENTO_EXPERIMENTOS.md)
 
+O protocolo de steering esparso, ainda aguardando execução, está em
+[`SPARSE_STEERING.md`](SPARSE_STEERING.md).
+
 > **Estado:** concluído, com reprodução causal parcial
 >
 > **Última atualização:** 16 de novembro de 2026
