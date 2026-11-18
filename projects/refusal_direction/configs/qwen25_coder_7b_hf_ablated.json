@@ -1,0 +1,11 @@
+{
+  "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+  "dtype": "bfloat16",
+  "format_style": "chat_template",
+  "ablation_coefficient": 0.2,
+  "source_layer": 18,
+  "source_direction": "artifacts/qwen25_coder_7b/selected_direction.pt",
+  "direction_sha256": "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
+  "artifacts_dir": "artifacts/qwen25_coder_7b_hf_ablated"
+}
