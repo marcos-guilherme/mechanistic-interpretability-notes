@@ -24,6 +24,7 @@ projects/refusal_direction/notebooks/*_output.ipynb
 projects/refusal_direction/.venv/
 .colab-staging/
 .worktrees/
+docs/entregas/2026-11-18-termo-entrega-semanal.md
 
 # J-space Llama: retain only source and compact aggregate JSON results.
 projects/jspace_llama/.cache/
