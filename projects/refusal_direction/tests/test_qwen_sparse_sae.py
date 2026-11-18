@@ -115,6 +115,25 @@ def test_sae_loss_computes_preactivations_once(
     assert calls == 1
 
 
+def test_dead_feature_auxiliary_loss_is_residual_energy_normalized() -> None:
+    sae = TopKSparseAutoencoder(d_in=1, d_sae=2, k=1)
+    with torch.no_grad():
+        sae.encoder.weight.zero_()
+        sae.encoder.bias.copy_(torch.tensor([2.0, 1.0]))
+        sae.decoder.weight.copy_(torch.tensor([[1.0, -1.0]]))
+        sae.decoder.bias.zero_()
+
+    total, metrics = sae_loss(
+        sae,
+        torch.zeros(1, 1),
+        torch.tensor([False, True]),
+    )
+
+    assert metrics["mse"].item() == pytest.approx(4.0)
+    assert metrics["aux"].item() == pytest.approx(0.25)
+    assert total.item() == pytest.approx(4.0 + 0.25 / 32)
+
+
 def test_decoder_gradient_projection_removes_parallel_component() -> None:
     sae = TopKSparseAutoencoder(d_in=4, d_sae=8, k=2)
     sae.decoder.weight.grad = sae.decoder.weight.detach().clone()
@@ -172,6 +191,9 @@ def test_quality_uses_global_explained_variance_across_uneven_batches() -> None:
         sae,
         batches,
         fit_mean_norm=torch.cat(batches).norm(dim=-1).mean().item(),
+        last_activation_token=torch.tensor([100, 100]),
+        fit_tokens_seen=100,
+        dead_feature_window_tokens=10,
     )
 
     assert quality.explained_variance == pytest.approx(-0.8125)
@@ -180,3 +202,23 @@ def test_quality_uses_global_explained_variance_across_uneven_batches() -> None:
     assert quality.mean_l0 == 2.0
     assert quality.dead_feature_fraction == 0.0
     assert quality.norm_drift < 1e-6
+
+
+def test_quality_combines_recent_fit_and_holdout_feature_activity() -> None:
+    sae = TopKSparseAutoencoder(d_in=1, d_sae=2, k=1)
+    with torch.no_grad():
+        sae.encoder.weight.zero_()
+        sae.encoder.bias.copy_(torch.tensor([2.0, 1.0]))
+        sae.decoder.weight.copy_(torch.tensor([[1.0, -1.0]]))
+        sae.decoder.bias.zero_()
+
+    quality = evaluate_sae_quality(
+        sae,
+        [torch.zeros(2, 1)],
+        fit_mean_norm=1.0,
+        last_activation_token=torch.tensor([100, 95]),
+        fit_tokens_seen=100,
+        dead_feature_window_tokens=10,
+    )
+
+    assert quality.dead_feature_fraction == 0.0

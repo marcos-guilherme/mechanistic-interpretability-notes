@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from .qwen_sparse_sae import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 2
 IDENTITY_FIELDS = frozenset(
     {
         "run_id",
@@ -34,6 +35,8 @@ CHECKPOINT_FIELDS = frozenset(
         "tokens_seen",
         "batch_index",
         "activation_scale",
+        "optimizer_name",
+        "schedule",
         "model_state",
         "optimizer_state",
         "python_rng_state",
@@ -60,7 +63,11 @@ class SparseTrainConfig:
     config_sha256: str
     corpus_sha256: str
     model_revision: str
-    learning_rate: float
+    max_learning_rate: float
+    min_learning_rate: float
+    warmup_tokens: int
+    total_fit_tokens: int
+    effective_batch_tokens: int
     checkpoint_every_tokens: int
     activation_scale: float
     dead_feature_window_tokens: int
@@ -70,8 +77,18 @@ class SparseTrainConfig:
         for field, value in self.identity.items():
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{field} must be a nonempty string")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be positive")
+        if self.max_learning_rate <= 0:
+            raise ValueError("max_learning_rate must be positive")
+        if not 0 < self.min_learning_rate <= self.max_learning_rate:
+            raise ValueError(
+                "min_learning_rate must be positive and no greater than max"
+            )
+        if self.warmup_tokens <= 0:
+            raise ValueError("warmup_tokens must be positive")
+        if self.total_fit_tokens <= self.warmup_tokens:
+            raise ValueError("total_fit_tokens must exceed warmup_tokens")
+        if self.effective_batch_tokens <= 0:
+            raise ValueError("effective_batch_tokens must be positive")
         if self.checkpoint_every_tokens <= 0:
             raise ValueError("checkpoint_every_tokens must be positive")
         if self.activation_scale <= 0:
@@ -97,6 +114,8 @@ class SparseTrainingCheckpoint:
     tokens_seen: int
     batch_index: int
     activation_scale: float
+    optimizer_name: str
+    schedule: dict[str, Any]
     model_state: dict[str, torch.Tensor]
     optimizer_state: dict[str, Any]
     python_rng_state: object
@@ -143,10 +162,16 @@ def load_training_checkpoint(
     )
     if not isinstance(payload, dict):
         raise ValueError("checkpoint payload must be a mapping")
+    schema_version = payload.get("schema_version")
+    if schema_version == 1:
+        raise ValueError(
+            "legacy checkpoint schema_version 1 requires explicit retraining; "
+            "automatic optimizer migration is not permitted"
+        )
+    if schema_version != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("unsupported checkpoint schema_version")
     if set(payload) != CHECKPOINT_FIELDS:
         raise ValueError("checkpoint fields do not match schema")
-    if payload["schema_version"] != CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError("unsupported checkpoint schema_version")
     identity_value = payload["identity"]
     if not isinstance(identity_value, Mapping):
         raise ValueError("checkpoint identity must be a mapping")
@@ -163,6 +188,11 @@ def load_training_checkpoint(
 
     model_state = payload["model_state"]
     optimizer_state = payload["optimizer_state"]
+    if payload["optimizer_name"] != "AdamW":
+        raise ValueError("checkpoint optimizer must be AdamW")
+    schedule = payload["schedule"]
+    if not isinstance(schedule, dict):
+        raise ValueError("checkpoint schedule must be a mapping")
     last_activation_token = payload["last_activation_token"]
     torch_rng_state = payload["torch_rng_state"]
     cuda_rng_state = payload["cuda_rng_state"]
@@ -187,6 +217,8 @@ def load_training_checkpoint(
         tokens_seen=int(payload["tokens_seen"]),
         batch_index=int(payload["batch_index"]),
         activation_scale=float(payload["activation_scale"]),
+        optimizer_name="AdamW",
+        schedule=dict(schedule),
         model_state=model_state,
         optimizer_state=optimizer_state,
         python_rng_state=payload["python_rng_state"],
@@ -226,6 +258,8 @@ def _checkpoint_payload(
         "tokens_seen": tokens_seen,
         "batch_index": batch_index,
         "activation_scale": config.activation_scale,
+        "optimizer_name": "AdamW",
+        "schedule": _schedule_contract(config),
         "model_state": _cpu_model_state(sae),
         "optimizer_state": optimizer.state_dict(),
         "python_rng_state": random.getstate(),
@@ -299,12 +333,47 @@ def _validate_activation_batch(
     return x
 
 
+def _schedule_contract(config: SparseTrainConfig) -> dict[str, Any]:
+    return {
+        "name": "linear_warmup_cosine",
+        "max_learning_rate": config.max_learning_rate,
+        "min_learning_rate": config.min_learning_rate,
+        "warmup_tokens": config.warmup_tokens,
+        "total_fit_tokens": config.total_fit_tokens,
+        "effective_batch_tokens": config.effective_batch_tokens,
+    }
+
+
+def learning_rate_for_tokens(
+    config: SparseTrainConfig,
+    tokens_seen: int,
+) -> float:
+    """Return the frozen linear-warmup/cosine learning rate."""
+    if tokens_seen <= 0:
+        return 0.0
+    if tokens_seen < config.warmup_tokens:
+        return config.max_learning_rate * (
+            tokens_seen / config.warmup_tokens
+        )
+    if tokens_seen >= config.total_fit_tokens:
+        return config.min_learning_rate
+    progress = (
+        (tokens_seen - config.warmup_tokens)
+        / (config.total_fit_tokens - config.warmup_tokens)
+    )
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return config.min_learning_rate + (
+        config.max_learning_rate - config.min_learning_rate
+    ) * cosine
+
+
 def train_sae_stream(
     sae: TopKSparseAutoencoder,
     batches: Iterable[ActivationBatch],
     config: SparseTrainConfig,
     checkpoint_dir: Path,
     resume_from: Path | None = None,
+    on_checkpoint: Callable[[Path], None] | None = None,
 ) -> SparseTrainingCheckpoint:
     """Train in stable stream order and return the final atomic checkpoint."""
     device = torch.device(config.device)
@@ -312,9 +381,12 @@ def train_sae_stream(
         raise ValueError("CUDA device requested but unavailable")
     sae.to(device)
     sae.train()
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         sae.parameters(),
-        lr=config.learning_rate,
+        lr=0.0,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.0,
     )
     tokens_seen = 0
     batch_index = 0
@@ -333,6 +405,8 @@ def train_sae_stream(
         )
         if checkpoint.activation_scale != config.activation_scale:
             raise ValueError("checkpoint activation_scale mismatch")
+        if checkpoint.schedule != _schedule_contract(config):
+            raise ValueError("checkpoint optimizer schedule mismatch")
         if checkpoint.tokens_seen < 0 or checkpoint.batch_index < 0:
             raise ValueError("checkpoint progress must be nonnegative")
         if checkpoint.last_activation_token.shape != (sae.d_sae,):
@@ -356,6 +430,8 @@ def train_sae_stream(
     last_checkpoint_path: Path | None = None
     skipped_batches = 0
     skipped_tokens = 0
+    accumulated_tokens = 0
+    optimizer.zero_grad(set_to_none=True)
     for stream_index, activation_batch in enumerate(batches):
         x = _validate_activation_batch(activation_batch, sae.d_in)
         if stream_index < resume_batch_index:
@@ -375,16 +451,18 @@ def train_sae_stream(
             tokens_seen - last_activation_token
             >= config.dead_feature_window_tokens
         )
-        optimizer.zero_grad(set_to_none=True)
         loss, metrics = sae_loss(sae, x, dead_mask)
         selected_indices = metrics["selected_indices"]
-        loss.backward()
-        remove_parallel_decoder_grad_(sae)
-        optimizer.step()
-        sae.renormalize_decoder_()
+        batch_tokens = int(x.shape[0])
+        (loss * batch_tokens).backward()
+        accumulated_tokens += batch_tokens
+        if accumulated_tokens > config.effective_batch_tokens:
+            raise ValueError(
+                "activation microbatches must partition effective_batch_tokens"
+            )
 
         batch_start_token = tokens_seen
-        tokens_seen += int(x.shape[0])
+        tokens_seen += batch_tokens
         batch_index = stream_index + 1
         token_positions = torch.arange(
             batch_start_token + 1,
@@ -399,7 +477,24 @@ def train_sae_stream(
             reduce="amax",
             include_self=True,
         )
-        if tokens_seen >= next_checkpoint_tokens:
+        step_complete = accumulated_tokens == config.effective_batch_tokens
+        final_stream_token = tokens_seen >= config.total_fit_tokens
+        if step_complete or final_stream_token:
+            for parameter in sae.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.div_(accumulated_tokens)
+            learning_rate = learning_rate_for_tokens(config, tokens_seen)
+            for parameter_group in optimizer.param_groups:
+                parameter_group["lr"] = learning_rate
+            remove_parallel_decoder_grad_(sae)
+            optimizer.step()
+            sae.renormalize_decoder_()
+            optimizer.zero_grad(set_to_none=True)
+            accumulated_tokens = 0
+        if (
+            tokens_seen >= next_checkpoint_tokens
+            and accumulated_tokens == 0
+        ):
             last_checkpoint_path = _write_checkpoint(
                 sae,
                 optimizer,
@@ -409,8 +504,23 @@ def train_sae_stream(
                 batch_index=batch_index,
                 last_activation_token=last_activation_token,
             )
+            if on_checkpoint is not None:
+                on_checkpoint(last_checkpoint_path)
             while tokens_seen >= next_checkpoint_tokens:
                 next_checkpoint_tokens += config.checkpoint_every_tokens
+
+    if accumulated_tokens:
+        for parameter in sae.parameters():
+            if parameter.grad is not None:
+                parameter.grad.div_(accumulated_tokens)
+        learning_rate = learning_rate_for_tokens(config, tokens_seen)
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = learning_rate
+        remove_parallel_decoder_grad_(sae)
+        optimizer.step()
+        sae.renormalize_decoder_()
+        optimizer.zero_grad(set_to_none=True)
+        accumulated_tokens = 0
 
     if skipped_batches != resume_batch_index:
         raise ValueError(
@@ -431,6 +541,8 @@ def train_sae_stream(
         batch_index=batch_index,
         last_activation_token=last_activation_token,
     )
+    if on_checkpoint is not None:
+        on_checkpoint(final_path)
     if last_checkpoint_path is not None and final_path == last_checkpoint_path:
         final_path = last_checkpoint_path
     return load_training_checkpoint(final_path, config.identity)

@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).parents[1]
 
 def test_sparse_profile_is_frozen() -> None:
     config = load_sparse_config(PROJECT_ROOT)
+    assert config["execution_contract_version"] == 2
     assert config["model_name"] == "Qwen/Qwen2.5-Coder-7B-Instruct"
     assert config["model_revision"] == (
         "c03e6d358207e414f1eca0bb1891e29f1db0e242"
@@ -37,7 +38,37 @@ def test_sparse_profile_is_frozen() -> None:
         "microbatch_candidates": [4096, 2048, 1024, 512],
         "checkpoint_every_tokens": 250_000,
         "max_projected_hours": 12,
+        "calibration_tokens": 100_000,
+        "dead_feature_window_tokens": 1_000_000,
+        "optimizer": {
+            "name": "AdamW",
+            "max_learning_rate": 3e-4,
+            "min_learning_rate": 3e-5,
+            "warmup_tokens": 100_000,
+            "betas": [0.9, 0.999],
+            "eps": 1e-8,
+            "weight_decay": 0,
+            "schedule": "linear_warmup_cosine",
+        },
     }
+    assert config["generation"] == {
+        "format_style": "chat_template",
+        "batch_size": 1,
+        "max_new_tokens": 128,
+        "do_sample": False,
+        "eos": "tokenizer_eos",
+        "refusal_markers": [
+            "i cannot",
+            "i can't",
+            "i am unable",
+            "i'm unable",
+            "i will not",
+            "i won't",
+            "cannot assist",
+            "can't assist",
+        ],
+    }
+    assert config["dense_doses"] == {"addition": 1.0, "ablation": 1.0}
     assert config["pair_splits"] == {
         "discovery": 128,
         "selection": 64,

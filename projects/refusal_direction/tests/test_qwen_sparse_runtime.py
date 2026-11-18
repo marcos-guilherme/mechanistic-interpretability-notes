@@ -327,6 +327,7 @@ def test_stage_machine_is_exact_and_test_requires_frozen_selection(
         "pass_ablation",
         "fail_selectivity_addition",
         "fail_selectivity_ablation",
+        "resource_projection_failed",
         "sae_quality_failed",
         "direction_reconstruction_failed",
         "inconclusive_review",
@@ -439,6 +440,21 @@ def test_hooks_preserve_dense_intervention_semantics() -> None:
     )
     assert len(pre) == 24
     assert len(forward) == 48
+
+    keyed_vectors = {
+        "dense": vectors["dense"],
+        "filtered_addition": vectors["filtered"],
+    }
+    pre, forward = sparse_condition_hook_specs(
+        condition="filtered_addition",
+        blocks=blocks,
+        attentions=attentions,
+        mlps=mlps,
+        vectors=keyed_vectors,
+        freeze=freeze,
+    )
+    assert len(pre) == 1
+    assert forward == []
 
 
 def test_compact_test_matrix_has_all_nine_conditions_without_leaks(
@@ -623,6 +639,11 @@ def test_entrypoint_returns_operational_error_before_scanning_stages(
 def test_quality_and_decomposition_contracts_enforce_scientific_gates(
     tmp_path: Path,
 ) -> None:
+    pilot = _store(tmp_path / "pilot")
+    pilot.write_stage("prepare", {"status": "completed"})
+    with pytest.raises(ValueError, match="hardware_pilot status"):
+        pilot.write_stage("hardware_pilot", {"status": "made_up"})
+
     store = _store(tmp_path)
     for stage in SPARSE_STAGES[:3]:
         store.write_stage(stage, {"status": "completed"})
@@ -966,6 +987,16 @@ def test_scientific_halts_and_operational_errors_remain_distinct(
     assert halted["results"]["status"] == "sae_quality_failed"
     assert not store.stage_path("decompose").exists()
     assert not store.operational_error_path.exists()
+
+    resource = _store(tmp_path / "resource")
+    resource.write_stage("prepare", {"status": "completed"})
+    projected = SparseRuntime(resource).run_stage(
+        "hardware_pilot",
+        lambda **_kwargs: {"status": "resource_projection_failed"},
+    )
+    assert projected["results"]["status"] == "resource_projection_failed"
+    assert not resource.stage_path("sae_fit").exists()
+    assert not resource.operational_error_path.exists()
 
     other = _store(tmp_path / "operational")
     with pytest.raises(RuntimeError, match="boom"):

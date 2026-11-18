@@ -1,4 +1,5 @@
 import random
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,11 @@ def deterministic_batches(
 def tiny_config() -> SparseTrainConfig:
     return SparseTrainConfig(
         **IDENTITY,
-        learning_rate=1e-3,
+        max_learning_rate=1e-3,
+        min_learning_rate=1e-4,
+        warmup_tokens=10,
+        total_fit_tokens=40,
+        effective_batch_tokens=10,
         checkpoint_every_tokens=10,
         activation_scale=2.5,
         dead_feature_window_tokens=10,
@@ -47,6 +52,23 @@ def fresh_sae(state: dict[str, torch.Tensor]) -> TopKSparseAutoencoder:
     sae = TopKSparseAutoencoder(d_in=4, d_sae=8, k=2)
     sae.load_state_dict(state)
     return sae
+
+
+def test_training_publishes_each_valid_token_checkpoint(
+    tmp_path: Path,
+) -> None:
+    published: list[Path] = []
+    result = train_sae_stream(
+        TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+        deterministic_batches(seed=31, count=4, d_in=4),
+        tiny_config(),
+        tmp_path / "published",
+        on_checkpoint=lambda path: published.append(Path(path)),
+    )
+
+    assert len(published) >= 2
+    assert published[-1] == result.checkpoint_path
+    assert all(path.is_file() for path in published)
 
 
 def test_checkpoint_resume_reproduces_uninterrupted_weights(
@@ -217,6 +239,8 @@ def test_checkpoint_contains_resume_state_and_is_atomically_replaced(
         "tokens_seen",
         "batch_index",
         "activation_scale",
+        "optimizer_name",
+        "schedule",
         "model_state",
         "optimizer_state",
         "python_rng_state",
@@ -225,9 +249,86 @@ def test_checkpoint_contains_resume_state_and_is_atomically_replaced(
         "last_activation_token",
     }
     assert payload["identity"] == IDENTITY
+    assert payload["optimizer_name"] == "AdamW"
+    assert payload["schedule"] == {
+        "name": "linear_warmup_cosine",
+        "max_learning_rate": 1e-3,
+        "min_learning_rate": 1e-4,
+        "warmup_tokens": 10,
+        "total_fit_tokens": 40,
+        "effective_batch_tokens": 10,
+    }
+    assert payload["optimizer_state"]["param_groups"][0]["betas"] == (
+        0.9,
+        0.999,
+    )
+    assert payload["optimizer_state"]["param_groups"][0]["eps"] == 1e-8
+    assert payload["optimizer_state"]["param_groups"][0]["weight_decay"] == 0
     assert payload["activation_scale"] == 2.5
     assert payload["last_activation_token"].shape == (8,)
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_learning_rate_uses_spec_warmup_and_cosine() -> None:
+    from refusal_direction_replication.qwen_sparse_training import (
+        learning_rate_for_tokens,
+    )
+
+    config = tiny_config()
+    assert learning_rate_for_tokens(config, 0) == 0
+    assert learning_rate_for_tokens(config, 10) == pytest.approx(1e-3)
+    assert learning_rate_for_tokens(config, 25) == pytest.approx(5.5e-4)
+    assert learning_rate_for_tokens(config, 40) == pytest.approx(1e-4)
+    assert learning_rate_for_tokens(config, 100) == pytest.approx(1e-4)
+
+
+def test_checkpoint_v1_is_rejected_with_explicit_migration_error(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "legacy.pt"
+    torch.save({"schema_version": 1}, legacy)
+    with pytest.raises(ValueError, match="legacy checkpoint schema_version 1"):
+        load_training_checkpoint(legacy, IDENTITY)
+
+
+def test_resume_rejects_optimizer_schedule_change(tmp_path: Path) -> None:
+    partial = train_sae_stream(
+        TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+        deterministic_batches(seed=41, count=2, d_in=4),
+        tiny_config(),
+        tmp_path / "partial-schedule",
+    )
+    changed = replace(tiny_config(), min_learning_rate=5e-5)
+    with pytest.raises(ValueError, match="schedule"):
+        train_sae_stream(
+            TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+            deterministic_batches(seed=41, count=4, d_in=4),
+            changed,
+            tmp_path / "changed-schedule",
+            resume_from=partial.checkpoint_path,
+        )
+
+
+def test_optimizer_steps_only_after_effective_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    steps = 0
+    original = torch.optim.AdamW.step
+
+    def counted_step(self, *args, **kwargs):
+        nonlocal steps
+        steps += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", counted_step)
+    train_sae_stream(
+        TopKSparseAutoencoder(d_in=4, d_sae=8, k=2),
+        deterministic_batches(seed=43, count=4, d_in=4),
+        tiny_config(),
+        tmp_path / "effective-batch",
+    )
+    assert steps == 2
 
 
 def test_training_rejects_wrong_activation_width(tmp_path: Path) -> None:

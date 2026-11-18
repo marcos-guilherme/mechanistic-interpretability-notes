@@ -150,7 +150,11 @@ def sae_loss(
             aux_values.nan_to_num(),
         )
         aux_reconstruction = F.linear(aux_code, sae.decoder.weight)
-        aux = (residual.detach() - aux_reconstruction).square().mean()
+        residual_energy = residual.detach().square().mean().clamp_min(1e-12)
+        aux = (
+            (residual.detach() - aux_reconstruction).square().mean()
+            / residual_energy
+        )
     total = mse + aux / 32.0
     return total, {
         "mse": mse.detach(),
@@ -198,10 +202,22 @@ def evaluate_sae_quality(
     sae: TopKSparseAutoencoder,
     heldout_batches: Iterable[torch.Tensor],
     fit_mean_norm: float,
+    *,
+    last_activation_token: torch.Tensor,
+    fit_tokens_seen: int,
+    dead_feature_window_tokens: int,
 ) -> SAEQuality:
     """Evaluate token-weighted SAE metrics without retaining held-out batches."""
     if not math.isfinite(fit_mean_norm) or fit_mean_norm <= 0:
         raise ValueError("fit_mean_norm must be finite and positive")
+    if last_activation_token.shape != (sae.d_sae,):
+        raise ValueError("last_activation_token shape must match d_sae")
+    if fit_tokens_seen < 0 or dead_feature_window_tokens <= 0:
+        raise ValueError("fit activity counters are invalid")
+    if torch.any(last_activation_token < 0) or torch.any(
+        last_activation_token > fit_tokens_seen
+    ):
+        raise ValueError("last_activation_token is outside fit progress")
 
     was_training = sae.training
     sae.eval()
@@ -270,13 +286,18 @@ def evaluate_sae_quality(
             residual_square_sum / centered_square_sum
         )
     heldout_mean_norm = norm_sum / total_tokens
+    recent_fit_features = (
+        fit_tokens_seen - last_activation_token.detach().cpu()
+        < dead_feature_window_tokens
+    )
+    dead_features = ~(active_features | recent_fit_features)
     return SAEQuality(
         explained_variance=float(explained_variance),
         mean_cosine=float(cosine_sum / total_tokens),
         nonfinite_count=nonfinite_count,
         mean_l0=float(l0_sum / total_tokens),
         dead_feature_fraction=float(
-            (~active_features).sum().item() / sae.d_sae
+            dead_features.sum().item() / sae.d_sae
         ),
         norm_drift=float(
             abs(heldout_mean_norm / fit_mean_norm - 1.0)

@@ -12,7 +12,7 @@ from typing import Any
 SPARSE_PROFILE = "qwen25_coder_sparse_refusal.json"
 SPARSE_SCHEMA_VERSION = 1
 EXPECTED_SPARSE_PROFILE_SHA256 = (
-    "d8494c4eed2969e26e504add1a00fb9e622b2b5655a09771e61362528855f325"
+    "16a90b88e15dae64fac7f987bb4a6efec9c5714d3bbfaa9bc0d57ec796a785d2"
 )
 PAIR_SPLIT_SIZES = {"discovery": 128, "selection": 64, "test": 64}
 PAIR_SPLIT_SEED = 2029

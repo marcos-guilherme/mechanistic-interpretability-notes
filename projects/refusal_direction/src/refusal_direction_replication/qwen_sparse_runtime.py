@@ -65,6 +65,7 @@ SCIENTIFIC_STATUSES = {
     "pass_ablation",
     "fail_selectivity_addition",
     "fail_selectivity_ablation",
+    "resource_projection_failed",
     "sae_quality_failed",
     "direction_reconstruction_failed",
     "inconclusive_review",
@@ -133,6 +134,7 @@ _PROVENANCE_FIELDS = (
 )
 _SCIENTIFIC_HALTS = frozenset(
     {
+        "resource_projection_failed",
         "sae_quality_failed",
         "direction_reconstruction_failed",
         "inconclusive_review",
@@ -487,9 +489,13 @@ def sparse_condition_hook_specs(
         "random": "random",
     }[family]
     _validate_selection_freeze(freeze)
-    if vector_key not in vectors:
-        raise ValueError(f"missing frozen vector for {vector_key}")
-    vector = vectors[vector_key]
+    condition_key = f"{vector_key}_{intervention}"
+    if condition_key in vectors:
+        vector = vectors[condition_key]
+    elif vector_key in vectors:
+        vector = vectors[vector_key]
+    else:
+        raise ValueError(f"missing frozen vector for {condition_key}")
     if vector_key == "dense":
         spec = freeze["dense"][intervention]
     else:
@@ -861,6 +867,11 @@ def _validate_stage_schema(stage: str, results: Mapping[str, Any]) -> None:
         )
     if "status" not in results or not isinstance(results["status"], str):
         raise ValueError(f"{stage} schema requires string status")
+    if stage == "hardware_pilot" and results["status"] not in {
+        "completed",
+        "resource_projection_failed",
+    }:
+        raise ValueError("hardware_pilot status is invalid")
     exact_stages = {
         "test",
         "review_export",
@@ -1930,7 +1941,14 @@ def _load_frozen_test_pairs(path: Path) -> tuple[dict[str, str], ...]:
         for row in rows
     ]
     split = split_reviewed_pairs(reviewed)["test"]
-    compact = tuple(row.compact() for row in split)
+    compact = tuple(
+        {
+            "pair_id": row.pair_id,
+            "offensive_sha256": row.compact()["offensive_sha256"],
+            "defensive_sha256": row.compact()["defensive_sha256"],
+        }
+        for row in split
+    )
     for source, identity in zip(
         sorted(
             (row for row in rows if row["pair_id"] in {item.pair_id for item in split}),

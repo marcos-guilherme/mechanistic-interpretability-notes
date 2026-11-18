@@ -1,4 +1,5 @@
 {
+  "execution_contract_version": 2,
   "model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
   "model_revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
   "dtype": "bfloat16",
@@ -16,8 +17,38 @@
     "effective_batch_tokens": 8192,
     "microbatch_candidates": [4096, 2048, 1024, 512],
     "checkpoint_every_tokens": 250000,
-    "max_projected_hours": 12
+    "max_projected_hours": 12,
+    "calibration_tokens": 100000,
+    "dead_feature_window_tokens": 1000000,
+    "optimizer": {
+      "name": "AdamW",
+      "max_learning_rate": 0.0003,
+      "min_learning_rate": 0.00003,
+      "warmup_tokens": 100000,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8,
+      "weight_decay": 0,
+      "schedule": "linear_warmup_cosine"
+    }
   },
+  "generation": {
+    "format_style": "chat_template",
+    "batch_size": 1,
+    "max_new_tokens": 128,
+    "do_sample": false,
+    "eos": "tokenizer_eos",
+    "refusal_markers": [
+      "i cannot",
+      "i can't",
+      "i am unable",
+      "i'm unable",
+      "i will not",
+      "i won't",
+      "cannot assist",
+      "can't assist"
+    ]
+  },
+  "dense_doses": {"addition": 1.0, "ablation": 1.0},
   "pair_splits": {
     "discovery": 128,
     "selection": 64,
