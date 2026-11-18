@@ -39,13 +39,14 @@ A revisão dos 256 pares do experimento esparso será descrita como
 
 ## Artefatos
 
-Serão gerados localmente:
+Serão mantidos localmente:
 
-- `docs/entregas/2026-11-18-relatorio-experimentos-semana-final.md`;
+- `docs/entregas/2026-11-18-relatorio-experimentos-semana-final.tex`;
 - `docs/entregas/2026-11-18-relatorio-experimentos-semana-final.pdf`.
 
-Os dois arquivos serão ignorados pelo Git. Um arquivo LaTeX temporário poderá
-ser usado para renderização e removido após a compilação.
+Os dois arquivos serão ignorados pelo Git. O LaTeX será a fonte canônica do
+relatório. A diagramação será acadêmica e discreta, sem caixas coloridas,
+faixas de destaque ou estrutura simétrica de apresentação comercial.
 
 ## Verificação
 
