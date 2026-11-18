@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 from types import SimpleNamespace
 
+from refusal_direction_replication.data import prompt_content_hash
 from refusal_direction_replication.qwen_sparse_remote import (
     HEAVY_STAGES,
     ProductionSparseStageExecutor,
@@ -128,19 +129,24 @@ def test_prepare_environment_materializes_manifest_and_private_tokens(
     )
     rows = {
         sources[0]["repo_id"]: [
-            {"id": "code-1", "func_code_string": "abcdefgh"}
+            {"id": "code-1", "func_code_string": "a"},
+            {"id": "code-2", "func_code_string": "bcd"},
         ],
         sources[1]["repo_id"]: [
             {
                 "id": "chat-1",
-                "messages": [{"content": "ijklmnop"}],
-            }
+                "messages": [{"content": "i"}],
+            },
+            {
+                "id": "chat-2",
+                "messages": [{"content": "jkl"}],
+            },
         ],
         sources[2]["repo_id"]: [
             {
                 "id": "delta-1",
-                "prior_version": "qrst",
-                "after_version": "uvwx",
+                "prior_version": "q",
+                "after_version": "rs",
             }
         ],
     }
@@ -170,13 +176,123 @@ def test_prepare_environment_materializes_manifest_and_private_tokens(
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     private_tokens = json.loads(token_path.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 4
     assert manifest["accepted_tokens"] == 12
-    assert [row["token_count"] for row in manifest["records"]] == [4, 4, 4]
+    assert [row["token_count"] for row in manifest["records"]] == [1, 3, 1, 3, 4]
     assert len(private_tokens["fit"]) == 11
     assert len(private_tokens["holdout"]) == 1
+    fit_hashes = {
+        row["content_sha256"]
+        for row in manifest["records"]
+        if row["split"] == "fit"
+    }
+    holdout_hashes = {
+        row["content_sha256"]
+        for row in manifest["records"]
+        if row["split"] == "holdout"
+    }
+    assert fit_hashes.isdisjoint(holdout_hashes)
+    document_text = {
+        "code-1": "a",
+        "code-2": "bcd",
+        "chat-1": "i",
+        "chat-2": "jkl",
+        "delta-1": "q\nrs",
+    }
+    split_tokens = {
+        "fit": set(private_tokens["fit"]),
+        "holdout": set(private_tokens["holdout"]),
+    }
+    for row in manifest["records"]:
+        row_id = row["source_identity"].rsplit(":", maxsplit=1)[1]
+        tokens = {ord(character) for character in document_text[row_id]}
+        other = "holdout" if row["split"] == "fit" else "fit"
+        assert tokens <= split_tokens[row["split"]]
+        assert tokens.isdisjoint(split_tokens[other])
+    assert manifest["split_validation"] == {
+        "fit_documents": 4,
+        "holdout_documents": 1,
+        "overlap_documents": 0,
+        "disjoint": True,
+        "fit_content_hashes_sha256": manifest["split_validation"][
+            "fit_content_hashes_sha256"
+        ],
+        "holdout_content_hashes_sha256": manifest["split_validation"][
+            "holdout_content_hashes_sha256"
+        ],
+    }
+    assert manifest["split_rule"] == (
+        "content_sha256_ranked_exact_document_subset,5_percent"
+    )
     assert identity["run_id"] == "run-id"
     assert identity["corpus_sha256"]
     assert "abcdefgh" not in manifest_path.read_text(encoding="utf-8")
+
+
+def test_prepare_environment_excludes_jlens_v1_and_v2_hashes(
+    tmp_path: Path,
+) -> None:
+    artifacts_dir = tmp_path / "artifacts/qwen25_coder_sparse_refusal"
+    excluded_v1 = prompt_content_hash("v1")
+    excluded_v2 = prompt_content_hash("v2")
+    manifests = (
+        (
+            tmp_path
+            / "results/qwen25_coder_7b_jlens/00_jlens_prepare.json",
+            {"fit_hashes": [excluded_v1], "holdout_hashes": []},
+        ),
+        (
+            tmp_path
+            / "results/qwen25_coder_7b_jlens_v2/00_jlens_prepare.json",
+            {"fit_hashes": [], "holdout_hashes": [excluded_v2]},
+        ),
+    )
+    for path, results in manifests:
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"results": results}),
+            encoding="utf-8",
+        )
+
+    class Tokenizer:
+        def encode(self, text, add_special_tokens=False):
+            assert add_special_tokens is False
+            return [ord(character) for character in text]
+
+    prepare_sparse_environment(
+        tmp_path,
+        config={
+            "model_revision": "revision",
+            "artifacts_dir": str(artifacts_dir.relative_to(tmp_path)),
+        },
+        tokenizer=Tokenizer(),
+        dataset_loader=lambda *_args, **_kwargs: [
+            {"id": "excluded-v1", "func_code_string": "v1"},
+            {"id": "excluded-v2", "func_code_string": "v2"},
+            {"id": "accepted", "func_code_string": "z"},
+        ],
+        source_specs=(
+            {
+                "repo_id": "code-search-net/code_search_net",
+                "config": "python",
+                "split": "train",
+                "revision": "revision",
+                "target_tokens": 1,
+            },
+        ),
+        run_id="run",
+        implementation_commit="commit",
+    )
+
+    manifest = json.loads(
+        (artifacts_dir / "corpus_manifest.json").read_text(encoding="utf-8")
+    )
+    assert [row["content_sha256"] for row in manifest["records"]] == [
+        prompt_content_hash("z")
+    ]
+    assert manifest["exclusions"]["jlens_v1_hashes"] == 1
+    assert manifest["exclusions"]["jlens_v2_hashes"] == 1
+    assert manifest["exclusions"]["effective_hashes"] == 2
 
 
 def test_hardware_pilot_selects_first_safe_frozen_microbatch() -> None:
@@ -263,7 +379,8 @@ def test_prepare_environment_reuses_valid_private_corpus_without_loading(
         config=config,
         tokenizer=Tokenizer(),
         dataset_loader=lambda *_args, **_kwargs: [
-            {"id": "row", "func_code_string": "abcdefgh"}
+            {"id": "row-1", "func_code_string": "a"},
+            {"id": "row-2", "func_code_string": "bcd"},
         ],
         source_specs=sources,
         run_id="stable-run",
@@ -329,7 +446,7 @@ def test_prepare_stage_accepts_versioned_private_corpus_manifest(
     (artifacts / "corpus_manifest.json").write_text(
         json.dumps(
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "fit_tokens": 3,
                 "holdout_tokens": 1,
             }

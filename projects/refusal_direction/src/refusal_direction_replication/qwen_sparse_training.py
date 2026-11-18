@@ -55,6 +55,25 @@ class ActivationBatch:
 
 
 @dataclass(frozen=True)
+class SaeMicrobatchResult:
+    """Outputs needed by both canonical training and the hardware pilot."""
+
+    token_count: int
+    selected_indices: torch.Tensor
+    loss_finite: bool
+
+
+@dataclass(frozen=True)
+class SaePilotMeasurement:
+    """Steady-state result for one full effective training batch."""
+
+    elapsed_seconds: float
+    tokens_per_second: float
+    finite: bool
+    optimizer_state_allocated: bool
+
+
+@dataclass(frozen=True)
 class SparseTrainConfig:
     """Frozen training identity plus optimizer and checkpoint settings."""
 
@@ -367,6 +386,159 @@ def learning_rate_for_tokens(
     ) * cosine
 
 
+def create_sae_optimizer(
+    sae: TopKSparseAutoencoder,
+) -> torch.optim.AdamW:
+    """Create the frozen AdamW optimizer used by training and pilot."""
+    return torch.optim.AdamW(
+        sae.parameters(),
+        lr=0.0,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.0,
+    )
+
+
+def accumulate_sae_microbatch(
+    sae: TopKSparseAutoencoder,
+    activations: torch.Tensor,
+    dead_mask: torch.Tensor,
+) -> SaeMicrobatchResult:
+    """Accumulate one token-weighted microbatch through the canonical loss."""
+    if (
+        activations.ndim != 2
+        or activations.shape[1] != sae.d_in
+        or activations.shape[0] == 0
+    ):
+        raise ValueError(
+            f"activation batch shape must be [tokens, {sae.d_in}]"
+        )
+    if dead_mask.shape != (sae.d_sae,) or dead_mask.dtype != torch.bool:
+        raise ValueError("dead feature mask shape or dtype is invalid")
+    loss, metrics = sae_loss(sae, activations, dead_mask)
+    token_count = int(activations.shape[0])
+    (loss * token_count).backward()
+    return SaeMicrobatchResult(
+        token_count=token_count,
+        selected_indices=metrics["selected_indices"],
+        loss_finite=bool(torch.isfinite(loss).item()),
+    )
+
+
+def complete_sae_optimizer_step(
+    sae: TopKSparseAutoencoder,
+    optimizer: torch.optim.Optimizer,
+    *,
+    accumulated_tokens: int,
+    learning_rate: float,
+) -> bool:
+    """Project, step, and renormalize exactly as canonical SAE training."""
+    if accumulated_tokens <= 0:
+        raise ValueError("accumulated_tokens must be positive")
+    if learning_rate < 0:
+        raise ValueError("learning_rate must be nonnegative")
+    for parameter in sae.parameters():
+        if parameter.grad is not None:
+            parameter.grad.div_(accumulated_tokens)
+    for parameter_group in optimizer.param_groups:
+        parameter_group["lr"] = learning_rate
+    remove_parallel_decoder_grad_(sae)
+    gradients = [
+        parameter.grad
+        for parameter in sae.parameters()
+        if parameter.grad is not None
+    ]
+    gradients_finite = bool(gradients) and all(
+        bool(torch.isfinite(gradient).all().item())
+        for gradient in gradients
+    )
+    optimizer.step()
+    sae.renormalize_decoder_()
+    optimizer.zero_grad(set_to_none=True)
+    return gradients_finite
+
+
+def measure_sae_training_candidate(
+    sae: TopKSparseAutoencoder,
+    optimizer: torch.optim.Optimizer,
+    batch_factory: Callable[[], Iterable[ActivationBatch]],
+    *,
+    device: str | torch.device,
+    effective_batch_tokens: int,
+    learning_rate: float,
+    synchronize: Callable[[], None],
+    reset_peak_memory: Callable[[], None],
+    clock: Callable[[], float],
+) -> SaePilotMeasurement:
+    """Warm optimizer state, then time the same full update used in training."""
+    if effective_batch_tokens <= 0:
+        raise ValueError("effective_batch_tokens must be positive")
+    target_device = torch.device(device)
+    sae.to(target_device)
+    sae.train()
+
+    def run_effective_batch() -> bool:
+        accumulated_tokens = 0
+        losses_finite = True
+        optimizer.zero_grad(set_to_none=True)
+        for activation_batch in batch_factory():
+            x = _validate_activation_batch(activation_batch, sae.d_in).to(
+                device=target_device,
+                dtype=sae.decoder.weight.dtype,
+            )
+            result = accumulate_sae_microbatch(
+                sae,
+                x,
+                torch.zeros(
+                    sae.d_sae,
+                    dtype=torch.bool,
+                    device=target_device,
+                ),
+            )
+            accumulated_tokens += result.token_count
+            losses_finite = losses_finite and result.loss_finite
+            if accumulated_tokens > effective_batch_tokens:
+                raise ValueError(
+                    "pilot microbatches exceed effective_batch_tokens"
+                )
+        if accumulated_tokens != effective_batch_tokens:
+            raise ValueError(
+                "pilot microbatches do not fill effective_batch_tokens"
+            )
+        gradients_finite = complete_sae_optimizer_step(
+            sae,
+            optimizer,
+            accumulated_tokens=accumulated_tokens,
+            learning_rate=learning_rate,
+        )
+        parameters_finite = all(
+            bool(torch.isfinite(parameter).all().item())
+            for parameter in sae.parameters()
+        )
+        return losses_finite and gradients_finite and parameters_finite
+
+    warmup_finite = run_effective_batch()
+    synchronize()
+    optimizer_state_allocated = bool(optimizer.state)
+    reset_peak_memory()
+    started = clock()
+    measured_finite = run_effective_batch()
+    synchronize()
+    elapsed = clock() - started
+    if elapsed <= 0:
+        raise ValueError("pilot elapsed time must be positive")
+    return SaePilotMeasurement(
+        elapsed_seconds=elapsed,
+        tokens_per_second=effective_batch_tokens / elapsed,
+        finite=(
+            warmup_finite
+            and measured_finite
+            and optimizer_state_allocated
+        ),
+        optimizer_state_allocated=optimizer_state_allocated,
+    )
+
+
 def train_sae_stream(
     sae: TopKSparseAutoencoder,
     batches: Iterable[ActivationBatch],
@@ -381,13 +553,7 @@ def train_sae_stream(
         raise ValueError("CUDA device requested but unavailable")
     sae.to(device)
     sae.train()
-    optimizer = torch.optim.AdamW(
-        sae.parameters(),
-        lr=0.0,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        weight_decay=0.0,
-    )
+    optimizer = create_sae_optimizer(sae)
     tokens_seen = 0
     batch_index = 0
     resume_batch_index = 0
@@ -451,10 +617,9 @@ def train_sae_stream(
             tokens_seen - last_activation_token
             >= config.dead_feature_window_tokens
         )
-        loss, metrics = sae_loss(sae, x, dead_mask)
-        selected_indices = metrics["selected_indices"]
-        batch_tokens = int(x.shape[0])
-        (loss * batch_tokens).backward()
+        microbatch = accumulate_sae_microbatch(sae, x, dead_mask)
+        selected_indices = microbatch.selected_indices
+        batch_tokens = microbatch.token_count
         accumulated_tokens += batch_tokens
         if accumulated_tokens > config.effective_batch_tokens:
             raise ValueError(
@@ -480,16 +645,13 @@ def train_sae_stream(
         step_complete = accumulated_tokens == config.effective_batch_tokens
         final_stream_token = tokens_seen >= config.total_fit_tokens
         if step_complete or final_stream_token:
-            for parameter in sae.parameters():
-                if parameter.grad is not None:
-                    parameter.grad.div_(accumulated_tokens)
             learning_rate = learning_rate_for_tokens(config, tokens_seen)
-            for parameter_group in optimizer.param_groups:
-                parameter_group["lr"] = learning_rate
-            remove_parallel_decoder_grad_(sae)
-            optimizer.step()
-            sae.renormalize_decoder_()
-            optimizer.zero_grad(set_to_none=True)
+            complete_sae_optimizer_step(
+                sae,
+                optimizer,
+                accumulated_tokens=accumulated_tokens,
+                learning_rate=learning_rate,
+            )
             accumulated_tokens = 0
         if (
             tokens_seen >= next_checkpoint_tokens
@@ -510,16 +672,13 @@ def train_sae_stream(
                 next_checkpoint_tokens += config.checkpoint_every_tokens
 
     if accumulated_tokens:
-        for parameter in sae.parameters():
-            if parameter.grad is not None:
-                parameter.grad.div_(accumulated_tokens)
         learning_rate = learning_rate_for_tokens(config, tokens_seen)
-        for parameter_group in optimizer.param_groups:
-            parameter_group["lr"] = learning_rate
-        remove_parallel_decoder_grad_(sae)
-        optimizer.step()
-        sae.renormalize_decoder_()
-        optimizer.zero_grad(set_to_none=True)
+        complete_sae_optimizer_step(
+            sae,
+            optimizer,
+            accumulated_tokens=accumulated_tokens,
+            learning_rate=learning_rate,
+        )
         accumulated_tokens = 0
 
     if skipped_batches != resume_batch_index:

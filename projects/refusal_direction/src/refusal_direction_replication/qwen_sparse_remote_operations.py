@@ -170,9 +170,14 @@ def _source_identity(
     return f"{repo_id}@{revision}:row-{index:012d}"
 
 
-def _exclusion_hashes(root: Path, artifacts_dir: Path) -> set[str]:
+def _exclusion_hashes(
+    root: Path,
+    artifacts_dir: Path,
+) -> tuple[set[str], dict[str, int | str]]:
     hashes: set[str] = set()
+    counts: dict[str, int] = {}
     pairs = artifacts_dir / "pairs" / "reviewed.jsonl"
+    reviewed_hashes: set[str] = set()
     if pairs.is_file():
         for line in pairs.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -181,8 +186,12 @@ def _exclusion_hashes(root: Path, artifacts_dir: Path) -> set[str]:
             for field in ("offensive_sha256", "defensive_sha256"):
                 value = row.get(field)
                 if isinstance(value, str):
-                    hashes.add(value)
+                    reviewed_hashes.add(value)
+    hashes.update(reviewed_hashes)
+    counts["reviewed_pair_hashes"] = len(reviewed_hashes)
+
     prepare = root / "results/qwen25_coder_7b_code_eval/00_prepare.json"
+    code_eval_hashes: set[str] = set()
     if prepare.is_file():
         payload = json.loads(prepare.read_text(encoding="utf-8"))
 
@@ -190,7 +199,7 @@ def _exclusion_hashes(root: Path, artifacts_dir: Path) -> set[str]:
             if isinstance(value, Mapping):
                 for key, item in value.items():
                     if key == "content_hashes" and isinstance(item, list):
-                        hashes.update(str(digest) for digest in item)
+                        code_eval_hashes.update(str(digest) for digest in item)
                     else:
                         visit(item)
             elif isinstance(value, list):
@@ -198,7 +207,89 @@ def _exclusion_hashes(root: Path, artifacts_dir: Path) -> set[str]:
                     visit(item)
 
         visit(payload)
-    return hashes
+    hashes.update(code_eval_hashes)
+    counts["code_eval_hashes"] = len(code_eval_hashes)
+
+    jlens_manifests = {
+        "jlens_v1_hashes": (
+            root / "results/qwen25_coder_7b_jlens/00_jlens_prepare.json"
+        ),
+        "jlens_v2_hashes": (
+            root / "results/qwen25_coder_7b_jlens_v2/00_jlens_prepare.json"
+        ),
+    }
+    for label, path in jlens_manifests.items():
+        source_hashes: set[str] = set()
+        if path.is_file():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            results = payload.get("results") if isinstance(payload, dict) else None
+            if not isinstance(results, dict):
+                raise ValueError(f"{label} manifest results are invalid")
+            for field in ("fit_hashes", "holdout_hashes"):
+                values = results.get(field)
+                if not isinstance(values, list) or any(
+                    not isinstance(value, str) or not value for value in values
+                ):
+                    raise ValueError(
+                        f"{label} manifest {field} must be a hash list"
+                    )
+                source_hashes.update(values)
+        hashes.update(source_hashes)
+        counts[label] = len(source_hashes)
+    return hashes, {
+        **counts,
+        "effective_hashes": len(hashes),
+        "effective_hashes_sha256": _sha256_value(sorted(hashes)),
+    }
+
+
+def _exact_document_holdout(
+    records: Sequence[Mapping[str, Any]],
+    target_tokens: int,
+) -> set[int]:
+    """Select a deterministic exact-token subset without splitting documents."""
+    if target_tokens <= 0:
+        raise ValueError("document holdout target must be positive")
+    mask = (1 << (target_tokens + 1)) - 1
+    reachable = 1
+    predecessor_record = [-1] * (target_tokens + 1)
+    predecessor_sum = [-1] * (target_tokens + 1)
+    ranked = sorted(
+        range(len(records)),
+        key=lambda index: (
+            str(records[index]["content_sha256"]),
+            str(records[index]["source_identity"]),
+        ),
+    )
+    for record_index in ranked:
+        token_count = int(records[record_index]["token_count"])
+        if token_count <= 0 or token_count > target_tokens:
+            continue
+        shifted = (reachable << token_count) & mask
+        newly_reachable = shifted & ~reachable
+        pending = newly_reachable
+        while pending:
+            lowest = pending & -pending
+            token_sum = lowest.bit_length() - 1
+            predecessor_record[token_sum] = record_index
+            predecessor_sum[token_sum] = token_sum - token_count
+            pending ^= lowest
+        reachable |= shifted
+        if reachable & (1 << target_tokens):
+            break
+    if not reachable & (1 << target_tokens):
+        raise ValueError(
+            "whole-document split cannot satisfy the frozen 5% token target"
+        )
+    selected: set[int] = set()
+    token_sum = target_tokens
+    while token_sum:
+        record_index = predecessor_record[token_sum]
+        if record_index < 0 or record_index in selected:
+            raise RuntimeError("document holdout reconstruction failed")
+        selected.add(record_index)
+        token_sum = predecessor_sum[token_sum]
+    return selected
 
 
 def _default_dataset_loader(
@@ -272,6 +363,7 @@ def _resolve_environment_identity(
 
 
 def _reuse_prepared_corpus(
+    root: Path,
     artifacts_dir: Path,
     *,
     config: Mapping[str, Any],
@@ -288,7 +380,7 @@ def _reuse_prepared_corpus(
         raise ValueError("prepared corpus manifest/token bundle must travel together")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     token_payload = json.loads(token_path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 3:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 4:
         raise ValueError("prepared corpus manifest schema is unsupported")
     if not isinstance(token_payload, dict) or set(token_payload) != {
         "schema_version",
@@ -310,6 +402,12 @@ def _reuse_prepared_corpus(
         raise ValueError("prepared private token bundle contains invalid tokens")
     if manifest.get("config_sha256") != _sha256_value(config):
         raise ValueError("prepared corpus config identity changed")
+    _current_hashes, current_exclusions = _exclusion_hashes(
+        Path(root),
+        artifacts_dir,
+    )
+    if manifest.get("exclusions") != current_exclusions:
+        raise ValueError("prepared corpus exclusion identity changed")
     if manifest.get("token_bundle_sha256") != _sha256_value(token_payload):
         raise ValueError("prepared private token bundle SHA-256 mismatch")
     records = manifest.get("records")
@@ -317,6 +415,54 @@ def _reuse_prepared_corpus(
         "records_sha256"
     ) != _sha256_value(records):
         raise ValueError("prepared corpus record identity is invalid")
+    fit_hashes = {
+        record.get("content_sha256")
+        for record in records
+        if isinstance(record, dict) and record.get("split") == "fit"
+    }
+    holdout_hashes = {
+        record.get("content_sha256")
+        for record in records
+        if isinstance(record, dict) and record.get("split") == "holdout"
+    }
+    if (
+        len(fit_hashes) + len(holdout_hashes) != len(records)
+        or fit_hashes & holdout_hashes
+    ):
+        raise ValueError("prepared corpus document split is not disjoint")
+    split_validation = manifest.get("split_validation")
+    expected_validation = {
+        "fit_documents": len(fit_hashes),
+        "holdout_documents": len(holdout_hashes),
+        "overlap_documents": 0,
+        "disjoint": True,
+        "fit_content_hashes_sha256": _sha256_value(sorted(fit_hashes)),
+        "holdout_content_hashes_sha256": _sha256_value(
+            sorted(holdout_hashes)
+        ),
+    }
+    if split_validation != expected_validation:
+        raise ValueError("prepared corpus split validation is invalid")
+    try:
+        record_fit_tokens = sum(
+            int(record["token_count"])
+            for record in records
+            if record["split"] == "fit"
+        )
+        record_holdout_tokens = sum(
+            int(record["token_count"])
+            for record in records
+            if record["split"] == "holdout"
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "prepared corpus record token counts are invalid"
+        ) from error
+    if (
+        record_fit_tokens != len(fit)
+        or record_holdout_tokens != len(holdout)
+    ):
+        raise ValueError("prepared corpus document token counts changed")
     sources = manifest.get("sources")
     contract = _source_contract(source_specs)
     if not isinstance(sources, dict) or set(sources) != set(contract):
@@ -398,6 +544,7 @@ def prepare_sparse_environment(
     root = Path(root).resolve()
     artifacts_dir = root / str(config["artifacts_dir"])
     reused = _reuse_prepared_corpus(
+        root,
         artifacts_dir,
         config=config,
         source_specs=source_specs,
@@ -406,10 +553,10 @@ def prepare_sparse_environment(
     )
     if reused is not None:
         return reused
-    exclusions = _exclusion_hashes(root, artifacts_dir)
+    exclusions, exclusion_manifest = _exclusion_hashes(root, artifacts_dir)
     seen_hashes: set[str] = set()
     records: list[dict[str, Any]] = []
-    ordered_tokens: list[int] = []
+    document_tokens: list[list[int]] = []
     source_stats: dict[str, dict[str, Any]] = {}
     for source in source_specs:
         repo_id = str(source["repo_id"])
@@ -450,7 +597,7 @@ def prepare_sparse_environment(
                     "token_count": len(tokens),
                 }
             )
-            ordered_tokens.extend(tokens)
+            document_tokens.append(tokens)
             accepted_tokens += len(tokens)
             accepted_records += 1
             if accepted_tokens == target_tokens:
@@ -467,28 +614,43 @@ def prepare_sparse_environment(
             "accepted_records": accepted_records,
             "accepted_tokens": accepted_tokens,
         }
-    total_tokens = len(ordered_tokens)
+    total_tokens = sum(len(tokens) for tokens in document_tokens)
     holdout_count = max(1, round(total_tokens * 0.05))
-    ranked = sorted(
-        range(total_tokens),
-        key=lambda index: hashlib.sha256(
-            f"{index}:{ordered_tokens[index]}".encode()
-        ).digest(),
-    )
-    holdout_indices = set(ranked[:holdout_count])
-    fit = [
-        token
-        for index, token in enumerate(ordered_tokens)
-        if index not in holdout_indices
-    ]
-    holdout = [
-        token
-        for index, token in enumerate(ordered_tokens)
-        if index in holdout_indices
-    ]
+    holdout_documents = _exact_document_holdout(records, holdout_count)
+    fit: list[int] = []
+    holdout: list[int] = []
+    for index, (record, tokens) in enumerate(
+        zip(records, document_tokens, strict=True)
+    ):
+        split = "holdout" if index in holdout_documents else "fit"
+        record["split"] = split
+        (holdout if split == "holdout" else fit).extend(tokens)
+    fit_hashes = {
+        str(record["content_sha256"])
+        for record in records
+        if record["split"] == "fit"
+    }
+    holdout_hashes = {
+        str(record["content_sha256"])
+        for record in records
+        if record["split"] == "holdout"
+    }
+    overlap = fit_hashes & holdout_hashes
+    if overlap or len(fit) + len(holdout) != total_tokens:
+        raise RuntimeError("corpus document split validation failed")
+    split_validation = {
+        "fit_documents": len(fit_hashes),
+        "holdout_documents": len(holdout_hashes),
+        "overlap_documents": len(overlap),
+        "disjoint": not overlap,
+        "fit_content_hashes_sha256": _sha256_value(sorted(fit_hashes)),
+        "holdout_content_hashes_sha256": _sha256_value(
+            sorted(holdout_hashes)
+        ),
+    }
     token_payload = {"schema_version": 1, "fit": fit, "holdout": holdout}
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "config_sha256": _sha256_value(config),
         "records": records,
         "records_sha256": _sha256_value(records),
@@ -497,7 +659,9 @@ def prepare_sparse_environment(
         "accepted_tokens": total_tokens,
         "fit_tokens": len(fit),
         "holdout_tokens": len(holdout),
-        "split_rule": "lowest_sha256(index:token),5_percent",
+        "split_rule": "content_sha256_ranked_exact_document_subset,5_percent",
+        "split_validation": split_validation,
+        "exclusions": exclusion_manifest,
         "sources": source_stats,
     }
     manifest_path = _atomic_json(
@@ -627,6 +791,7 @@ class SparseA100Operations:
             restored["implementation_commit"] if restored else None
         )
         reused = _reuse_prepared_corpus(
+            root,
             artifacts_dir,
             config=config,
             source_specs=CORPUS_SOURCES,
@@ -780,7 +945,7 @@ class SparseA100Operations:
             )
         )
         if (
-            manifest.get("schema_version") != 3
+            manifest.get("schema_version") != 4
             or manifest.get("fit_tokens") != config["sae"]["fit_tokens"]
             or manifest.get("holdout_tokens")
             != config["sae"]["holdout_tokens"]
@@ -801,7 +966,11 @@ class SparseA100Operations:
 
         import torch
 
-        from .qwen_sparse_sae import TopKSparseAutoencoder, sae_loss
+        from .qwen_sparse_sae import TopKSparseAutoencoder
+        from .qwen_sparse_training import (
+            create_sae_optimizer,
+            measure_sae_training_candidate,
+        )
 
         if not torch.cuda.is_available():
             raise RuntimeError("A100 pilot requires CUDA")
@@ -835,59 +1004,72 @@ class SparseA100Operations:
             norm_sum / token_count
         )
         observations: list[dict[str, Any]] = []
+        effective_batch_tokens = int(sae_config["effective_batch_tokens"])
         for candidate in sae_config["microbatch_candidates"]:
             torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-            started = time.perf_counter()
             finite = False
+            optimizer_state_allocated = False
+            elapsed = float("inf")
+            tokens_per_second = 0.0
+            sae = None
+            optimizer = None
+            measurement = None
             try:
-                batch = next(
-                    iter(
-                        self._activation_batches(
-                            root=root,
-                            artifacts_dir=artifacts_dir,
-                            split="fit",
-                            microbatch_tokens=int(candidate),
-                            activation_scale=activation_scale,
-                            limit_tokens=int(candidate),
-                        )
-                    )
-                )
                 sae = TopKSparseAutoencoder(
                     d_in=int(sae_config["d_in"]),
                     d_sae=int(sae_config["d_sae"]),
                     k=int(sae_config["k"]),
                 ).to("cuda")
-                x = batch.activations.to("cuda")
-                loss, _metrics = sae_loss(
+                optimizer = create_sae_optimizer(sae)
+                measurement = measure_sae_training_candidate(
                     sae,
-                    x,
-                    torch.zeros(
-                        sae.d_sae,
-                        dtype=torch.bool,
-                        device="cuda",
+                    optimizer,
+                    lambda: self._activation_batches(
+                        root=root,
+                        artifacts_dir=artifacts_dir,
+                        split="fit",
+                        microbatch_tokens=int(candidate),
+                        activation_scale=activation_scale,
+                        limit_tokens=effective_batch_tokens,
                     ),
+                    device="cuda",
+                    effective_batch_tokens=effective_batch_tokens,
+                    learning_rate=float(
+                        sae_config["optimizer"]["max_learning_rate"]
+                    ),
+                    synchronize=torch.cuda.synchronize,
+                    reset_peak_memory=torch.cuda.reset_peak_memory_stats,
+                    clock=time.perf_counter,
                 )
-                loss.backward()
-                torch.cuda.synchronize()
-                finite = bool(torch.isfinite(loss).item())
-                elapsed = time.perf_counter() - started
+                finite = measurement.finite
+                optimizer_state_allocated = (
+                    measurement.optimizer_state_allocated
+                )
+                elapsed = measurement.elapsed_seconds
+                tokens_per_second = measurement.tokens_per_second
                 peak = int(torch.cuda.max_memory_allocated())
                 projected = (
                     elapsed
                     * int(sae_config["fit_tokens"])
-                    / int(candidate)
+                    / effective_batch_tokens
                     / 3600
                 )
             except torch.OutOfMemoryError:
                 peak = int(torch.cuda.max_memory_allocated())
                 projected = float("inf")
+            finally:
+                del measurement, optimizer, sae
             observations.append(
                 {
                     "microbatch_tokens": int(candidate),
                     "peak_memory_bytes": peak,
                     "projected_hours": projected,
                     "finite": finite,
+                    "effective_batch_tokens": effective_batch_tokens,
+                    "elapsed_seconds": elapsed,
+                    "tokens_per_second": tokens_per_second,
+                    "optimizer_state_allocated": optimizer_state_allocated,
+                    "steady_state_warmup_steps": 1,
                 }
             )
         decision = choose_hardware_pilot(

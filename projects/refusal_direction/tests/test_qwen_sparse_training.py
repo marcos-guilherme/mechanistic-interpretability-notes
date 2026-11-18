@@ -9,7 +9,9 @@ from refusal_direction_replication.qwen_sparse_sae import TopKSparseAutoencoder
 from refusal_direction_replication.qwen_sparse_training import (
     ActivationBatch,
     SparseTrainConfig,
+    create_sae_optimizer,
     load_training_checkpoint,
+    measure_sae_training_candidate,
     train_sae_stream,
 )
 
@@ -329,6 +331,75 @@ def test_optimizer_steps_only_after_effective_batch(
         tmp_path / "effective-batch",
     )
     assert steps == 2
+
+
+def test_shared_effective_batch_path_allocates_adamw_state_and_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import refusal_direction_replication.qwen_sparse_training as training
+
+    torch.manual_seed(47)
+    sae = TopKSparseAutoencoder(d_in=4, d_sae=8, k=2)
+    optimizer = create_sae_optimizer(sae)
+    projection_calls = 0
+    original_projection = training.remove_parallel_decoder_grad_
+
+    def counted_projection(model):
+        nonlocal projection_calls
+        projection_calls += 1
+        return original_projection(model)
+
+    monkeypatch.setattr(
+        training,
+        "remove_parallel_decoder_grad_",
+        counted_projection,
+    )
+    assert optimizer.state == {}
+    before = sae.decoder.weight.detach().clone()
+    factory_calls = 0
+
+    def batch_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        generator = torch.Generator().manual_seed(100 + factory_calls)
+        return [
+            ActivationBatch(torch.randn(2, 4, generator=generator))
+            for _ in range(4)
+        ]
+
+    clock_values = iter((10.0, 12.0))
+    resets = 0
+
+    def reset_peak_memory() -> None:
+        nonlocal resets
+        resets += 1
+
+    measurement = measure_sae_training_candidate(
+        sae,
+        optimizer,
+        batch_factory,
+        device="cpu",
+        effective_batch_tokens=8,
+        learning_rate=1e-3,
+        synchronize=lambda: None,
+        reset_peak_memory=reset_peak_memory,
+        clock=lambda: next(clock_values),
+    )
+
+    assert factory_calls == 2
+    assert projection_calls == 2
+    assert resets == 1
+    assert measurement.elapsed_seconds == 2.0
+    assert measurement.tokens_per_second == 4.0
+    assert measurement.finite
+    assert measurement.optimizer_state_allocated
+    assert optimizer.state
+    assert not torch.equal(before, sae.decoder.weight)
+    assert torch.allclose(
+        torch.linalg.vector_norm(sae.decoder.weight, dim=0),
+        torch.ones(sae.d_sae),
+        atol=1e-5,
+    )
 
 
 def test_training_rejects_wrong_activation_width(tmp_path: Path) -> None:
