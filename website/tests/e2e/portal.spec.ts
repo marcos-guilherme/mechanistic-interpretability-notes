@@ -6,7 +6,7 @@ const projectPath = (route: string) =>
   `/ioi-replication${route === '/' ? '/' : route}`;
 
 const routes = [
-  ['/', /Uma entrada prática em interpretabilidade mecanística/i],
+  ['/', /^Interpretabilidade Aplicada ao Alinhamento de LLMs$/],
   ['/sobre-o-projeto', /Replicações de interpretabilidade mecanística/i],
   ['/replicacoes', /^Replicações$/i],
   ['/metodologia', /Metodologia comum de replicação/i],

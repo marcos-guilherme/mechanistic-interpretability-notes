@@ -48,8 +48,8 @@ function resolveDeployment(): {url: string; baseUrl: string} {
 const deployment = resolveDeployment();
 
 const config: Config = {
-  title: 'Interpretabilidade mecanística',
-  tagline: 'Replicações, método e evidências',
+  title: 'Interpretabilidade Aplicada ao Alinhamento de LLMs',
+  tagline: 'Reproduções parciais de IOI, direção de recusa e J-space',
   favicon: 'img/favicon.svg',
   url: deployment.url,
   baseUrl: deployment.baseUrl,
@@ -128,16 +128,16 @@ const config: Config = {
       {
         name: 'description',
         content:
-          'Registro documental do processo prático de experimentação e entrada em interpretabilidade mecanística: três estudos, método e evidências com limites explícitos.',
+          'Documentei três reproduções de interpretabilidade mecanística: circuito IOI, direção de recusa e J-space, com o que testei, os limites e os resultados inconclusivos.',
       },
       {
         name: 'keywords',
         content:
-          'interpretabilidade mecanística, replicação, modelos de linguagem, evidência causal',
+          'interpretabilidade mecanística, alinhamento, LLMs, replicação, evidência causal',
       },
     ],
     navbar: {
-      title: 'Interpretabilidade',
+      title: 'Interpretabilidade Aplicada ao Alinhamento de LLMs',
       hideOnScroll: false,
       items: [
         {to: '/sobre-o-projeto', label: 'Sobre', position: 'left'},
@@ -154,8 +154,7 @@ const config: Config = {
     },
     footer: {
       style: 'dark',
-      copyright:
-        'Licença e condições de publicação pendentes de definição. Conteúdo em preparação para revisão pública.',
+      copyright: 'Licença MIT.',
     },
     prism: {
       additionalLanguages: ['python', 'json'],

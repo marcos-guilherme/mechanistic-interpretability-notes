@@ -8,21 +8,20 @@ import styles from './index.module.css';
 export default function Home(): React.JSX.Element {
   return (
     <Layout
-      title="Entrada prática em interpretabilidade mecanística"
-      description="Registro documental do processo prático de experimentação e entrada na interpretabilidade mecanística: três estudos, métodos, evidências e limites explícitos.">
+      title="Interpretabilidade Aplicada ao Alinhamento de LLMs"
+      description="Documentei três reproduções de interpretabilidade mecanística: circuito IOI, direção de recusa e J-space, com o que testei, os limites e os resultados inconclusivos.">
       <main>
         <header className={styles.hero}>
           <div className={styles.container}>
-            <p className={styles.eyebrow}>Registro documental</p>
+            <p className={styles.eyebrow}>Reproduções parciais</p>
             <Heading as="h1" className={styles.heroTitle}>
-              Uma entrada prática em interpretabilidade mecanística
+              Interpretabilidade Aplicada ao Alinhamento de LLMs
             </Heading>
             <p className={styles.heroLead}>
-              Este repositório documenta meu processo prático de experimentação e
-              entrada na área. Registro três estudos, do enunciado inicial às
-              intervenções, incluindo tentativas, decisões, falhas, bloqueios e
-              resultados inconclusivos no mesmo plano das conclusões que os
-              dados sustentam.
+              Reuni três estudos que executei: o circuito IOI, a direção de
+              recusa e o J-space. Registro o que testei, o que observei e até
+              onde cada resultado permite concluir. Nenhuma das três é uma
+              reprodução integral dos artigos originais.
             </p>
             <div className={styles.heroActions}>
               <Link className={styles.primaryAction} to="/replicacoes">
@@ -37,19 +36,19 @@ export default function Home(): React.JSX.Element {
           aria-labelledby="navigation-heading">
           <div className={styles.container}>
             <div className={styles.sectionIntro}>
-              <p className={styles.eyebrow}>Como navegar</p>
+              <p className={styles.eyebrow}>Documentação</p>
               <Heading as="h2" id="navigation-heading">
-                Entradas para acompanhar o trabalho
+                Onde está cada parte do trabalho
               </Heading>
               <p>
-                Pelo contexto do projeto, pelos critérios comuns ou pelo registro
-                cronológico das decisões experimentais.
+                Começo pelo contexto dos estudos, pelos critérios que usei para
+                reproduzir e pelo registro das decisões experimentais.
               </p>
             </div>
-            <nav className={styles.navigationGrid} aria-label="Entradas do portal">
+            <nav className={styles.navigationGrid} aria-label="Entradas da documentação">
               <Link className={styles.navigationCard} to="/sobre-o-projeto">
                 <span className={styles.navigationTitle}>Sobre o projeto</span>
-                <span>Escopo, organização e lugar de cada estudo.</span>
+                <span>Como organizei os três estudos e o que cada um cobre.</span>
               </Link>
               <Link className={styles.navigationCard} to="/metodologia">
                 <span className={styles.navigationTitle}>Metodologia</span>
@@ -72,11 +71,12 @@ export default function Home(): React.JSX.Element {
             <div className={styles.sectionIntro}>
               <p className={styles.eyebrow}>Como ler as evidências</p>
               <Heading as="h2" id="evidence-heading">
-                Estudos com conclusões de forças diferentes
+                O que é causal, o que é observação e o que ficou inconclusivo
               </Heading>
               <p>
-                O portal distingue o que uma intervenção sustenta, o que uma
-                observação descreve e o que permanece sem conclusão causal.
+                Distingo o que uma intervenção altera, o que uma análise sem
+                intervenção apenas descreve e o que não passou nos critérios da
+                hipótese.
               </p>
             </div>
             <dl className={styles.evidenceList}>
@@ -110,7 +110,7 @@ export default function Home(): React.JSX.Element {
             <div className={styles.sectionIntro}>
               <p className={styles.eyebrow}>Estudos</p>
               <Heading as="h2" id="studies-heading">
-                Estudos registrados, com escopo e limites explícitos
+                O que executei e até onde cada estudo chegou
               </Heading>
             </div>
             <div className={styles.studyGrid}>
@@ -120,7 +120,7 @@ export default function Home(): React.JSX.Element {
                 evidence="Evidência causal"
                 evidenceKind="causal"
                 href="/estudos/ioi">
-                Reconstrução do circuito de objeto indireto com atribuição,
+                Reconstruí o circuito de objeto indireto com atribuição,
                 patching e testes de necessidade e suficiência.
               </StudyCard>
               <StudyCard
@@ -129,17 +129,18 @@ export default function Home(): React.JSX.Element {
                 evidence="Reprodução causal parcial"
                 evidenceKind="partial"
                 href="/estudos/direcao-de-recusa">
-                Teste local de uma direção residual associada à recusa, com
+                Testei localmente uma direção residual associada à recusa, com
                 intervenções e controles de especificidade.
               </StudyCard>
               <StudyCard
                 title="J-space"
                 model="Llama 3.1 8B Instruct"
-                evidence="Causal inconclusivo · atlas observacional"
+                evidence="Causal inconclusivo · avaliação da J-lens em 93 prompts"
                 evidenceKind="inconclusive"
                 href="/estudos/jspace-llama">
-                Uma tentativa causal preservada como inconclusiva e um atlas
-                posterior que descreve recuperações sem convertê-las em causa.
+                A tentativa causal no Llama ficou inconclusiva. Depois avaliei
+                a J-lens em 93 prompts, sem intervenção, e não tratei essas
+                observações como causa.
               </StudyCard>
             </div>
           </div>
@@ -148,13 +149,12 @@ export default function Home(): React.JSX.Element {
         <section className={styles.statement} aria-labelledby="statement-heading">
           <div className={styles.narrowContainer}>
             <Heading as="h2" id="statement-heading">
-              Execuções inconclusivas e bloqueios aparecem aqui com a mesma
-              visibilidade dos resultados que passaram nos critérios.
+              Também registrei falhas e resultados inconclusivos, sem
+              apresentá-los como confirmações.
             </Heading>
             <p>
-              Em cada percurso documento as escolhas, a proveniência dos números
-              e o que ainda não permite concluir, inclusive quando o desfecho
-              não foi favorável.
+              Em cada estudo documento as escolhas, de onde saem os números e o
+              que ainda não permite concluir.
             </p>
           </div>
         </section>

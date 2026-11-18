@@ -6,7 +6,8 @@
       "source": "README.md",
       "id": "inicio",
       "slug": "/sobre-o-projeto",
-      "title": "Replicações de interpretabilidade mecanística",
+      "title": "Interpretabilidade Aplicada ao Alinhamento de LLMs",
+      "sidebar_label": "Sobre o projeto",
       "sidebar": "inicio",
       "order": 10
     },
