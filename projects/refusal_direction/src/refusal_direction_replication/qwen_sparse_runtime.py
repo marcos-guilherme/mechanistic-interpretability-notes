@@ -904,6 +904,8 @@ class SparseStageStore:
         corpus_sha256: str,
         pair_split_sha256: str,
         test_pairs: Sequence[Mapping[str, str]],
+        prepare_path: Path | None = None,
+        expected_prepare_sha256: str | None = None,
     ) -> None:
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -914,6 +916,19 @@ class SparseStageStore:
         self.pair_split_sha256 = str(pair_split_sha256)
         self.test_pairs = _normalize_test_pairs(test_pairs)
         self.test_split_sha256 = _sha256_value(list(self.test_pairs))
+        if (prepare_path is None) != (expected_prepare_sha256 is None):
+            raise ValueError(
+                "prepare_path and expected_prepare_sha256 must be provided together"
+            )
+        self.prepare_path = Path(prepare_path) if prepare_path is not None else None
+        self.expected_prepare_sha256 = (
+            _require_sha256(
+                expected_prepare_sha256,
+                "expected 00_prepare.json hash",
+            )
+            if expected_prepare_sha256 is not None
+            else None
+        )
         for name, value in (
             ("run_id", self.run_id),
             ("implementation_commit", self.implementation_commit),
@@ -995,14 +1010,6 @@ class SparseStageStore:
                 raise ValueError("selection_freeze_sha256 mismatch")
             if freeze != payload["results"]:
                 raise ValueError("selection_freeze.json differs from select stage")
-        if stage == "review_merge":
-            exported = self.load_stage("review_export")
-            if payload["results"].get("blind_review_sha256") != (
-                (exported or {}).get("results") or {}
-            ).get("blind_review_sha256"):
-                raise ValueError(
-                    "review merge differs from 08_review_export blind hash"
-                )
         provenance = payload.get("provenance")
         if not isinstance(provenance, dict) or set(provenance) != set(
             _PROVENANCE_FIELDS
@@ -1012,6 +1019,7 @@ class SparseStageStore:
         for field, value in expected.items():
             if provenance.get(field) != value:
                 raise ValueError(f"{path.name}: {field}")
+        self.validate_scientific_stage(stage, payload["results"])
         return payload
 
     def completed_stages(self) -> tuple[str, ...]:
@@ -1044,6 +1052,7 @@ class SparseStageStore:
             raise ValueError(f"stage {stage} cannot run before {expected}")
         compact = _jsonable(results)
         _validate_stage_schema(stage, compact)
+        self.validate_scientific_stage(stage, compact)
         payload = {
             "schema_version": 1,
             "experiment": f"qwen_sparse_refusal_{stage}",
@@ -1060,6 +1069,62 @@ class SparseStageStore:
             _atomic_write_json(self.selection_freeze_path, compact)
         _atomic_write_json(self.stage_path(stage), payload)
         return self.load_stage(stage)  # type: ignore[return-value]
+
+    def validate_scientific_stage(
+        self,
+        stage: str,
+        results: Mapping[str, Any],
+    ) -> None:
+        if stage == "review_merge":
+            exported = self.load_stage("review_export")
+            export_results = (exported or {}).get("results") or {}
+            merge_split = results.get("test_split_sha256")
+            export_split = export_results.get("test_split_sha256")
+            if (
+                merge_split != self.test_split_sha256
+                or export_split != self.test_split_sha256
+                or merge_split != export_split
+            ):
+                raise ValueError(
+                    "review merge differs from frozen test split or "
+                    "08_review_export"
+                )
+            merge_blind = _require_sha256(
+                results.get("blind_review_sha256"),
+                "review merge blind hash",
+            )
+            export_blind = _require_sha256(
+                export_results.get("blind_review_sha256"),
+                "08_review_export blind hash",
+            )
+            if merge_blind != export_blind:
+                raise ValueError(
+                    "review merge differs from 08_review_export blind hash"
+                )
+        if stage not in {"external_transfer", "code_preservation"}:
+            return
+        if self.prepare_path is None or self.expected_prepare_sha256 is None:
+            raise ValueError(
+                f"{stage} frozen 00_prepare.json identity is unavailable"
+            )
+        selected = self.load_stage("select")
+        freeze = (selected or {}).get("results") or {}
+        if stage == "external_transfer":
+            identity = frozen_external_transfer_identity(
+                self.prepare_path,
+                expected_prepare_sha256=self.expected_prepare_sha256,
+            )
+            validate_external_transfer_receipt(results, identity, freeze)
+        else:
+            identity = frozen_humaneval_identity(
+                self.prepare_path,
+                expected_prepare_sha256=self.expected_prepare_sha256,
+            )
+            validate_code_preservation_receipt(
+                results,
+                identity=identity,
+                freeze=freeze,
+            )
 
     def write_operational_error(
         self,
@@ -1238,6 +1303,7 @@ class SparseRuntime:
                     raise ValueError(
                         "review merge differs from 08_review_export blind hash"
                     )
+            self.store.validate_scientific_stage(stage, result)
             return self.store.write_stage(stage, result)
         except Exception as error:
             self.store.write_operational_error(stage=stage, error=error)
@@ -1788,9 +1854,6 @@ def _default_stage_runner(
     **_kwargs: Any,
 ) -> dict[str, Any]:
     store: SparseStageStore = _kwargs["store"]
-    freeze = (
-        store.load_stage("select") or {"results": {}}
-    )["results"]
     if stage == "review_export":
         response_paths = sorted(
             (artifacts_dir / "test_responses").glob("*.jsonl")
@@ -1832,28 +1895,7 @@ def _default_stage_runner(
             "status": "completed",
             **evaluation,
         }
-    receipt = _read_receipt(artifacts_dir, stage)
-    if stage == "external_transfer":
-        identity = frozen_external_transfer_identity(
-            Path(root)
-            / "results"
-            / "qwen25_coder_7b_code_eval"
-            / "00_prepare.json"
-        )
-        validate_external_transfer_receipt(receipt, identity, freeze)
-    if stage == "code_preservation":
-        identity = frozen_humaneval_identity(
-            Path(root)
-            / "results"
-            / "qwen25_coder_7b_code_eval"
-            / "00_prepare.json"
-        )
-        validate_code_preservation_receipt(
-            receipt,
-            identity=identity,
-            freeze=freeze,
-        )
-    return receipt
+    return _read_receipt(artifacts_dir, stage)
 
 
 def _resolve_identity_hash(
@@ -1949,7 +1991,17 @@ def run_qwen_sparse_refusal(
         corpus_sha256=corpus_hash,
         pair_split_sha256=pair_hash,
         test_pairs=frozen_test_pairs,
+        prepare_path=(
+            project_root
+            / "results"
+            / "qwen25_coder_7b_code_eval"
+            / "00_prepare.json"
+        ),
+        expected_prepare_sha256=FROZEN_PREPARE_SHA256,
     )
+    terminal_error = store.load_operational_error()
+    if terminal_error is not None:
+        return terminal_error
     runtime = SparseRuntime(store)
     completed = store.completed_stages()
     last = store.load_stage(completed[-1]) if completed else None

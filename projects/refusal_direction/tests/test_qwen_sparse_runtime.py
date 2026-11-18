@@ -109,7 +109,21 @@ def _freeze_fixture(
     return freeze_selection(rows)
 
 
-def _store(tmp_path: Path, *, run_id: str = "run-1") -> SparseStageStore:
+def _store(
+    tmp_path: Path,
+    *,
+    run_id: str = "run-1",
+    prepare_path: Path | None = None,
+    expected_prepare_sha256: str | None = None,
+) -> SparseStageStore:
+    identity_kwargs = (
+        {
+            "prepare_path": prepare_path,
+            "expected_prepare_sha256": expected_prepare_sha256,
+        }
+        if prepare_path is not None
+        else {}
+    )
     return SparseStageStore(
         tmp_path / "results",
         config=_config(),
@@ -118,6 +132,7 @@ def _store(tmp_path: Path, *, run_id: str = "run-1") -> SparseStageStore:
         corpus_sha256="c" * 64,
         pair_split_sha256="p" * 64,
         test_pairs=_frozen_test_pairs(),
+        **identity_kwargs,
     )
 
 
@@ -147,6 +162,146 @@ def _complete_through_select(store: SparseStageStore) -> None:
         store.write_stage(stage, _valid_stage_result(stage))
     store.write_stage("select", _freeze_fixture())
     assert store.selection_freeze_path.is_file()
+
+
+def _complete_through_review(store: SparseStageStore) -> None:
+    _complete_through_select(store)
+    store.write_stage(
+        "test",
+        {
+            "status": "completed",
+            "selection_freeze_sha256": store.selection_freeze_sha256(),
+            "test_split_sha256": store.test_split_sha256,
+            "observations": expected_test_matrix(_frozen_test_pairs()),
+        },
+    )
+    store.write_stage(
+        "review_export",
+        {
+            "status": "review_pending",
+            "review_count": 512,
+            "test_split_sha256": store.test_split_sha256,
+            "blind_review_sha256": "b" * 64,
+        },
+    )
+    store.write_stage(
+        "review_merge",
+        {
+            "schema_version": 1,
+            "status": "review_complete",
+            "review_count": 512,
+            "manifest_seed": 2031,
+            "blind_review_sha256": "b" * 64,
+            "test_split_sha256": store.test_split_sha256,
+            "reviews": [],
+            "label_counts": {},
+            "aggregate_counts": {},
+            "automatic_agreement": 1.0,
+        },
+    )
+
+
+def _external_receipt(
+    identity: dict[str, object],
+    freeze: dict[str, object],
+) -> dict[str, object]:
+    observations = []
+    for dataset in ("mitre", "mitre_frr"):
+        for item in identity["datasets"][dataset]:
+            for condition in sparse_runtime.EXTERNAL_CONDITIONS:
+                observations.append(
+                    {
+                        "dataset": dataset,
+                        **item,
+                        "condition": condition,
+                        "dose": sparse_runtime.condition_dose(
+                            condition,
+                            freeze,
+                        ),
+                        "refused": int(item["example_id"].rsplit("-", 1)[1])
+                        % 2
+                        == 0,
+                        "kl_from_baseline": 0.1,
+                        "invalid_generation": False,
+                    }
+                )
+    return {
+        "status": "completed",
+        "prepare_sha256": identity["prepare_sha256"],
+        "selection_freeze_sha256": freeze["selection_freeze_sha256"],
+        "observations": observations,
+        "metrics": {
+            dataset: {
+                condition: {
+                    "n": 32,
+                    "refusal_rate": 0.5,
+                    "mean_kl": 0.1,
+                    "invalid_generation_rate": 0.0,
+                }
+                for condition in sparse_runtime.EXTERNAL_CONDITIONS
+            }
+            for dataset in ("mitre", "mitre_frr")
+        },
+    }
+
+
+def _code_receipt(
+    tmp_path: Path,
+    identity: dict[str, object],
+    freeze: dict[str, object],
+) -> dict[str, object]:
+    jobs = build_code_preservation_jobs(
+        worker=tmp_path / "worker.py",
+        problems=tmp_path / "problems.jsonl",
+        sample_paths={
+            condition: tmp_path / f"{condition}.jsonl"
+            for condition in ("baseline", "dense", "filtered")
+        },
+        output_dir=tmp_path / "output",
+        identity_dir=tmp_path / "identity",
+        temp_root=tmp_path / "temp",
+        timeout_seconds=60,
+        remote_vm=True,
+        identity=identity,
+        freeze=freeze,
+    )
+    outputs = {
+        condition: [
+            {
+                **item,
+                "plus_pass": True,
+                "refused": False,
+                "kl_from_baseline": 0.0,
+                "invalid_generation": False,
+            }
+            for item in identity["items"]
+        ]
+        for condition in ("baseline", "dense", "filtered")
+    }
+    return {
+        "status": "completed",
+        "prepare_sha256": identity["prepare_sha256"],
+        "selection_freeze_sha256": freeze["selection_freeze_sha256"],
+        "conditions": ["baseline", "dense", "filtered"],
+        "doses": {"baseline": 0.0, "dense": 0.5, "filtered": 0.2},
+        "memory_bytes": 1024**3,
+        "timeout_seconds": 60,
+        "parallelism": 1,
+        "remote_vm": True,
+        "evalplus_revision": sparse_runtime.EVALPLUS_REVISION,
+        "job_manifest_sha256": jobs["job_manifest_sha256"],
+        "worker_outputs": outputs,
+        "metrics": {
+            condition: {
+                "n": 32,
+                "pass_at_1": 1.0,
+                "refusal_rate": 0.0,
+                "mean_kl": 0.0,
+                "invalid_generation_rate": 0.0,
+            }
+            for condition in ("baseline", "dense", "filtered")
+        },
+    }
 
 
 def test_stage_machine_is_exact_and_test_requires_frozen_selection(
@@ -411,6 +566,60 @@ def test_operational_error_blocks_same_run_resume(tmp_path: Path) -> None:
     assert restarted["provenance"]["run_id"] == "run-2"
 
 
+def test_entrypoint_returns_operational_error_before_scanning_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = {
+        **_config(),
+        "results_dir": "results",
+        "artifacts_dir": "artifacts",
+    }
+    terminal = {"status": "operational_error", "stage": "sae_quality"}
+    monkeypatch.setattr(sparse_runtime, "load_sparse_config", lambda _root: config)
+    monkeypatch.setattr(
+        sparse_runtime,
+        "verify_sparse_profile_digest",
+        lambda _config: None,
+    )
+    monkeypatch.setattr(
+        sparse_runtime,
+        "resolve_run_id",
+        lambda _path, requested: requested or "run-1",
+    )
+    monkeypatch.setattr(
+        sparse_runtime,
+        "_sha256_file",
+        lambda _path: "p" * 64,
+    )
+    monkeypatch.setattr(
+        sparse_runtime,
+        "_load_frozen_test_pairs",
+        lambda _path: _frozen_test_pairs(),
+    )
+    monkeypatch.setattr(
+        SparseStageStore,
+        "load_operational_error",
+        lambda _self: terminal,
+    )
+    monkeypatch.setattr(
+        SparseStageStore,
+        "completed_stages",
+        lambda _self: (_ for _ in ()).throw(
+            AssertionError("completed_stages must not run")
+        ),
+    )
+
+    result = sparse_runtime.run_qwen_sparse_refusal(
+        tmp_path,
+        run_id="run-1",
+        implementation_commit="impl-1",
+        corpus_sha256="c" * 64,
+        pair_split_sha256="p" * 64,
+    )
+    assert result is terminal
+
+
 def test_quality_and_decomposition_contracts_enforce_scientific_gates(
     tmp_path: Path,
 ) -> None:
@@ -614,6 +823,108 @@ def test_humaneval_stage_validates_frozen_ids_doses_limits_and_worker_outputs(
         )
 
 
+def test_injected_runners_cannot_bypass_external_or_humaneval_validation(
+    tmp_path: Path,
+) -> None:
+    prepare = _write_panel_prepare(tmp_path / "00_prepare.json")
+    prepare_sha256 = _file_sha(prepare)
+    freeze = _freeze_fixture()
+
+    external_store = _store(
+        tmp_path / "external",
+        prepare_path=prepare,
+        expected_prepare_sha256=prepare_sha256,
+    )
+    _complete_through_review(external_store)
+    external_identity = sparse_runtime.frozen_external_transfer_identity(
+        prepare,
+        expected_prepare_sha256=prepare_sha256,
+    )
+    invalid_external = _external_receipt(external_identity, freeze)
+    invalid_external["observations"].pop()
+    with pytest.raises(ValueError, match="external transfer coverage"):
+        SparseRuntime(external_store).run_stage(
+            "external_transfer",
+            lambda **_kwargs: invalid_external,
+        )
+
+    code_store = _store(
+        tmp_path / "code",
+        prepare_path=prepare,
+        expected_prepare_sha256=prepare_sha256,
+    )
+    _complete_through_review(code_store)
+    code_store.write_stage(
+        "external_transfer",
+        _external_receipt(external_identity, freeze),
+    )
+    code_identity = sparse_runtime.frozen_humaneval_identity(
+        prepare,
+        expected_prepare_sha256=prepare_sha256,
+    )
+    invalid_code = _code_receipt(tmp_path / "code-inputs", code_identity, freeze)
+    invalid_code["worker_outputs"]["filtered"].pop()
+    with pytest.raises(ValueError, match="HumanEval\\+ coverage"):
+        SparseRuntime(code_store).run_stage(
+            "code_preservation",
+            lambda **_kwargs: invalid_code,
+        )
+
+
+def test_persisted_scientific_receipts_are_revalidated_on_resume(
+    tmp_path: Path,
+) -> None:
+    prepare = _write_panel_prepare(tmp_path / "00_prepare.json")
+    prepare_sha256 = _file_sha(prepare)
+    freeze = _freeze_fixture()
+    store = _store(
+        tmp_path,
+        prepare_path=prepare,
+        expected_prepare_sha256=prepare_sha256,
+    )
+    _complete_through_review(store)
+    external_identity = sparse_runtime.frozen_external_transfer_identity(
+        prepare,
+        expected_prepare_sha256=prepare_sha256,
+    )
+    store.write_stage(
+        "external_transfer",
+        _external_receipt(external_identity, freeze),
+    )
+    external_path = store.stage_path("external_transfer")
+    external_payload = json.loads(external_path.read_text(encoding="utf-8"))
+    external_payload["results"]["metrics"]["mitre"]["baseline"][
+        "refusal_rate"
+    ] = 0.4
+    external_path.write_text(json.dumps(external_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="metrics differ"):
+        store.load_stage("external_transfer")
+    external_payload["results"]["metrics"]["mitre"]["baseline"][
+        "refusal_rate"
+    ] = 0.5
+    external_path.write_text(json.dumps(external_payload), encoding="utf-8")
+
+    code_identity = sparse_runtime.frozen_humaneval_identity(
+        prepare,
+        expected_prepare_sha256=prepare_sha256,
+    )
+    store.write_stage(
+        "code_preservation",
+        _code_receipt(tmp_path / "code-inputs", code_identity, freeze),
+    )
+
+    payload = json.loads(
+        store.stage_path("code_preservation").read_text(encoding="utf-8")
+    )
+    payload["results"]["metrics"]["filtered"]["pass_at_1"] = 0.5
+    store.stage_path("code_preservation").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="metrics differ"):
+        store.load_stage("code_preservation")
+
+
 def test_alternate_profile_without_allowlisted_digest_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -736,6 +1047,31 @@ def test_review_merge_must_match_exported_blind_hash(tmp_path: Path) -> None:
                 "blind_review_sha256": "c" * 64,
             },
         )
+
+
+def test_persisted_review_merge_revalidates_frozen_test_split(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _complete_through_review(store)
+    payload = json.loads(
+        store.stage_path("review_merge").read_text(encoding="utf-8")
+    )
+    payload["results"]["test_split_sha256"] = "0" * 64
+    store.stage_path("review_merge").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="frozen test split"):
+        store.load_stage("review_merge")
+    payload["results"]["test_split_sha256"] = store.test_split_sha256
+    payload["results"]["blind_review_sha256"] = "c" * 64
+    store.stage_path("review_merge").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="08_review_export blind hash"):
+        store.load_stage("review_merge")
 
 
 def test_humaneval_plus_reuses_remote_limited_worker_for_frozen_conditions(
