@@ -950,3 +950,114 @@ def _assert_clean(engine, model) -> None:
     for module in [*blocks, *attentions, *mlps]:
         assert dict(module._forward_hooks) == {}
         assert dict(module._forward_pre_hooks) == {}
+
+
+class _TrackingReadout:
+    def __init__(self, inner: LiveJLensReadout, name: str) -> None:
+        self.inner = inner
+        self.name = name
+        self.calls: list[int] = []
+        self.lens_contract = "fixture"
+        self.lens_validated = True
+        self.lens_path = None
+        self._prior_ranks: dict[int, int] = {}
+
+    def predict(self, residual, *, layer: int, top_k: int):
+        self.calls.append(int(layer))
+        self.inner._prior_ranks = self._prior_ranks
+        predictions = self.inner.predict(residual, layer=layer, top_k=top_k)
+        self._prior_ranks = dict(self.inner._prior_ranks)
+        return predictions
+
+
+def _registry_engine(readout_v1: LiveJLensReadout, readout_v2: LiveJLensReadout):
+    from refusal_direction_replication.qwen_lab import JLENS_VERSION_LABELS
+    from refusal_direction_replication.qwen_lab_readout import (
+        FROZEN_LENS_SHA256,
+        FROZEN_LENS_V2_SHA256,
+        LensProvenance,
+        LensReadoutRegistry,
+    )
+    from refusal_direction_replication.qwen_lab_runtime import InterventionEngine
+
+    engine, model, tokenizer, direction, control = _make_engine()
+    tracked_v1 = _TrackingReadout(readout_v1, "v1")
+    tracked_v2 = _TrackingReadout(readout_v2, "v2")
+    registry = LensReadoutRegistry(
+        {
+            "v1": (
+                tracked_v1,
+                LensProvenance(
+                    version="v1",
+                    sha256=FROZEN_LENS_SHA256,
+                    label=JLENS_VERSION_LABELS["v1"],
+                ),
+            ),
+            "v2": (
+                tracked_v2,
+                LensProvenance(
+                    version="v2",
+                    sha256=FROZEN_LENS_V2_SHA256,
+                    label=JLENS_VERSION_LABELS["v2"],
+                ),
+            ),
+        }
+    )
+    blocks, attentions, mlps = transformer_module_lists(model)
+    selected = InterventionEngine(
+        model,
+        tokenizer,
+        blocks=blocks,
+        attentions=attentions,
+        mlps=mlps,
+        direction=direction,
+        random_control=control,
+        readouts=registry,
+    )
+    return selected, tracked_v1, tracked_v2, registry
+
+
+def test_engine_defaults_to_v2_readout() -> None:
+    engine, _model, tokenizer, _direction, _control = _make_engine()
+    readout_v1 = _tiny_readout(engine._model, tokenizer)
+    readout_v2 = _tiny_readout(engine._model, tokenizer)
+    selected, tracked_v1, tracked_v2, _registry = _registry_engine(readout_v1, readout_v2)
+    events = _collect(selected, _valid_request(max_new_tokens=2))
+    assert tracked_v2.calls == [2, 2]
+    assert tracked_v1.calls == []
+    assert {event.j_lens_version for event in events} == {"v2"}
+    assert {event.j_lens_sha256 for event in events} == {
+        "b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a"
+    }
+
+
+def test_engine_uses_explicit_v1_readout() -> None:
+    engine, _model, tokenizer, _direction, _control = _make_engine()
+    readout_v1 = _tiny_readout(engine._model, tokenizer)
+    readout_v2 = _tiny_readout(engine._model, tokenizer)
+    selected, tracked_v1, tracked_v2, _registry = _registry_engine(readout_v1, readout_v2)
+    events = _collect(
+        selected, _valid_request(max_new_tokens=2, j_lens_version="v1")
+    )
+    assert tracked_v1.calls == [2, 2]
+    assert tracked_v2.calls == []
+    assert {event.j_lens_version for event in events} == {"v1"}
+    assert {event.j_lens_sha256 for event in events} == {
+        "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e"
+    }
+
+
+def test_engine_freezes_readout_for_entire_generation() -> None:
+    engine, _model, tokenizer, _direction, _control = _make_engine()
+    readout_v1 = _tiny_readout(engine._model, tokenizer)
+    readout_v2 = _tiny_readout(engine._model, tokenizer)
+    selected, tracked_v1, tracked_v2, registry = _registry_engine(readout_v1, readout_v2)
+    iterator = selected.generate(_valid_request(max_new_tokens=3, j_lens_version="v1"))
+    first = next(iterator)
+    registry._entries["v1"] = registry._entries["v2"]
+    rest = list(iterator)
+    events = [first, *rest]
+    assert len(events) == 3
+    assert tracked_v1.calls == [2, 2, 2]
+    assert tracked_v2.calls == []
+    assert [event.j_lens_version for event in events] == ["v1", "v1", "v1"]

@@ -19,6 +19,13 @@ from .qwen_jlens import (
 
 
 LabCondition = Literal["baseline", "ablation", "addition", "random_control"]
+JLensVersion = Literal["v1", "v2"]
+DEFAULT_JLENS_VERSION: JLensVersion = "v2"
+JLENS_VERSIONS: tuple[JLensVersion, ...] = ("v1", "v2")
+JLENS_VERSION_LABELS: dict[JLensVersion, str] = {
+    "v1": "v1 (100 amostras)",
+    "v2": "v2 (contexto longo)",
+}
 
 LAB_MODEL_NAME = QWEN_MODEL
 LAB_MODEL_REVISION = QWEN_REVISION
@@ -64,8 +71,12 @@ class GenerationRequest:
     top_p: float
     seed: int
     max_new_tokens: int
+    j_lens_version: JLensVersion = DEFAULT_JLENS_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "j_lens_version", normalize_jlens_version(self.j_lens_version)
+        )
         validate_generation_request(self)
 
 
@@ -92,11 +103,27 @@ class GenerationEvent:
     step_time_seconds: float
     gpu_memory_bytes: int | None
     status: str | None = None
+    j_lens_version: JLensVersion = DEFAULT_JLENS_VERSION
+    j_lens_sha256: str | None = None
+
+
+def normalize_jlens_version(value: str | None) -> JLensVersion:
+    if value is None:
+        return DEFAULT_JLENS_VERSION
+    cleaned = str(value).strip()
+    if not cleaned:
+        return DEFAULT_JLENS_VERSION
+    lowered = cleaned.casefold()
+    for version, label in JLENS_VERSION_LABELS.items():
+        if lowered == version or lowered == label.casefold():
+            return version
+    raise ValueError("j_lens_version must be v1 or v2")
 
 
 def validate_generation_request(request: GenerationRequest) -> None:
     if not request.prompt.strip():
         raise ValueError("prompt must be non-empty")
+    normalize_jlens_version(request.j_lens_version)
     if not LAB_MIN_JLENS_LAYER <= int(request.j_lens_layer) <= LAB_MAX_JLENS_LAYER:
         raise ValueError(
             f"layer must be between {LAB_MIN_JLENS_LAYER} and {LAB_MAX_JLENS_LAYER}"

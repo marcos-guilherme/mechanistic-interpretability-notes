@@ -21,15 +21,18 @@ from .pipeline import random_direction_control, temporary_hooks
 from .qwen_code_eval import COMPACT_FORBIDDEN_KEYS, compact_contains_leak
 from .qwen_jlens import is_cuda_oom, wrap_hf_model_for_jlens
 from .qwen_lab import (
+    DEFAULT_JLENS_VERSION,
     LAB_DIRECTION_LAYER,
     GenerationEvent,
     GenerationRequest,
     escape_token_display,
+    normalize_jlens_version,
 )
 from .qwen_lab_readout import (
     FROZEN_LENS_SHA256,
     LENS_CONTRACT_FIXTURE,
     LENS_CONTRACT_QWEN,
+    LensReadoutRegistry,
     LiveJLensReadout,
     validate_qwen_lab_lens,
 )
@@ -265,7 +268,8 @@ class InterventionEngine:
         mlps: Sequence[Any],
         direction: Any,
         random_control: torch.Tensor,
-        readout: LiveJLensReadout,
+        readout: LiveJLensReadout | None = None,
+        readouts: LensReadoutRegistry | None = None,
         lens_path: str | None = None,
         expected_lens_sha256: str | None = FROZEN_LENS_SHA256,
     ) -> None:
@@ -276,16 +280,24 @@ class InterventionEngine:
         self._mlps = list(mlps)
         self._direction = _tensor_direction(direction)
         self._random_control = random_control
-        self._readout = readout
+        if readouts is None:
+            if readout is None:
+                raise ValueError("readout or readouts is required")
+            readouts = LensReadoutRegistry.from_single(readout)
+        self._readouts = readouts
+        default_readout, _provenance = readouts.select(DEFAULT_JLENS_VERSION)
+        self._readout = readout if readout is not None else default_readout
         self._lock = threading.Lock()
         self._session_held = False
         self._active = False
         self.terminal_status: str | None = None
-        self._bind_lens_contract(
-            readout,
-            lens_path=lens_path,
-            expected_lens_sha256=expected_lens_sha256,
-        )
+        for bound_readout, provenance in self._readouts._entries.values():
+            bound_path = getattr(bound_readout, "lens_path", None)
+            self._bind_lens_contract(
+                bound_readout,
+                lens_path=bound_path if bound_path is not None else lens_path,
+                expected_lens_sha256=provenance.sha256,
+            )
 
     @property
     def active(self) -> bool:
@@ -354,7 +366,9 @@ class InterventionEngine:
         cancelled: Cancelled,
     ) -> Iterator[GenerationEvent]:
         seed_everything(int(request.seed))
-        self._readout._prior_ranks = {}
+        version = normalize_jlens_version(request.j_lens_version)
+        readout, provenance = self._readouts.select(version)
+        readout._prior_ranks = {}
         device = _model_device(self._model)
         generator = torch.Generator(device=device).manual_seed(int(request.seed))
         pre_hooks, forward_hooks = condition_hook_specs(
@@ -412,7 +426,7 @@ class InterventionEngine:
                             generator=generator,
                         )
                         residual = captured.pop("residual")
-                        predictions = self._readout.predict(
+                        predictions = readout.predict(
                             residual.reshape(-1),
                             layer=int(request.j_lens_layer),
                             top_k=int(request.top_k),
@@ -454,6 +468,8 @@ class InterventionEngine:
                         step_time_seconds=time.perf_counter() - started,
                         gpu_memory_bytes=_gpu_memory_bytes(),
                         status=status,
+                        j_lens_version=provenance.version,
+                        j_lens_sha256=provenance.sha256,
                     )
                     if status is not None:
                         self.terminal_status = status

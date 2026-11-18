@@ -162,3 +162,40 @@ def test_lab_preset_is_immutable() -> None:
 
 def test_valid_conditions_are_typed_literals() -> None:
     assert LabCondition.__args__ == CONDITIONS  # type: ignore[attr-defined]
+
+
+def test_default_jlens_version_is_v2() -> None:
+    from refusal_direction_replication.qwen_lab import DEFAULT_JLENS_VERSION
+
+    request = _valid_request()
+    assert DEFAULT_JLENS_VERSION == "v2"
+    assert request.j_lens_version == "v2"
+
+
+def test_explicit_v1_jlens_version_is_accepted_and_serialized() -> None:
+    request = _valid_request(j_lens_version="v1")
+    assert request.j_lens_version == "v1"
+    payload = generation_request_to_dict(request)
+    assert payload["j_lens_version"] == "v1"
+    restored = generation_request_from_dict(payload)
+    assert restored.j_lens_version == "v1"
+
+
+def test_legacy_request_payload_without_version_defaults_to_v2() -> None:
+    request = _valid_request()
+    payload = generation_request_to_dict(request)
+    payload.pop("j_lens_version", None)
+    restored = generation_request_from_dict(payload)
+    assert restored.j_lens_version == "v2"
+
+
+def test_invalid_jlens_version_is_rejected() -> None:
+    with pytest.raises(ValueError, match="j_lens_version"):
+        _valid_request(j_lens_version="v3")
+
+
+def test_jlens_selector_labels_match_design() -> None:
+    from refusal_direction_replication.qwen_lab import JLENS_VERSION_LABELS
+
+    assert JLENS_VERSION_LABELS["v2"] == "v2 (contexto longo)"
+    assert JLENS_VERSION_LABELS["v1"] == "v1 (100 amostras)"

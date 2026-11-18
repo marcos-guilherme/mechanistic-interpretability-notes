@@ -129,3 +129,118 @@ def test_parity_honors_intervention_hooks() -> None:
         atol=1e-5,
         pre_hooks=[(module, scale)],
     )
+
+
+def test_frozen_v2_lens_hash_matches_specification() -> None:
+    from refusal_direction_replication.qwen_lab_readout import FROZEN_LENS_V2_SHA256
+
+    assert (
+        FROZEN_LENS_V2_SHA256
+        == "b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a"
+    )
+
+
+def _fixture_readout(seed: int) -> LiveJLensReadout:
+    decoder = TinyDecoder(n_layers=4, d_model=8, vocab_size=32, seed=seed)
+    jacobians = {layer: torch.eye(8) * float(seed) for layer in range(3)}
+    lens = JacobianLens(jacobians, n_prompts=1, d_model=8)
+    return LiveJLensReadout(
+        lens,
+        decoder,
+        decode_token=lambda token_id: decoder.tokenizer.decode([int(token_id)]),
+        lens_contract="fixture",
+    )
+
+
+def test_readout_registry_requires_both_versions_and_selects_by_key() -> None:
+    from refusal_direction_replication.qwen_lab import JLENS_VERSION_LABELS
+    from refusal_direction_replication.qwen_lab_readout import (
+        FROZEN_LENS_SHA256,
+        FROZEN_LENS_V2_SHA256,
+        LensProvenance,
+        LensReadoutRegistry,
+    )
+
+    readout_v1 = _fixture_readout(1)
+    readout_v2 = _fixture_readout(2)
+    with pytest.raises(ValueError, match="v2"):
+        LensReadoutRegistry(
+            {
+                "v1": (
+                    readout_v1,
+                    LensProvenance(
+                        version="v1",
+                        sha256=FROZEN_LENS_SHA256,
+                        label=JLENS_VERSION_LABELS["v1"],
+                    ),
+                )
+            }
+        )
+    registry = LensReadoutRegistry(
+        {
+            "v1": (
+                readout_v1,
+                LensProvenance(
+                    version="v1",
+                    sha256=FROZEN_LENS_SHA256,
+                    label=JLENS_VERSION_LABELS["v1"],
+                ),
+            ),
+            "v2": (
+                readout_v2,
+                LensProvenance(
+                    version="v2",
+                    sha256=FROZEN_LENS_V2_SHA256,
+                    label=JLENS_VERSION_LABELS["v2"],
+                ),
+            ),
+        }
+    )
+    selected_default, provenance_default = registry.select()
+    assert selected_default is readout_v2
+    assert provenance_default.version == "v2"
+    assert provenance_default.sha256 == FROZEN_LENS_V2_SHA256
+    assert provenance_default.label == "v2 (contexto longo)"
+    selected_v1, provenance_v1 = registry.select("v1")
+    assert selected_v1 is readout_v1
+    assert provenance_v1.sha256 == FROZEN_LENS_SHA256
+    assert provenance_v1.label == "v1 (100 amostras)"
+
+
+def test_readout_registry_isolates_prior_ranks_per_entry() -> None:
+    from refusal_direction_replication.qwen_lab import JLENS_VERSION_LABELS
+    from refusal_direction_replication.qwen_lab_readout import (
+        FROZEN_LENS_SHA256,
+        FROZEN_LENS_V2_SHA256,
+        LensProvenance,
+        LensReadoutRegistry,
+    )
+
+    readout_v1 = _fixture_readout(3)
+    readout_v2 = _fixture_readout(4)
+    registry = LensReadoutRegistry(
+        {
+            "v1": (
+                readout_v1,
+                LensProvenance(
+                    version="v1",
+                    sha256=FROZEN_LENS_SHA256,
+                    label=JLENS_VERSION_LABELS["v1"],
+                ),
+            ),
+            "v2": (
+                readout_v2,
+                LensProvenance(
+                    version="v2",
+                    sha256=FROZEN_LENS_V2_SHA256,
+                    label=JLENS_VERSION_LABELS["v2"],
+                ),
+            ),
+        }
+    )
+    residual = torch.randn(8)
+    first, _provenance = registry.select("v1")
+    first.predict(residual, layer=1, top_k=3)
+    second, _ = registry.select("v2")
+    assert second._prior_ranks == {}
+    assert first._prior_ranks != {}

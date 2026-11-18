@@ -22,7 +22,9 @@ from .qwen_code_eval_runtime import _default_gpu_probe, require_a100_preflight
 from .qwen_dose import METADATA_LEAK_KEYS, sha256_file
 from .qwen_jlens import QWEN_MODEL, QWEN_REVISION, assert_jlens_contract, wrap_hf_model_for_jlens
 from .qwen_lab import (
+    DEFAULT_JLENS_VERSION,
     DEFAULT_TOP_K,
+    JLENS_VERSION_LABELS,
     LAB_MAX_JLENS_LAYER,
     LAB_MIN_JLENS_LAYER,
     LAB_MODEL_REVISION,
@@ -30,14 +32,20 @@ from .qwen_lab import (
     MAX_NEW_TOKENS_LIMIT,
     GenerationEvent,
     GenerationRequest,
+    JLensVersion,
     LabCondition,
     TokenPrediction,
     generation_event_to_dict,
     generation_request_to_dict,
+    normalize_jlens_version,
 )
 from .qwen_lab_readout import (
     FROZEN_LENS_SHA256,
+    FROZEN_LENS_SHA256_BY_VERSION,
+    FROZEN_LENS_V2_SHA256,
     LENS_CONTRACT_QWEN,
+    LensProvenance,
+    LensReadoutRegistry,
     LiveJLensReadout,
     verify_frozen_lens_hash,
 )
@@ -57,13 +65,17 @@ DEFAULT_DIRECTION_RELATIVE = Path("artifacts/qwen25_coder_7b/selected_direction.
 DEFAULT_LENS_RELATIVE = Path(
     "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
 )
+DEFAULT_LENS_V2_RELATIVE = Path(
+    "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt"
+)
 EXPORT_SCHEMA_VERSION = 1
 # Task 4 Colab bootstrap should install this exact Gradio release.
 GRADIO_PIN_VERSION = "5.49.1"
-GENERATION_OUTPUT_COUNT = 15
+GENERATION_OUTPUT_COUNT = 16
 GENERATION_CONTROL_COMPONENTS: tuple[str, ...] = (
     "condition_dropdown",
     "layer_slider",
+    "jlens_selector",
     "preset_radio",
     "manual_mode",
     "manual_coefficient",
@@ -290,7 +302,8 @@ def resolve_lab_artifact_paths(
     *,
     direction_path: str | Path | None = None,
     lens_path: str | Path | None = None,
-) -> tuple[Path, Path]:
+    lens_v2_path: str | Path | None = None,
+) -> tuple[Path, Path, Path]:
     root = root.resolve()
     direction = (
         Path(direction_path)
@@ -298,11 +311,18 @@ def resolve_lab_artifact_paths(
         else root / DEFAULT_DIRECTION_RELATIVE
     )
     lens = Path(lens_path) if lens_path is not None else root / DEFAULT_LENS_RELATIVE
+    lens_v2 = (
+        Path(lens_v2_path)
+        if lens_v2_path is not None
+        else root / DEFAULT_LENS_V2_RELATIVE
+    )
     if not direction.is_file():
         raise FileNotFoundError(f"direction artifact missing: {direction}")
     if not lens.is_file():
         raise FileNotFoundError(f"lens artifact missing: {lens}")
-    return direction.resolve(), lens.resolve()
+    if not lens_v2.is_file():
+        raise FileNotFoundError(f"lens artifact missing: {lens_v2}")
+    return direction.resolve(), lens.resolve(), lens_v2.resolve()
 
 
 def verify_direction_artifact(
@@ -471,33 +491,71 @@ def load_export_document(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _load_versioned_readout(
+    *,
+    path: Path,
+    bound: Any,
+    decode_token: Any,
+    version: JLensVersion,
+    lens_contract: Literal["qwen", "fixture"],
+) -> tuple[LiveJLensReadout, LensProvenance]:
+    from jlens.lens import JacobianLens
+
+    digest = FROZEN_LENS_SHA256_BY_VERSION[version]
+    lens = JacobianLens.load(str(path))
+    readout = LiveJLensReadout(
+        lens,
+        bound,
+        decode_token=decode_token,
+        lens_path=str(path),
+        expected_lens_sha256=digest,
+        lens_contract=lens_contract,
+    )
+    provenance = LensProvenance(
+        version=version,
+        sha256=digest,
+        label=JLENS_VERSION_LABELS[version],
+    )
+    return readout, provenance
+
+
 def build_production_stack(
     *,
     model: Any,
     tokenizer: Any,
     direction_path: Path,
     lens_path: Path,
+    lens_v2_path: Path,
     lens_contract: Literal["qwen", "fixture"] = LENS_CONTRACT_QWEN,
-) -> tuple[InterventionEngine, LiveJLensReadout]:
+) -> tuple[InterventionEngine, LensReadoutRegistry]:
     assert_jlens_contract()
     direction = load_direction(direction_path)
     blocks, attentions, mlps = transformer_module_lists(model)
     bound = wrap_lab_model_for_jlens(model, tokenizer)
-    from jlens.lens import JacobianLens
-
-    lens = JacobianLens.load(str(lens_path))
     decode_token = lambda token_id: tokenizer.decode(  # noqa: E731
         [int(token_id)],
         skip_special_tokens=False,
         clean_up_tokenization_spaces=False,
     )
-    readout = LiveJLensReadout(
-        lens,
-        bound,
+    readout_v1, provenance_v1 = _load_versioned_readout(
+        path=lens_path,
+        bound=bound,
         decode_token=decode_token,
-        lens_path=str(lens_path),
-        expected_lens_sha256=FROZEN_LENS_SHA256,
+        version="v1",
         lens_contract=lens_contract,
+    )
+    readout_v2, provenance_v2 = _load_versioned_readout(
+        path=lens_v2_path,
+        bound=bound,
+        decode_token=decode_token,
+        version="v2",
+        lens_contract=lens_contract,
+    )
+    registry = LensReadoutRegistry(
+        {
+            "v1": (readout_v1, provenance_v1),
+            "v2": (readout_v2, provenance_v2),
+        }
     )
     random_control = build_random_control_direction(direction.vector)
     engine = InterventionEngine(
@@ -508,11 +566,30 @@ def build_production_stack(
         mlps=mlps,
         direction=direction,
         random_control=random_control,
-        readout=readout,
-        lens_path=str(lens_path),
-        expected_lens_sha256=FROZEN_LENS_SHA256,
+        readouts=registry,
     )
-    return engine, readout
+    return engine, registry
+
+
+def _lens_preflight_summary(
+    *,
+    device_name: Any = None,
+    model_revision: str | None = None,
+    direction_digest: str | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "jlens_version": DEFAULT_JLENS_VERSION,
+        "lens_sha256": _short_hash(FROZEN_LENS_V2_SHA256),
+        "lens_v1_sha256": _short_hash(FROZEN_LENS_SHA256),
+        "lens_v2_sha256": _short_hash(FROZEN_LENS_V2_SHA256),
+    }
+    if device_name is not None:
+        summary["device_name"] = device_name
+    if model_revision is not None:
+        summary["model_revision"] = _short_hash(model_revision)
+    if direction_digest is not None:
+        summary["direction_sha256"] = _short_hash(direction_digest)
+    return summary
 
 
 def bootstrap_intervention_lab(
@@ -520,6 +597,7 @@ def bootstrap_intervention_lab(
     *,
     direction_path: str | Path | None = None,
     lens_path: str | Path | None = None,
+    lens_v2_path: str | Path | None = None,
     gpu_probe: Callable[[], Mapping[str, Any]] | None = None,
     load_model: Callable[..., tuple[Any, Any, Any]] | None = None,
     load_stack: Callable[..., Any] | None = None,
@@ -527,22 +605,31 @@ def bootstrap_intervention_lab(
     probe = gpu_probe or _default_gpu_probe
     preflight = require_a100_preflight(probe)
     root = root.resolve()
-    direction_file, lens_file = resolve_lab_artifact_paths(
+    direction_file, lens_file, lens_v2_file = resolve_lab_artifact_paths(
         root,
         direction_path=direction_path or os.environ.get("QWEN_LAB_DIRECTION"),
         lens_path=lens_path or os.environ.get("QWEN_LAB_LENS"),
+        lens_v2_path=lens_v2_path or os.environ.get("QWEN_LAB_LENS_V2"),
     )
     direction_digest = verify_direction_artifact(direction_file)
     verify_frozen_lens_hash(lens_file, FROZEN_LENS_SHA256)
+    verify_frozen_lens_hash(lens_v2_file, FROZEN_LENS_V2_SHA256)
     if load_stack is not None:
         built = load_stack(
             root=root,
             direction_path=direction_file,
             lens_path=lens_file,
+            lens_v2_path=lens_v2_file,
             lens_contract=LENS_CONTRACT_QWEN,
         )
         engine = built.engine if hasattr(built, "engine") else built
-        summary = dict(getattr(built, "preflight_summary", {}))
+        summary = _lens_preflight_summary(
+            device_name=preflight.get("device_name"),
+            direction_digest=direction_digest,
+        )
+        summary.update(dict(getattr(built, "preflight_summary", {})))
+        summary.setdefault("jlens_version", DEFAULT_JLENS_VERSION)
+        summary.setdefault("lens_sha256", _short_hash(FROZEN_LENS_V2_SHA256))
         return LabRuntimeBundle(engine=engine, preflight_summary=summary)
 
     loader = load_model or _load_bf16_model
@@ -553,19 +640,19 @@ def bootstrap_intervention_lab(
     resolved = getattr(model.config, "_commit_hash", None)
     revision = _assert_model_revision(resolved)
     _assert_tokenizer_revision(tokenizer, LAB_MODEL_REVISION)
-    engine, _readout = build_production_stack(
+    engine, _registry = build_production_stack(
         model=model,
         tokenizer=tokenizer,
         direction_path=direction_file,
         lens_path=lens_file,
+        lens_v2_path=lens_v2_file,
         lens_contract=LENS_CONTRACT_QWEN,
     )
-    summary = {
-        "device_name": preflight.get("device_name"),
-        "model_revision": _short_hash(revision),
-        "direction_sha256": _short_hash(direction_digest),
-        "lens_sha256": _short_hash(FROZEN_LENS_SHA256),
-    }
+    summary = _lens_preflight_summary(
+        device_name=preflight.get("device_name"),
+        model_revision=revision,
+        direction_digest=direction_digest,
+    )
     return LabRuntimeBundle(engine=engine, preflight_summary=summary)
 
 
@@ -629,6 +716,7 @@ class LabUIController:
         top_p: float,
         seed: int,
         max_new_tokens: int,
+        j_lens_version: str = DEFAULT_JLENS_VERSION,
     ) -> GenerationRequest:
         resolved = self.resolve_preset(condition)
         effective = float(coefficient) if manual_mode else resolved.coefficient
@@ -646,12 +734,27 @@ class LabUIController:
             top_p=float(top_p),
             seed=int(seed),
             max_new_tokens=int(max_new_tokens),
+            j_lens_version=normalize_jlens_version(j_lens_version),
         )
+
+    @staticmethod
+    def format_status_message(
+        *,
+        status: str | None,
+        version: str,
+        sha256: str | None,
+    ) -> str:
+        label = JLENS_VERSION_LABELS[normalize_jlens_version(version)]
+        prefix = f"Estado: {status}" if status else "Gerando…"
+        if sha256:
+            return f"{prefix} | J-lens {label} | {sha256}"
+        return f"{prefix} | J-lens {label}"
 
     def generation_lock_updates(self) -> tuple[ComponentUpdate, ...]:
         targets = (
             "condition_dropdown",
             "layer_slider",
+            "jlens_selector",
             "preset_radio",
             "manual_mode",
             "manual_coefficient",
@@ -680,6 +783,7 @@ class LabUIController:
         base = (
             ComponentUpdate(component="condition_dropdown", interactive=True),
             ComponentUpdate(component="layer_slider", interactive=True),
+            ComponentUpdate(component="jlens_selector", interactive=True),
             ComponentUpdate(component="preset_radio", interactive=True),
             ComponentUpdate(component="manual_mode", interactive=True),
             ComponentUpdate(component="top_k", interactive=True),
@@ -721,9 +825,15 @@ class LabUIController:
             f"token produzido: {event.generated_token_text} (id {event.generated_token_id})"
         )
         state.events.append(event)
+        version = getattr(event, "j_lens_version", DEFAULT_JLENS_VERSION)
+        digest = getattr(event, "j_lens_sha256", None)
         if event.status:
             state.terminal_status = event.status
-            state.status_message = f"Estado: {event.status}"
+        state.status_message = self.format_status_message(
+            status=event.status,
+            version=version,
+            sha256=digest,
+        )
 
     def stream_generation(
         self,
@@ -739,7 +849,11 @@ class LabUIController:
         state.response_text = ""
         state.prediction_rows = []
         state.prediction_caption = ""
-        state.status_message = "Gerando…"
+        state.status_message = self.format_status_message(
+            status=None,
+            version=request.j_lens_version,
+            sha256=FROZEN_LENS_SHA256_BY_VERSION[request.j_lens_version],
+        )
         state.terminal_status = None
         lab_operational_log(status="started", condition=request.condition, layer=request.j_lens_layer)
         lock = self.generation_lock_updates()
@@ -767,8 +881,17 @@ class LabUIController:
             iterator.close()
             terminal = getattr(engine, "terminal_status", None) or state.terminal_status
             state.terminal_status = terminal
+            digest = None
+            if state.events:
+                digest = state.events[-1].j_lens_sha256
+            if digest is None:
+                digest = FROZEN_LENS_SHA256_BY_VERSION[request.j_lens_version]
             if terminal:
-                state.status_message = f"Estado: {terminal}"
+                state.status_message = self.format_status_message(
+                    status=terminal,
+                    version=request.j_lens_version,
+                    sha256=digest,
+                )
             lab_operational_log(status=terminal or "idle", condition=request.condition)
 
     def clear_session(self, state: LabViewState) -> LabViewState:
@@ -790,6 +913,12 @@ class LabUIController:
         terminal = state.terminal_status
         if terminal is None and state.events:
             terminal = state.events[-1].status
+        version = normalize_jlens_version(state.last_request.j_lens_version)
+        digest = None
+        if state.events:
+            digest = state.events[-1].j_lens_sha256
+        if not digest:
+            digest = FROZEN_LENS_SHA256_BY_VERSION[version]
         document = {
             "schema_version": EXPORT_SCHEMA_VERSION,
             "exported_at": datetime.now(timezone.utc).isoformat(),
@@ -799,7 +928,8 @@ class LabUIController:
             "parameters": {
                 "model_revision": LAB_MODEL_REVISION,
                 "direction_sha256": FROZEN_DIRECTION_SHA256,
-                "lens_sha256": FROZEN_LENS_SHA256,
+                "j_lens_version": version,
+                "lens_sha256": digest,
             },
         }
         assert_export_document_safe(document)
@@ -888,6 +1018,7 @@ def pack_generation_outputs(
     return (
         control("condition_dropdown"),
         control("layer_slider"),
+        control("jlens_selector"),
         control("preset_radio"),
         control("manual_mode"),
         control("manual_coefficient"),
@@ -923,10 +1054,12 @@ def create_run_generation_handler(
         nucleus: float,
         seed_value: float,
         max_tokens: float,
+        j_lens_version: str = DEFAULT_JLENS_VERSION,
     ) -> Iterator[tuple[Any, ...]]:
         client = registry.get_or_create(session_hash)
         condition_name = condition  # type: ignore[assignment]
         generator_exit = False
+        frozen_version = normalize_jlens_version(j_lens_version)
         try:
             request = controller.build_generation_request(
                 prompt=prompt_text,
@@ -939,6 +1072,7 @@ def create_run_generation_handler(
                 top_p=float(nucleus),
                 seed=int(seed_value),
                 max_new_tokens=int(max_tokens),
+                j_lens_version=frozen_version,
             )
             for tick in controller.stream_generation(
                 engine,
@@ -992,7 +1126,10 @@ def build_gradio_app(
         f"GPU: {preflight_summary.get('device_name', 'n/d')} | "
         f"revisão {preflight_summary.get('model_revision', 'n/d')} | "
         f"direção {preflight_summary.get('direction_sha256', 'n/d')} | "
-        f"lente {preflight_summary.get('lens_sha256', 'n/d')}"
+        f"J-lens {preflight_summary.get('jlens_version', DEFAULT_JLENS_VERSION)} "
+        f"{preflight_summary.get('lens_sha256', 'n/d')} | "
+        f"v1 {preflight_summary.get('lens_v1_sha256', 'n/d')} | "
+        f"v2 {preflight_summary.get('lens_v2_sha256', 'n/d')}"
     )
 
     session_delete = make_lab_session_delete_callback(registry)
@@ -1040,6 +1177,14 @@ def build_gradio_app(
                     value=18,
                     step=1,
                     label="Camada da J-lens",
+                )
+                jlens_selector = gr.Radio(
+                    choices=[
+                        ("v2 (contexto longo)", "v2"),
+                        ("v1 (100 amostras)", "v1"),
+                    ],
+                    value=DEFAULT_JLENS_VERSION,
+                    label="J-lens",
                 )
                 top_k = gr.Slider(1, 20, value=DEFAULT_TOP_K, step=1, label="Top-k exibido")
                 temperature = gr.Slider(0.0, 2.0, value=0.7, step=0.05, label="Temperatura")
@@ -1111,10 +1256,12 @@ def build_gradio_app(
                 top_p,
                 seed,
                 max_new_tokens,
+                jlens_selector,
             ],
             outputs=[
                 condition_dropdown,
                 layer_slider,
+                jlens_selector,
                 preset_radio,
                 manual_mode,
                 manual_coefficient,

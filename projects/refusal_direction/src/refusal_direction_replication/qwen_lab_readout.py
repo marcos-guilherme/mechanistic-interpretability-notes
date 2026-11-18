@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,12 +13,27 @@ from .pipeline import temporary_hooks
 from .qwen_code_eval_runtime import apply_lens_with_hooks
 from .qwen_dose import sha256_file
 from .qwen_jlens import EXPECTED_D_MODEL, EXPECTED_SOURCE_LAYERS, validate_fitted_lens
-from .qwen_lab import TokenPrediction, escape_token_display
+from .qwen_lab import (
+    DEFAULT_JLENS_VERSION,
+    JLENS_VERSION_LABELS,
+    JLENS_VERSIONS,
+    JLensVersion,
+    TokenPrediction,
+    escape_token_display,
+    normalize_jlens_version,
+)
 
 
 FROZEN_LENS_SHA256 = (
     "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e"
 )
+FROZEN_LENS_V2_SHA256 = (
+    "b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a"
+)
+FROZEN_LENS_SHA256_BY_VERSION: dict[JLensVersion, str] = {
+    "v1": FROZEN_LENS_SHA256,
+    "v2": FROZEN_LENS_V2_SHA256,
+}
 PARITY_LOGITS_ATOL = 1e-4
 PARITY_RANK_ATOL = 0.0
 
@@ -26,6 +42,72 @@ DecodeToken = Callable[[int], str]
 LensContract = Literal["qwen", "fixture"]
 LENS_CONTRACT_QWEN = "qwen"
 LENS_CONTRACT_FIXTURE = "fixture"
+
+
+@dataclass(frozen=True)
+class LensProvenance:
+    version: JLensVersion
+    sha256: str
+    label: str
+
+
+class LensReadoutRegistry:
+    """Keep both fitted lenses loaded; select one readout per generation."""
+
+    def __init__(
+        self,
+        entries: Mapping[JLensVersion, tuple[LiveJLensReadout, LensProvenance]],
+    ) -> None:
+        missing = [version for version in JLENS_VERSIONS if version not in entries]
+        if missing:
+            raise ValueError(
+                "readout registry requires versions " + ", ".join(missing)
+            )
+        self._entries: dict[JLensVersion, tuple[LiveJLensReadout, LensProvenance]] = {}
+        for version in JLENS_VERSIONS:
+            readout, provenance = entries[version]
+            if provenance.version != version:
+                raise ValueError(
+                    f"provenance version {provenance.version!r} != {version!r}"
+                )
+            self._entries[version] = (readout, provenance)
+
+    def select(
+        self,
+        version: str | None = None,
+    ) -> tuple[LiveJLensReadout, LensProvenance]:
+        resolved = normalize_jlens_version(
+            version if version is not None else DEFAULT_JLENS_VERSION
+        )
+        return self._entries[resolved]
+
+    @classmethod
+    def from_single(
+        cls,
+        readout: LiveJLensReadout,
+        *,
+        version: JLensVersion = DEFAULT_JLENS_VERSION,
+        sha256: str | None = None,
+    ) -> "LensReadoutRegistry":
+        resolved = normalize_jlens_version(version)
+        digest = sha256 or FROZEN_LENS_SHA256_BY_VERSION[resolved]
+        provenance = LensProvenance(
+            version=resolved,
+            sha256=digest,
+            label=JLENS_VERSION_LABELS[resolved],
+        )
+        other = "v1" if resolved == "v2" else "v2"
+        other_provenance = LensProvenance(
+            version=other,
+            sha256=FROZEN_LENS_SHA256_BY_VERSION[other],
+            label=JLENS_VERSION_LABELS[other],
+        )
+        return cls(
+            {
+                resolved: (readout, provenance),
+                other: (readout, other_provenance),
+            }
+        )
 
 
 def verify_frozen_lens_hash(path: str | Path, expected_lens_sha256: str) -> None:

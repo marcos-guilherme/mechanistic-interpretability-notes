@@ -213,8 +213,10 @@ def test_generation_lock_and_unlock_descriptors() -> None:
     }
     assert locked["condition_dropdown"].interactive is False
     assert locked["layer_slider"].interactive is False
+    assert locked["jlens_selector"].interactive is False
     assert locked["generate_button"].interactive is False
     assert unlocked["condition_dropdown"].interactive is True
+    assert unlocked["jlens_selector"].interactive is True
     assert unlocked["manual_coefficient"].interactive is True
 
 
@@ -417,8 +419,16 @@ def test_bootstrap_production_uses_qwen_lens_contract(tmp_path: Path) -> None:
     }
     direction = tmp_path / "direction.pt"
     lens = tmp_path / "lens.pt"
+    lens_v2 = (
+        tmp_path
+        / "artifacts"
+        / "qwen25_coder_7b_jlens_v2"
+        / "qwen25_coder_7b_jacobian_lens_v2.pt"
+    )
     direction.write_bytes(b"dir")
     lens.write_bytes(b"lens")
+    lens_v2.parent.mkdir(parents=True, exist_ok=True)
+    lens_v2.write_bytes(b"lens-v2")
     with patch(
         "refusal_direction_replication.qwen_lab_app.verify_direction_artifact",
         return_value="0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
@@ -498,7 +508,7 @@ def test_pack_generation_outputs_has_fixed_cardinality() -> None:
         manual_mode=False,
         lock=LabUIController().generation_lock_updates(),
     )
-    assert len(row) == GENERATION_OUTPUT_COUNT == 15
+    assert len(row) == GENERATION_OUTPUT_COUNT == 16
 
 
 def test_run_generation_handler_yield_shape_matches_gradio_outputs(tmp_path: Path) -> None:
@@ -529,6 +539,7 @@ def test_run_generation_handler_yield_shape_matches_gradio_outputs(tmp_path: Pat
             1.0,
             0.0,
             4.0,
+            "v2",
         )
     )
     assert len(rows) >= 2
@@ -667,6 +678,7 @@ def test_run_generation_unlocks_after_engine_error(tmp_path: Path) -> None:
             1.0,
             0.0,
             2.0,
+            "v2",
         )
     )
     client = registry.get_or_create("err")
@@ -787,3 +799,211 @@ def test_qwen_run_lab_main_does_not_print_password(capsys: pytest.CaptureFixture
     captured = capsys.readouterr().out + capsys.readouterr().err
     assert "SUPER-SECRET-PASS" not in captured
     launch.assert_called_once()
+
+
+def test_lab_config_pins_qwen_and_both_jlens_artifacts() -> None:
+    from refusal_direction_replication.qwen_lab import DEFAULT_JLENS_VERSION, LAB_MODEL_NAME
+    from refusal_direction_replication.qwen_lab_readout import (
+        FROZEN_LENS_SHA256,
+        FROZEN_LENS_V2_SHA256,
+    )
+
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "qwen25_coder_7b_lab.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["model_name"] == LAB_MODEL_NAME == "Qwen/Qwen2.5-Coder-7B-Instruct"
+    assert config["source_lens"] == (
+        "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt"
+    )
+    assert config["lens_sha256"] == FROZEN_LENS_SHA256
+    assert config["source_lens_v2"] == (
+        "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt"
+    )
+    assert config["lens_v2_sha256"] == FROZEN_LENS_V2_SHA256
+    assert config["default_jlens_version"] == DEFAULT_JLENS_VERSION == "v2"
+
+
+def test_build_request_defaults_to_v2_and_accepts_explicit_v1() -> None:
+    from refusal_direction_replication.qwen_lab_app import LabUIController
+
+    controller = LabUIController()
+    kwargs = dict(
+        prompt="olá",
+        condition="baseline",
+        manual_mode=False,
+        coefficient=0.0,
+        j_lens_layer=10,
+        top_k=DEFAULT_TOP_K,
+        temperature=0.0,
+        top_p=1.0,
+        seed=0,
+        max_new_tokens=8,
+    )
+    assert controller.build_generation_request(**kwargs).j_lens_version == "v2"
+    explicit = controller.build_generation_request(**kwargs, j_lens_version="v1")
+    assert explicit.j_lens_version == "v1"
+
+
+def test_status_and_export_include_selected_lens_version_and_hash(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab import JLENS_VERSION_LABELS
+    from refusal_direction_replication.qwen_lab_app import LabUIController, LabViewState
+    from refusal_direction_replication.qwen_lab_readout import FROZEN_LENS_V2_SHA256
+
+    controller = LabUIController()
+    state = LabViewState()
+    event = _event(1, status="max_tokens")
+    event = replace(
+        event,
+        j_lens_version="v2",
+        j_lens_sha256=FROZEN_LENS_V2_SHA256,
+    )
+    controller.apply_event(state, event)
+    assert "v2" in state.status_message.casefold() or JLENS_VERSION_LABELS["v2"] in state.status_message
+    assert FROZEN_LENS_V2_SHA256 in state.status_message
+    state.last_request = controller.build_generation_request(
+        prompt="exportável",
+        condition="addition",
+        manual_mode=False,
+        coefficient=0.5,
+        j_lens_layer=8,
+        top_k=5,
+        temperature=1.0,
+        top_p=1.0,
+        seed=9,
+        max_new_tokens=3,
+        j_lens_version="v2",
+    )
+    document = controller.build_export_document(state)
+    assert document["request"]["j_lens_version"] == "v2"
+    assert document["parameters"]["j_lens_version"] == "v2"
+    assert document["parameters"]["lens_sha256"] == FROZEN_LENS_V2_SHA256
+    path = controller.export_session(state, explicit=True, holder=tmp_path / "h")
+    dumped = json.dumps(json.loads(path.read_text(encoding="utf-8")), ensure_ascii=False)
+    assert "v2" in dumped
+    assert FROZEN_LENS_V2_SHA256 in dumped
+
+
+def test_bootstrap_validates_both_lenses_and_defaults_to_v2(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import bootstrap_intervention_lab
+    from refusal_direction_replication.qwen_lab_readout import (
+        FROZEN_LENS_SHA256,
+        FROZEN_LENS_V2_SHA256,
+        LENS_CONTRACT_QWEN,
+    )
+
+    captured: dict[str, Any] = {}
+    hashes: list[str] = []
+
+    def fake_load_stack(**kwargs: Any) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(engine=MagicMock(), preflight_summary={"device_name": "A100"})
+
+    def fake_verify(path: Path, expected: str) -> None:
+        hashes.append(expected)
+        if not Path(path).is_file():
+            raise FileNotFoundError(str(path))
+
+    probe = lambda: {
+        "cuda_available": True,
+        "device_name": "NVIDIA A100-SXM4-40GB",
+        "total_memory_bytes": 40_000_000_000,
+    }
+    direction = tmp_path / "direction.pt"
+    lens_v1 = tmp_path / "lens_v1.pt"
+    lens_v2 = tmp_path / "lens_v2.pt"
+    direction.write_bytes(b"dir")
+    lens_v1.write_bytes(b"lens-v1")
+    lens_v2.write_bytes(b"lens-v2")
+    with patch(
+        "refusal_direction_replication.qwen_lab_app.verify_direction_artifact",
+        return_value="0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
+    ), patch(
+        "refusal_direction_replication.qwen_lab_app.verify_frozen_lens_hash",
+        side_effect=fake_verify,
+    ):
+        bundle = bootstrap_intervention_lab(
+            tmp_path,
+            direction_path=direction,
+            lens_path=lens_v1,
+            lens_v2_path=lens_v2,
+            gpu_probe=probe,
+            load_stack=fake_load_stack,
+        )
+    assert captured.get("lens_contract") == LENS_CONTRACT_QWEN
+    assert Path(captured["lens_path"]) == lens_v1.resolve()
+    assert Path(captured["lens_v2_path"]) == lens_v2.resolve()
+    assert hashes == [FROZEN_LENS_SHA256, FROZEN_LENS_V2_SHA256]
+    assert bundle.preflight_summary.get("jlens_version") == "v2"
+    assert bundle.preflight_summary.get("lens_sha256") == FROZEN_LENS_V2_SHA256[:8]
+
+
+def test_bootstrap_fail_closed_when_v2_lens_missing(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import bootstrap_intervention_lab
+
+    probe = lambda: {
+        "cuda_available": True,
+        "device_name": "NVIDIA A100-SXM4-40GB",
+        "total_memory_bytes": 40_000_000_000,
+    }
+    direction = tmp_path / "direction.pt"
+    lens_v1 = tmp_path / "lens_v1.pt"
+    direction.write_bytes(b"dir")
+    lens_v1.write_bytes(b"lens-v1")
+    with patch(
+        "refusal_direction_replication.qwen_lab_app.verify_direction_artifact",
+        return_value="0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
+    ), patch("refusal_direction_replication.qwen_lab_app.verify_frozen_lens_hash"):
+        with pytest.raises((FileNotFoundError, ValueError), match="lens"):
+            bootstrap_intervention_lab(
+                tmp_path,
+                direction_path=direction,
+                lens_path=lens_v1,
+                lens_v2_path=tmp_path / "missing_v2.pt",
+                gpu_probe=probe,
+                load_stack=lambda **_kwargs: SimpleNamespace(),
+            )
+
+
+def test_gradio_layout_has_jlens_selector_defaulting_to_v2() -> None:
+    from refusal_direction_replication.qwen_lab_app import build_gradio_app
+
+    source = inspect.getsource(build_gradio_app)
+    assert "v2 (contexto longo)" in source
+    assert "v1 (100 amostras)" in source
+    assert "jlens_selector" in source
+    assert "DEFAULT_JLENS_VERSION" in source
+
+
+def test_run_generation_handler_freezes_selected_v1(tmp_path: Path) -> None:
+    from refusal_direction_replication.qwen_lab_app import (
+        LabSessionRegistry,
+        LabUIController,
+        create_run_generation_handler,
+    )
+
+    captured: list[GenerationRequest] = []
+
+    class CaptureEngine:
+        def generate(self, request: GenerationRequest, cancelled: Any = None):
+            del cancelled
+            captured.append(request)
+            yield _event(1, status="completed")
+
+    registry = LabSessionRegistry(export_root=tmp_path / "v1")
+    handler = create_run_generation_handler(CaptureEngine(), registry, LabUIController())
+    list(
+        handler(
+            "sess-v1",
+            "pergunta",
+            "baseline",
+            False,
+            0.0,
+            10.0,
+            float(DEFAULT_TOP_K),
+            0.0,
+            1.0,
+            0.0,
+            4.0,
+            "v1",
+        )
+    )
+    assert captured[0].j_lens_version == "v1"

@@ -18,6 +18,9 @@
   "artifacts_dir": "artifacts/qwen25_coder_7b_lab",
   "source_direction": "artifacts/qwen25_coder_7b/selected_direction.pt",
   "source_lens": "artifacts/qwen25_coder_7b_jlens/qwen25_coder_7b_jacobian_lens.pt",
+  "source_lens_v2": "artifacts/qwen25_coder_7b_jlens_v2/qwen25_coder_7b_jacobian_lens_v2.pt",
   "direction_sha256": "0b1cff5e7013a80e609de91dde6dfba646c9ab6879c488154008576a24f0a086",
-  "lens_sha256": "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e"
+  "lens_sha256": "b700a78c90e82f18e057db01cf3dd520beda1f51f1663e2dbf0c1c481efc9e4e",
+  "lens_v2_sha256": "b80c084a5ce083d2fc8589a62c9a9b2542b6a9dc6b5c006018cc4956eef37a7a",
+  "default_jlens_version": "v2"
 }
