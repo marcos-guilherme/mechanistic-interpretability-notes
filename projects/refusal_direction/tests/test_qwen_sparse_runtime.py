@@ -182,6 +182,7 @@ def _complete_through_review(store: SparseStageStore) -> None:
             "review_count": 512,
             "test_split_sha256": store.test_split_sha256,
             "blind_review_sha256": "b" * 64,
+            "private_manifest_sha256": "a" * 64,
         },
     )
     store.write_stage(
@@ -192,6 +193,7 @@ def _complete_through_review(store: SparseStageStore) -> None:
             "review_count": 512,
             "manifest_seed": 2031,
             "blind_review_sha256": "b" * 64,
+            "private_manifest_sha256": "a" * 64,
             "test_split_sha256": store.test_split_sha256,
             "reviews": [],
             "label_counts": {},
@@ -1030,6 +1032,7 @@ def test_external_and_code_evaluation_require_complete_blind_review(
             "review_count": 512,
             "test_split_sha256": store.test_split_sha256,
             "blind_review_sha256": "b" * 64,
+            "private_manifest_sha256": "a" * 64,
         },
     )
     store.write_stage(
@@ -1038,6 +1041,7 @@ def test_external_and_code_evaluation_require_complete_blind_review(
             "status": "inconclusive_review",
             "test_split_sha256": store.test_split_sha256,
             "blind_review_sha256": "b" * 64,
+            "private_manifest_sha256": "a" * 64,
         },
     )
     runtime = SparseRuntime(store)
@@ -1067,6 +1071,7 @@ def test_review_merge_must_match_exported_blind_hash(tmp_path: Path) -> None:
             "review_count": 512,
             "test_split_sha256": store.test_split_sha256,
             "blind_review_sha256": "b" * 64,
+            "private_manifest_sha256": "a" * 64,
         },
     )
     with pytest.raises(ValueError, match="08_review_export"):
@@ -1076,6 +1081,7 @@ def test_review_merge_must_match_exported_blind_hash(tmp_path: Path) -> None:
                 "status": "inconclusive_review",
                 "test_split_sha256": store.test_split_sha256,
                 "blind_review_sha256": "c" * 64,
+                "private_manifest_sha256": "a" * 64,
             },
         )
 

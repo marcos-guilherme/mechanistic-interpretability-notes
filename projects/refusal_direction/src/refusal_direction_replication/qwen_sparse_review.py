@@ -422,6 +422,7 @@ def merge_blind_review(
         "status": "review_complete",
         "review_count": REVIEW_ROW_COUNT,
         "manifest_seed": int(manifest["seed"]),
+        "private_manifest_sha256": _sha256_file(Path(private_manifest)),
         "blind_review_sha256": actual_blind_sha256,
         "test_split_sha256": str(manifest["test_split_sha256"]),
         "reviews": reviews,

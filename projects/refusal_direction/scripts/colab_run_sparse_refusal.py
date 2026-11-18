@@ -549,9 +549,15 @@ def write_validation_receipt(root: Path = REMOTE_ROOT) -> Path:
     merge = json.loads(
         (results / "09_review_merge.json").read_text(encoding="utf-8")
     )["results"]
+    exported = json.loads(
+        (results / "08_review_export.json").read_text(encoding="utf-8")
+    )["results"]
+    private_sha256 = _sha256_file(private_path)
     if (
         private.get("blind_review_sha256") != merge.get("blind_review_sha256")
         or private.get("test_split_sha256") != merge.get("test_split_sha256")
+        or private_sha256 != exported.get("private_manifest_sha256")
+        or private_sha256 != merge.get("private_manifest_sha256")
     ):
         raise ValueError("review merge differs from authenticated manifest")
     labels = {
@@ -604,7 +610,7 @@ def write_validation_receipt(root: Path = REMOTE_ROOT) -> Path:
         },
         "checkpoint_identity": checkpoint["identity"],
         "review_manifest": {
-            "manifest_sha256": _sha256_file(private_path),
+            "manifest_sha256": private_sha256,
             "blind_review_sha256": private["blind_review_sha256"],
             "test_split_sha256": private["test_split_sha256"],
             "review_count": 512,

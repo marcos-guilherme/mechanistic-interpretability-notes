@@ -92,6 +92,8 @@ METRICS = (
     "defensive_recovery_delta",
     "offensive_retention_improvement",
 )
+# JSON round-trips and summation order may shift the last binary digits only.
+MEAN_KL_TOLERANCE = 1e-12
 
 
 class ValidationReport(NamedTuple):
@@ -418,6 +420,16 @@ def _review_rows(
     _require(isinstance(manifest, dict), "compact review manifest missing")
     export = stages[8]["results"]
     merge = stages[9]["results"]
+    _require(
+        _valid_sha256(manifest.get("manifest_sha256")),
+        "private manifest SHA-256 is invalid",
+    )
+    _require(
+        manifest.get("manifest_sha256")
+        == export.get("private_manifest_sha256")
+        == merge.get("private_manifest_sha256"),
+        "private manifest SHA-256 differs across receipt and stages",
+    )
     for field in ("blind_review_sha256", "test_split_sha256"):
         _require(_valid_sha256(manifest.get(field)), f"{field} is invalid")
         _require(
@@ -539,6 +551,26 @@ def _check_bootstrap(
     )
 
 
+def _metrics_equal(
+    actual: Any,
+    expected: Mapping[str, int | float],
+) -> bool:
+    if not isinstance(actual, Mapping) or set(actual) != set(expected):
+        return False
+    for field, expected_value in expected.items():
+        if field == "mean_kl":
+            if not math.isclose(
+                float(actual[field]),
+                float(expected_value),
+                rel_tol=MEAN_KL_TOLERANCE,
+                abs_tol=MEAN_KL_TOLERANCE,
+            ):
+                return False
+        elif actual[field] != expected_value:
+            return False
+    return True
+
+
 def _check_secondary_panels(stages: Sequence[Mapping[str, Any]]) -> None:
     external_stage = stages[10]["results"]
     selection_sha256 = stages[6]["results"]["selection_freeze_sha256"]
@@ -591,7 +623,10 @@ def _check_secondary_panels(stages: Sequence[Mapping[str, Any]]) -> None:
             "mean_kl": statistics.fmean(float(row.get("kl_from_baseline", 0)) for row in rows),
             "invalid_generation_rate": sum(bool(row.get("invalid_generation")) for row in rows) / len(rows),
         }
-        _require(metrics.get(dataset, {}).get(condition) == expected, "external metrics differ from observations")
+        _require(
+            _metrics_equal(metrics.get(dataset, {}).get(condition), expected),
+            "external metrics differ from observations",
+        )
     code_stage = stages[11]["results"]
     _require(code_stage.get("status") == "completed", "HumanEval+ status changed")
     _require(
@@ -638,7 +673,10 @@ def _check_secondary_panels(stages: Sequence[Mapping[str, Any]]) -> None:
             "mean_kl": statistics.fmean(float(row.get("kl_from_baseline", 0)) for row in rows),
             "invalid_generation_rate": sum(bool(row.get("invalid_generation")) for row in rows) / len(rows),
         }
-        _require(code_metrics.get(condition) == expected, "HumanEval+ metrics differ from observations")
+        _require(
+            _metrics_equal(code_metrics.get(condition), expected),
+            "HumanEval+ metrics differ from observations",
+        )
 
 
 def validate_sparse_results(results_dir: Path) -> ValidationReport:

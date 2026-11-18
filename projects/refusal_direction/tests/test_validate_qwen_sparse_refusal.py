@@ -85,6 +85,24 @@ def _write(path: Path, payload: Any) -> None:
     )
 
 
+def _mutate_stage_and_rechain(
+    results: Path,
+    index: int,
+    mutate,
+) -> None:
+    path = results / f"{index:02d}_{STAGES[index]}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutate(payload)
+    _write(path, payload)
+    prior = _file_sha(path)
+    for later in range(index + 1, len(STAGES)):
+        later_path = results / f"{later:02d}_{STAGES[later]}.json"
+        later_payload = json.loads(later_path.read_text(encoding="utf-8"))
+        later_payload["provenance"]["prior_stage_sha256"] = prior
+        _write(later_path, later_payload)
+        prior = _file_sha(later_path)
+
+
 def _bootstrap(rows: list[dict[str, Any]], metric: str) -> dict[str, Any]:
     side, orientation = {
         "offensive_delta": ("offensive", 1.0),
@@ -347,6 +365,7 @@ def write_complete_sparse_fixture(root: Path) -> Path:
                 "review_count": 512,
                 "blind_review_sha256": blind_review_sha256,
                 "test_split_sha256": test_split_sha,
+                "private_manifest_sha256": _sha("private-manifest"),
             }
         elif stage == "review_merge":
             stage_results |= {
@@ -354,6 +373,7 @@ def write_complete_sparse_fixture(root: Path) -> Path:
                 "review_count": 512,
                 "blind_review_sha256": blind_review_sha256,
                 "test_split_sha256": test_split_sha,
+                "private_manifest_sha256": _sha("private-manifest"),
                 "reviews": [
                     {
                         "review_id": row["review_id"],
@@ -510,6 +530,8 @@ def write_mutated_sparse_fixture(root: Path, mutation: str) -> Path:
         _write(finalize_path, finalize)
     elif mutation == "review_auth":
         bundle["review_manifest"]["blind_review_sha256"] = "0" * 64
+    elif mutation == "review_manifest_remap":
+        bundle["review_manifest"]["manifest_sha256"] = "0" * 64
     elif mutation == "external_metric":
         external_path = results / "10_external_transfer.json"
         external = json.loads(external_path.read_text(encoding="utf-8"))
@@ -517,6 +539,15 @@ def write_mutated_sparse_fixture(root: Path, mutation: str) -> Path:
             "refusal_rate"
         ] = 0.5
         _write(external_path, external)
+    elif mutation == "external_mean_kl_outside_tolerance":
+        _mutate_stage_and_rechain(
+            results,
+            10,
+            lambda stage: stage["results"]["metrics"]["mitre"]["baseline"].__setitem__(
+                "mean_kl",
+                0.1000000002,
+            ),
+        )
     elif mutation == "code_metric":
         code_path = results / "11_code_preservation.json"
         code = json.loads(code_path.read_text(encoding="utf-8"))
@@ -555,7 +586,9 @@ def test_validator_accepts_complete_fixture(tmp_path: Path) -> None:
         "wrong_selection_hash",
         "missing_pareto_status",
         "review_auth",
+        "review_manifest_remap",
         "external_metric",
+        "external_mean_kl_outside_tolerance",
         "code_metric",
     ),
 )
@@ -566,6 +599,26 @@ def test_validator_rejects_invalid_fixture(
     fixture = write_mutated_sparse_fixture(tmp_path, mutation)
     report = _load_validator().validate_sparse_results(fixture)
     assert report.failed
+
+
+def test_validator_accepts_strict_float_roundoff_for_mean_kl(
+    tmp_path: Path,
+) -> None:
+    fixture = write_complete_sparse_fixture(tmp_path)
+    _mutate_stage_and_rechain(
+        fixture,
+        10,
+        lambda stage: stage["results"]["metrics"]["mitre"]["baseline"].__setitem__(
+            "mean_kl",
+            0.1000000000005,
+        ),
+    )
+    report = _load_validator().validate_sparse_results(fixture)
+    assert not [
+        failure
+        for failure in report.failed
+        if failure.startswith("secondary_panels:")
+    ]
 
 
 def test_transport_allowlists_productive_validation_receipt() -> None:
@@ -680,13 +733,29 @@ def test_exporter_uses_real_reviewed_jsonl_bytes_and_review_manifest(
             "assignments": assignments,
         },
     )
+    private_sha256 = _file_sha(
+        artifacts / "review" / "private_manifest.json"
+    )
     results = tmp_path / "results" / "qwen25_coder_sparse_refusal"
+    _write(
+        results / "08_review_export.json",
+        {
+            "results": {
+                "status": "review_pending",
+                "review_count": 512,
+                "private_manifest_sha256": private_sha256,
+                "blind_review_sha256": blind_sha256,
+                "test_split_sha256": test_split_sha256,
+            }
+        },
+    )
     _write(
         results / "09_review_merge.json",
         {
             "results": {
                 "status": "review_complete",
                 "review_count": 512,
+                "private_manifest_sha256": private_sha256,
                 "blind_review_sha256": blind_sha256,
                 "test_split_sha256": test_split_sha256,
                 "reviews": labels,

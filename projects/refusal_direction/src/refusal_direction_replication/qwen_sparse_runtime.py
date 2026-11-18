@@ -573,12 +573,14 @@ _STAGE_ALLOWED_FIELDS = {
         "review_count",
         "test_split_sha256",
         "blind_review_sha256",
+        "private_manifest_sha256",
     },
     "review_merge": {
         "schema_version",
         "status",
         "review_count",
         "manifest_seed",
+        "private_manifest_sha256",
         "blind_review_sha256",
         "test_split_sha256",
         "reviews",
@@ -888,6 +890,7 @@ def _validate_stage_schema(stage: str, results: Mapping[str, Any]) -> None:
         elif results["status"] == "inconclusive_review":
             if set(results) != {
                 "status",
+                "private_manifest_sha256",
                 "blind_review_sha256",
                 "test_split_sha256",
             }:
@@ -1111,6 +1114,18 @@ class SparseStageStore:
             if merge_blind != export_blind:
                 raise ValueError(
                     "review merge differs from 08_review_export blind hash"
+                )
+            merge_manifest = _require_sha256(
+                results.get("private_manifest_sha256"),
+                "review merge private manifest hash",
+            )
+            export_manifest = _require_sha256(
+                export_results.get("private_manifest_sha256"),
+                "08_review_export private manifest hash",
+            )
+            if merge_manifest != export_manifest:
+                raise ValueError(
+                    "review merge differs from 08_review_export private manifest"
                 )
         if stage not in {"external_transfer", "code_preservation"}:
             return
@@ -1876,11 +1891,13 @@ def _default_stage_runner(
             frozen_test_pairs=store.test_pairs,
         )
         blind_path = artifacts_dir / "review" / "blind_review.jsonl"
+        private_path = artifacts_dir / "review" / "private_manifest.json"
         return {
             "status": "review_pending",
             "review_count": REVIEW_ROW_COUNT,
             "test_split_sha256": store.test_split_sha256,
             "blind_review_sha256": _sha256_file(blind_path),
+            "private_manifest_sha256": _sha256_file(private_path),
         }
     if stage == "review_merge":
         try:
@@ -1895,6 +1912,9 @@ def _default_stage_runner(
                 "test_split_sha256": store.test_split_sha256,
                 "blind_review_sha256": (exported or {})["results"][
                     "blind_review_sha256"
+                ],
+                "private_manifest_sha256": (exported or {})["results"][
+                    "private_manifest_sha256"
                 ],
             }
     if stage == "finalize":
