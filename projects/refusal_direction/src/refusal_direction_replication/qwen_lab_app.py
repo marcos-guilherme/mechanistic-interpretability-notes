@@ -27,6 +27,7 @@ from .qwen_lab import (
     LAB_MIN_JLENS_LAYER,
     LAB_MODEL_REVISION,
     LAB_PRESETS,
+    MAX_NEW_TOKENS_LIMIT,
     GenerationEvent,
     GenerationRequest,
     LabCondition,
@@ -1044,7 +1045,7 @@ def build_gradio_app(
                 temperature = gr.Slider(0.0, 2.0, value=0.7, step=0.05, label="Temperatura")
                 top_p = gr.Slider(0.05, 1.0, value=0.95, step=0.05, label="Top-p")
                 seed = gr.Number(value=0, precision=0, label="Seed")
-                max_new_tokens = gr.Slider(1, 256, value=64, step=1, label="Máx. novos tokens")
+                max_new_tokens = gr.Slider(1, MAX_NEW_TOKENS_LIMIT, value=64, step=1, label="Máx. novos tokens")
                 with gr.Row():
                     generate_button = gr.Button("Gerar", variant="primary")
                     stop_button = gr.Button("Interromper")

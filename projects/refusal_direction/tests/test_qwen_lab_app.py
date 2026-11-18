@@ -473,6 +473,14 @@ def test_gradio_pin_version_is_documented() -> None:
     assert GRADIO_PIN_VERSION == "5.49.1"
 
 
+def test_gradio_output_slider_uses_backend_token_limit() -> None:
+    from refusal_direction_replication.qwen_lab import MAX_NEW_TOKENS_LIMIT
+    from refusal_direction_replication.qwen_lab_app import build_gradio_app
+
+    source = inspect.getsource(build_gradio_app)
+    assert "gr.Slider(1, MAX_NEW_TOKENS_LIMIT, value=64" in source
+
+
 def test_pack_generation_outputs_has_fixed_cardinality() -> None:
     pytest.importorskip("gradio")
     from refusal_direction_replication.qwen_lab_app import (
